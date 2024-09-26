@@ -192,7 +192,8 @@ void transpose(std::vector<float> input,std::vector<float> &output,int dim0,int 
     }
 }
 
-template <int i, int batchSize, int inFeatures, int outFeatures>
+template <int i, int batchSize, int inFeatures, 
+int outFeatures>
 void FBR(const std::string &layer, std::vector<float> input, std::vector<float> &reluOutput , int param_offset)
 {
     int bOF = batchSize * outFeatures;

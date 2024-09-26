@@ -151,7 +151,7 @@ std::string RV(const std::string& a)
  ****************************************************************************************/
 void LogSoftMax_cpu(std::vector<float> input,
                     std::vector<float> &output,
-                    int L,
+                     int L,
                     int BatchSize = 1)
 {
     // 检验输入输出是否合法

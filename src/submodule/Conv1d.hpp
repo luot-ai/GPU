@@ -4,7 +4,7 @@
 template <int inChannels,
           int outChannels,
           int kSize>
-void Conv1d_CPU(float* input, float* kernel, float* bias, float* output ){
+void Conv1d_CPU(std::vector<float> input, std::vector<float> weights, std::vector<float> bias, std::vector<float> &output ){
 
 }
 

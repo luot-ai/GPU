@@ -1,7 +1,9 @@
 #ifndef RELU_HPP
 #define RELU_HPP
 
-void ReLU(float* input, float* output){
+template <int size>
+void ReLU_CPU(std::vector<float> input,
+              std::vector<float> &output){
 
 }
 

@@ -58,7 +58,6 @@ std::vector<float> read_param(const std::string& filepath) {
 
 void read_params(std::string dir) {
     // std::string dir = "."; // 当前目录
-    std::map<std::string, std::vector<float>> params;
 
     // 获取目录中的所有 .txt 文件
     std::vector<std::string> param_files = get_files_in_directory(dir);
@@ -192,9 +191,9 @@ void transpose(std::vector<float> input,std::vector<float> &output,int dim0,int 
     }
 }
 
-template <int i, int batchSize, int inFeatures, 
-int outFeatures>
-void FBR(const std::string &layer, std::vector<float> input, std::vector<float> &reluOutput , int param_offset)
+
+void FBR(int i, int batchSize, int inFeatures, 
+int outFeatures,const std::string &layer, std::vector<float> input, std::vector<float> &reluOutput , int param_offset)
 {
     int bOF = batchSize * outFeatures;
     std::vector<float> fc(bOF);
@@ -204,28 +203,27 @@ void FBR(const std::string &layer, std::vector<float> input, std::vector<float> 
     std::string biStr = std::to_string(i+param_offset);
     std::string fcStr = layer + "fc" + fiStr;
     std::string bnStr = layer + "bn" + biStr;
-    Linear_CPU<inFeatures, outFeatures>(params[fcStr + ".weight"], params[fcStr + ".bias"], input, fc);
-    BatchNorm1d_CPU<outFeatures, batchSize, 1>(params[bnStr + ".weights"], params[bnStr + ".bias"], params[RM(bnStr)], params[RV(bnStr)], fc, bn);
-    ReLU_CPU<bOF>(bn, reluOutput);
+    Linear_CPU(inFeatures, outFeatures,params[fcStr + ".weight"], params[fcStr + ".bias"], input, fc);
+    BatchNorm1d_CPU(outFeatures, batchSize, 1,params[bnStr + ".weight"], params[bnStr + ".bias"], params[RM(bnStr)], params[RV(bnStr)], fc, bn);
+    ReLU_CPU(bOF,bn, reluOutput);
 }
 
-template <int OC1,int OC2,int OC3,int batchSize,int inChannels>
-void FBR_2_F(const std::string& layer, std::vector<float> input, std::vector<float> &output,int param_offset=3)
+void FBR_2_F(int OC1,int OC2,int OC3,int batchSize,int inChannels,const std::string& layer, std::vector<float> input, std::vector<float> &output,int param_offset=3)
 {
     std::vector<float> relu1_output(batchSize*OC1);
     std::vector<float> relu2_output(batchSize*OC2);
 
-    FBR<1,batchSize,inChannels,OC1>(layer,input,relu1_output,param_offset);
-    FBR<2,batchSize,OC1,OC2>(layer,relu1_output,relu2_output,param_offset);
+    FBR(1,batchSize,inChannels,OC1,layer,input,relu1_output,param_offset);
+    FBR(2,batchSize,OC1,OC2,layer,relu1_output,relu2_output,param_offset);
 
     std::string iStr = std::to_string(3);
     std::string fcStr = layer + "fc" + iStr;
-    Linear_CPU<OC2, OC3>(params[fcStr + ".weight"], params[fcStr + ".bias"], relu2_output, output);
+    Linear_CPU(OC2, OC3,params[fcStr + ".weight"], params[fcStr + ".bias"], relu2_output, output);
 }
 
-template <int i, int batchSize, int numPoints, int inChannels, int OC>
-void CBR(const std::string &layer, std::vector<float> input, std::vector<float> &reluOutput)
+void CBR(int i, int batchSize, int numPoints, int inChannels, int OC,const std::string &layer, std::vector<float> input, std::vector<float> &reluOutput)
 {
+    std::cout << "CBR" << std::endl;
     int bnOC = batchSize * numPoints * OC;
     std::vector<float> conv(bnOC);
     std::vector<float> bn(bnOC, 0);
@@ -233,54 +231,54 @@ void CBR(const std::string &layer, std::vector<float> input, std::vector<float> 
     std::string iStr = std::to_string(i);
     std::string convStr = layer + "conv" + iStr;
     std::string bnStr = layer + "bn" + iStr;
+    std::cout << convStr  << std::endl;
 
-    Conv1d_CPU<inChannels, OC, 1>(input, params[convStr + ".weights"], params[convStr + ".bias"], conv);
-    BatchNorm1d_CPU<OC, batchSize, numPoints>(params[bnStr + ".weights"], params[bnStr + ".bias"], params[RM(bnStr)], params[RV(bnStr)],conv,bn);
-    ReLU_CPU<bnOC>(bn,reluOutput);
+    Conv1d_CPU(numPoints,inChannels, OC, 1,input, params[convStr + ".weight"], params[convStr + ".bias"], conv);
+    BatchNorm1d_CPU(OC, batchSize, numPoints,params[bnStr + ".weight"], params[bnStr + ".bias"], params[RM(bnStr)], params[RV(bnStr)],conv,bn);
+    ReLU_CPU(bnOC,bn,reluOutput);
+    
 }
 
-template <int OC1,int OC2,int OC3,int batchSize,int numPoints,int inChannels>
-void CBR_3 (const std::string& layer, std::vector<float> input, std::vector<float> &output) {
+void CBR_3 (int OC1,int OC2,int OC3,int batchSize,int numPoints,int inChannels,const std::string& layer, std::vector<float> input, std::vector<float> &output) {
 
+    std::cout << "CBR_3" << std::endl;
     int bn = batchSize * numPoints;
     std::vector<float> relu1_output(bn*OC1);
     std::vector<float> relu2_output(bn*OC2);
-    CBR<1,batchSize,numPoints,inChannels,OC1>(layer,input,relu1_output);
-    CBR<2,batchSize,numPoints,OC1,OC2>(layer,relu1_output,relu2_output);
-    CBR<3,batchSize,numPoints,OC2,OC3>(layer,relu2_output,output);
-    return 0;
+    CBR(1,batchSize,numPoints,inChannels,OC1,layer,input,relu1_output);
+    CBR(2,batchSize,numPoints,OC1,OC2,layer,relu1_output,relu2_output);
+    CBR(3,batchSize,numPoints,OC2,OC3,layer,relu2_output,output);
+
 }
 
-template <int inChannels, int batchSize, int numPoints>
-void STN3d (float* x) {
+// void STN3d (int inChannels, int batchSize, int numPoints,float* x) {
 
-    conv1d_gpu<inChannels, 64, 1>(d_conv1_weight, d_conv1_bias, d_input_transpose, feat_stn_conv1_output, num_points);
-   //(conv1): Conv1d(3, 64, kernel_size=(1,), stride=(1,))
-    int stnConv1OutChannels = 64 ;
-    float *stnConv1Weights;
-    float *stnConv1Bias;
-    float *stnConv1Output;
+//     conv1d_gpu<inChannels, 64, 1>(d_conv1_weight, d_conv1_bias, d_input_transpose, feat_stn_conv1_output, num_points);
+//    //(conv1): Conv1d(3, 64, kernel_size=(1,), stride=(1,))
+//     int stnConv1OutChannels = 64 ;
+//     float *stnConv1Weights;
+//     float *stnConv1Bias;
+//     float *stnConv1Output;
 
-    std::vector<float> conv1_weight = params["feat.stn.conv1.weight"];
-    std::vector<float> conv1_bias = params["feat.stn.conv1.bias"];
+//     std::vector<float> conv1_weight = params["feat.stn.conv1.weight"];
+//     std::vector<float> conv1_bias = params["feat.stn.conv1.bias"];
 
-    cudaMalloc((void **)&stnConv1Weights, stnConv1OutChannels * inChannels * sizeof(float));
-    cudaMalloc((void **)&stnConv1Bias, stnConv1OutChannels * sizeof(float));
-    cudaMalloc((void **)&stnConv1Output, batchSize * numPoints * stnConv1OutChannels * sizeof(float));
+//     cudaMalloc((void **)&stnConv1Weights, stnConv1OutChannels * inChannels * sizeof(float));
+//     cudaMalloc((void **)&stnConv1Bias, stnConv1OutChannels * sizeof(float));
+//     cudaMalloc((void **)&stnConv1Output, batchSize * numPoints * stnConv1OutChannels * sizeof(float));
 
 
-    cudaMemcpy(d_conv1_weight, conv1_weight.data(), 64 * InputChannel * sizeof(float), cudaMemcpyHostToDevice);
-    cudaMemcpy(d_conv1_bias, conv1_bias.data(), 64 * sizeof(float), cudaMemcpyHostToDevice);
-    conv1d_gpu<InputChannel, 64, 1>(d_conv1_weight, d_conv1_bias, d_input_transpose, feat_stn_conv1_output, num_points);
-    cudaDeviceSynchronize();
-    cudaFree(d_conv1_weight);
-    cudaFree(d_conv1_bias);
-    cudaFree(d_input_transpose);
-    print_vector_gpu(feat_stn_conv1_output, "feat_stn_conv1_output");
-}
+//     cudaMemcpy(d_conv1_weight, conv1_weight.data(), 64 * InputChannel * sizeof(float), cudaMemcpyHostToDevice);
+//     cudaMemcpy(d_conv1_bias, conv1_bias.data(), 64 * sizeof(float), cudaMemcpyHostToDevice);
+//     conv1d_gpu<InputChannel, 64, 1>(d_conv1_weight, d_conv1_bias, d_input_transpose, feat_stn_conv1_output, num_points);
+//     cudaDeviceSynchronize();
+//     cudaFree(d_conv1_weight);
+//     cudaFree(d_conv1_bias);
+//     cudaFree(d_input_transpose);
+//     print_vector_gpu(feat_stn_conv1_output, "feat_stn_conv1_output");
+// }
 
-template <int channels, int batchSize, int numPoints>
-void MaxPooling(std::vector<float> input, std::vector<float> &output)
+void MaxPooling(int channels, int batchSize, int numPoints,std::vector<float> input, std::vector<float> &output)
 {
 
 }
@@ -288,9 +286,10 @@ void MaxPooling(std::vector<float> input, std::vector<float> &output)
 
 std::vector<int> Inference_CPU (int inChannels,
             int batchSize,
-            int numPoints,float* input,std::vector<float> &output) {
+            int numPoints,std::vector<float> input,std::vector<float> &output) {
     //--Encoder
     //------STN3d
+    std::cout << "------start STN3d" << std::endl;
     int bn = batchSize * numPoints;
     int OC1 = 64;
     int OC2 = 128;
@@ -302,9 +301,9 @@ std::vector<int> Inference_CPU (int inChannels,
     std::vector<float> maxp_output(batchSize * OC3);
     std::vector<float> FBR2F_output(batchSize * FC_OC3);//batchSize * inchannel(3) * 3
     std::vector<float> STN_trans(batchSize * FC_OC3);
-    CBR_3<OC1,OC2,OC3, batchSize, numPoints,inChannels>("feat.stn.", input, CBR3_output);   // conv-bn-relu * 3
-    MaxPooling<OC3, batchSize, numPoints>(CBR3_output, maxp_output); // Max pooling
-    FBR_2_F<FC_OC1,FC_OC2,FC_OC3,batchSize,OC3>("feat.stn.",maxp_output,FBR2F_output);// fc-bn-relu * 2 + fc
+    CBR_3(OC1,OC2,OC3, batchSize, numPoints,inChannels,"feat.stn.", input, CBR3_output);   // conv-bn-relu * 3
+    MaxPooling(OC3, batchSize, numPoints,CBR3_output, maxp_output); // Max pooling
+    FBR_2_F(FC_OC1,FC_OC2,FC_OC3,batchSize,OC3,"feat.stn.",maxp_output,FBR2F_output);// fc-bn-relu * 2 + fc
     // FBR2F_output + I
     std::vector<float> I(batchSize * FC_OC3, 0);
     for (int i = 0; i < batchSize; i++)
@@ -319,6 +318,7 @@ std::vector<int> Inference_CPU (int inChannels,
         }
     }
     //------TRANS->BMM->TRANS->CBR
+    std::cout << "PART 2" << std::endl;
     int encoderIC1 = inChannels;
     int fstn_inChannel = 64;//encoderOC1
     std::vector<float> input_trans(bn * inChannels);
@@ -328,8 +328,9 @@ std::vector<int> Inference_CPU (int inChannels,
     transpose(input,input_trans,batchSize,inChannels,numPoints);
     Bmm_cpu(input_trans,STN_trans,bmm1_res,numPoints,inChannels,inChannels,encoderIC1,batchSize);
     transpose(bmm1_res,bmm1_res_trans,batchSize,numPoints,encoderIC1);
-    CBR<1,batchSize,numPoints,encoderIC1,fstn_inChannel>("feat.",bmm1_res_trans,fstn_input);
+    CBR(1,batchSize,numPoints,encoderIC1,fstn_inChannel,"feat.",bmm1_res_trans,fstn_input);
     //------STNkd
+    std::cout << "STNkd" << std::endl;
     int fstn_OC1 = 64;
     int fstn_OC2 = 128;
     int fstn_OC3 = 1024;
@@ -340,15 +341,16 @@ std::vector<int> Inference_CPU (int inChannels,
     std::vector<float> fstn_maxp_output(batchSize * fstn_OC3);
     std::vector<float> fstn_FBR2F_output(batchSize * fstn_FC_OC3);//batchSize * inchannel(3) * 3
     std::vector<float> FSTN_trans(batchSize * fstn_FC_OC3);
-    CBR_3<fstn_OC1,fstn_OC2,fstn_OC3, batchSize, numPoints,fstn_inChannel>("feat.fstn.", fstn_input, fstn_CBR3_output);   // conv-bn-relu * 3
-    MaxPooling<fstn_OC3, batchSize, numPoints>(fstn_CBR3_output, fstn_maxp_output); // Max pooling
-    FBR_2_F<fstn_OC1,fstn_OC2,fstn_OC3,batchSize,fstn_OC3>("feat.fstn.",fstn_maxp_output,fstn_FBR2F_output);// fc-bn-relu * 2 + fc
+    CBR_3(fstn_OC1,fstn_OC2,fstn_OC3, batchSize, numPoints,fstn_inChannel,"feat.fstn.", fstn_input, fstn_CBR3_output);   // conv-bn-relu * 3
+    MaxPooling(fstn_OC3, batchSize, numPoints,fstn_CBR3_output, fstn_maxp_output); // Max pooling
+    FBR_2_F(fstn_FC_OC1,fstn_FC_OC2,fstn_FC_OC3,batchSize,fstn_OC3,"feat.fstn.",fstn_maxp_output,fstn_FBR2F_output);// fc-bn-relu * 2 + fc
     for (int i = 0; i < batchSize; ++i) {
         for (int j = 0; j < fstn_FC_OC3; ++j) {
             FSTN_trans[i * fstn_FC_OC3 + j] += (j % (fstn_inChannel + 1) == 0) ? 1.0f : 0.0f; // 适应 channel 数量
         }
     }
     //------TRANS->BMM->TRANS->CBR
+    std::cout << "PART 4" << std::endl;
     int encoderOC2 = 128;
     std::vector<float> fstn_input_trans(bn * fstn_inChannel);
     std::vector<float> fstn_bmm1_res(batchSize * numPoints * fstn_inChannel);
@@ -357,7 +359,7 @@ std::vector<int> Inference_CPU (int inChannels,
     transpose(fstn_input,fstn_input_trans,batchSize,fstn_inChannel,numPoints);
     Bmm_cpu(fstn_input_trans,FSTN_trans,fstn_bmm1_res,numPoints,fstn_inChannel,fstn_inChannel,fstn_inChannel,batchSize);
     transpose(fstn_bmm1_res,fstn_bmm1_res_trans,batchSize,numPoints,fstn_inChannel);
-    CBR<2,batchSize,numPoints,fstn_inChannel,encoderOC2>("feat.",fstn_bmm1_res_trans,cbr2_output);
+    CBR(2,batchSize,numPoints,fstn_inChannel,encoderOC2,"feat.",fstn_bmm1_res_trans,cbr2_output);
     //------CB MAX
     int encoderOC3 = 1024;
     int bnEOC3 = batchSize * numPoints * encoderOC3;
@@ -366,15 +368,16 @@ std::vector<int> Inference_CPU (int inChannels,
     std::vector<float> encoder_output(batchSize * encoderOC3);
     std::string convStr = "feat.conv3";
     std::string bnStr = "feat.bn3";
-    Conv1d_CPU<encoderOC2, encoderOC3, 1>(cbr2_output, params[convStr + ".weights"], params[convStr + ".bias"], feat_conv3);
-    BatchNorm1d_CPU<encoderOC3, batchSize, numPoints>(params[bnStr + ".weights"], params[bnStr + ".bias"], params[RM(bnStr)], params[RV(bnStr)],feat_conv3,feat_bn3);
-    MaxPooling<encoderOC3, batchSize, numPoints>(feat_bn3, encoder_output); // Max pooling
+    Conv1d_CPU(numPoints,encoderOC2, encoderOC3, 1,cbr2_output, params[convStr + ".weight"], params[convStr + ".bias"], feat_conv3);
+    BatchNorm1d_CPU(encoderOC3, batchSize, numPoints,params[bnStr + ".weight"], params[bnStr + ".bias"], params[RM(bnStr)], params[RV(bnStr)],feat_conv3,feat_bn3);
+    MaxPooling(encoderOC3, batchSize, numPoints,feat_bn3, encoder_output); // Max pooling
     
     //--CLASSIFY
+    std::cout << "CLASSIFY" << std::endl;
     std::vector<float> softmax_input(batchSize*10);
-    FBR_2_F<512,256,10,batchSize,encoderOC3>(".",encoder_output,softmax_input,0);// fc-bn-relu * 2 + fc
+    FBR_2_F(512,256,10,batchSize,encoderOC3,".",encoder_output,softmax_input,0);// fc-bn-relu * 2 + fc
     std::vector<float> softmax_output(batchSize * 10);
-    LogSoftMax_CPU(softmax_input, softmax_output, 10 , batchSize);
+    LogSoftMax_cpu(softmax_input, softmax_output, 10 , batchSize);
     
     std::vector<int> result(batchSize);
     {
@@ -421,11 +424,11 @@ int main(int argc, char *argv[]) {
         // TODO ...在这里实现利用CUDA对点云数据进行深度学习的推理过程，当然，你也可以改进for循环以使用batch推理提速...
 		// 打印每一帧的数据，仅用于调试！
     
-        // std::cout << "Points " << i << ": ";
-        // // for (const auto& point : list_of_points[i]) {
-        // //     std::cout << point << " ";
-        // // }
-        // std::cout << "\nLabel: " << list_of_labels[i] << std::endl;
+        std::cout << "Points " << i << ": ";
+        // for (const auto& point : list_of_points[i]) {
+        //     std::cout << point << " ";
+        // }
+        std::cout << "\nLabel: " << list_of_labels[i] << std::endl;
 
         size_t curB = (batchSize < list_of_points.size() - i) ? batchSize : list_of_points.size() - i;
         // 该batch中最小的点的大小（N最小）
@@ -454,13 +457,13 @@ int main(int argc, char *argv[]) {
         std::vector<float> input_trans(curB * min_width * channel);
         transpose(input, input_trans, curB, min_width, channel);
         std::vector<int> result(curB,0);
-        result=Inference_CPU(channel,curB,min_width,input_trans, final_x);
+        result=Inference_CPU(channel,curB,min_width, input_trans,final_x);
 
         for (int b = 0; b < curB; ++b)
         {
             correct_num += (result[b] == list_of_labels[i + b]);
             if (result[b] == list_of_labels[i + b])
-                printf("%d\n", i + b);
+                std::cout << (i + b) << std::endl;
         }
     }
 
@@ -474,7 +477,7 @@ int main(int argc, char *argv[]) {
     std::chrono::duration<double> diff = end - start;
 
     // 输出结果，请严格保持此输出格式，并把0.0001替换成实际的准确率，请不要输出除了此结果之外的任何内容！！！
-    std::cout << std::fixed << std::setprecision(4) << diff.count() << ":0.0001";
+    std::cout << std::fixed << std::setprecision(4) << diff.count() << correct_rate;
 
     return 0;
 }

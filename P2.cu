@@ -1,5 +1,5 @@
 // 这是程序二的模板程序，我们已经准备好了加载数据集和加载程序一模型参数的部分，请实现CUDA的深度学习推理过程，请严格保持输出格式输出
-// 编译的命令为：nvcc test.cu -o test -Xcompiler "-O3 -std=c++14" -gencode arch=compute_50,code=sm_50 -gencode arch=compute_52,code=sm_52 -gencode arch=compute_53,code=sm_53 -gencode arch=compute_60,code=sm_60 -gencode arch=compute_61,code=sm_61 -gencode arch=compute_62,code=sm_62 -gencode arch=compute_70,code=sm_70 -lhdf5 -lhdf5_cpp
+// 编译的命令为：nvcc P2.cu -o P2 -I./src/submodule -Xcompiler "-O3 -std=c++14" -gencode arch=compute_50,code=sm_50 -gencode arch=compute_52,code=sm_52 -gencode arch=compute_53,code=sm_53 -gencode arch=compute_60,code=sm_60 -gencode arch=compute_61,code=sm_61 -gencode arch=compute_62,code=sm_62 -gencode arch=compute_70,code=sm_70 -lhdf5 -lhdf5_cpp
 
 #include <iostream>
 #include <vector>
@@ -151,8 +151,8 @@ std::string RV(const std::string& a)
  ****************************************************************************************/
 void LogSoftMax_cpu(std::vector<float> input,
                     std::vector<float> &output,
-                     int L,
-                    int BatchSize = 1)
+                    int L,
+                    int BatchSize = 32)
 {
     // 检验输入输出是否合法
     if (input.size() != L * BatchSize)
@@ -285,10 +285,10 @@ void MaxPooling(std::vector<float> input, std::vector<float> &output)
 
 }
 
-template <int inChannels,
+
+std::vector<int> Inference_CPU (int inChannels,
             int batchSize,
-            int numPoints>
-std::vector<int> Inference_CPU (float* input,std::vector<float> &output) {
+            int numPoints,float* input,std::vector<float> &output) {
     //--Encoder
     //------STN3d
     int bn = batchSize * numPoints;
@@ -427,21 +427,21 @@ int main(int argc, char *argv[]) {
         // // }
         // std::cout << "\nLabel: " << list_of_labels[i] << std::endl;
 
-        size_t curL = (batchSize < list_of_points.size() - i) ? batchSize : list_of_points.size() - i;
+        size_t curB = (batchSize < list_of_points.size() - i) ? batchSize : list_of_points.size() - i;
         // 该batch中最小的点的大小（N最小）
         int min_width = list_of_points[i].size() / channel;
-        for (int j = 0; j < curL; j++) // 遍历一个batch里的点
+        for (int j = 0; j < curB; j++) // 遍历一个batch里的点
         {
             min_width = (list_of_points[i + j].size() / channel < min_width) ? list_of_points[i + j].size() / channel : min_width;
         }
         // 进行截断
 
-        std::vector<float> input(curL * min_width * channel);
-        std::vector<float> trans(curL * channel * channel);
-        std::vector<float> trans_feat(curL * 64 * 64);
-        std::vector<float> final_x(curL * 10);
+        std::vector<float> input(curB * min_width * channel);
+        std::vector<float> trans(curB * channel * channel);
+        std::vector<float> trans_feat(curB * 64 * 64);
+        std::vector<float> final_x(curB * 10);
 
-        for (int b = 0; b < curL; ++b)
+        for (int b = 0; b < curB; ++b)
         {
             for (int w = 0; w < min_width; ++w)
             {
@@ -451,29 +451,21 @@ int main(int argc, char *argv[]) {
                 }
             }
         }
-        std::vector<float> input_trans(curL * min_width * channel);
-        transpose(input.data(), input_trans.data(), curL, min_width, channel);
+        std::vector<float> input_trans(curB * min_width * channel);
+        transpose(input, input_trans, curB, min_width, channel);
+        std::vector<int> result(curB,0);
+        result=Inference_CPU(channel,curB,min_width,input_trans, final_x);
 
-        get_model(input_trans.data(), curL, channel, min_width, trans.data(), trans_feat.data(), final_x.data());
-
-        for (int b = 0; b < curL; ++b)
+        for (int b = 0; b < curB; ++b)
         {
-            int max_index = 0;
-            float max = -FLT_MAX;
-            for (int index = 0; index < 10; index++)
-            {
-                if (final_x[b * 10 + index] > max)
-                {
-                    max_index = index;
-                    max = final_x[b * 10 + index];
-                }
-            }
-            correct_num += (max_index == list_of_labels[i + b]);
-            if (max_index == list_of_labels[i + b])
+            correct_num += (result[b] == list_of_labels[i + b]);
+            if (result[b] == list_of_labels[i + b])
                 printf("%d\n", i + b);
         }
     }
-	
+
+	float correct_rate = (float)correct_num/(float)list_of_labels.size();
+
 	// 向主机端同步以等待所有异步调用的GPU kernel执行完毕，这句必须要有
 	cudaDeviceSynchronize();
 

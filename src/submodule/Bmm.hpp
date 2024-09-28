@@ -28,6 +28,7 @@ void Bmm_cpu(
         throw "Bmm_cpu output size error";
     }
 
+    std::cout << "--------BMM" << std::endl;
     for (int iter_batch = 0; iter_batch < BatchSize; iter_batch++)
     {
         for (int iter_M_A = 0; iter_M_A < M_A; iter_M_A++)

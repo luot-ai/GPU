@@ -1,0 +1,67 @@
+
+conv:   [3,13]->[64,13]->[128,13]->[1024,13]                                [3,13]->[64,13]    
+bn:             [64,13]     [128,13]    [1024,13]       [512,1]     [256,1]         [64,13]       
+relu:           [64,13]     [128,13]    [1024,13]       [512,1]     [256,1]         [64,13]   
+max:                                    [1024,13->1]
+fc:                                     [1024->512,1]   [512->256,1]    [256->9,1]
+bmm:                                                                    [13,3 * 3,3= 13,3]
+
+conv:   [64,13]->[64,13]->[128,13]->[1024,13]                                [64,13]->[128,13]->[1024,13]    
+bn:              [64,13]     [128,13]    [1024,13]       [512,1]     [256,1]          [128,13]  [1024,13]       
+relu:            [64,13]     [128,13]    [1024,13]       [512,1]     [256,1]          [128,13]   
+max:                                     [1024,13->1]                                           [1024,13->1]
+fc:                                      [1024->512,1]   [512->256,1]    [256->64*64,1]
+bmm:                                                                     [13,64 * 64,64= 13,64]
+
+fc: [1024->512,1]   [512->256,1]    [256->10,1]
+bn:         [512,1]     [256,1]
+relu:       [512,1]     [256,1]
+
+
+
+
+get_model(
+  (feat): PointNetEncoder(
+    (stn): STN3d(
+      (conv1): Conv1d(3, 64, kernel_size=(1,), stride=(1,))
+      (conv2): Conv1d(64, 128, kernel_size=(1,), stride=(1,))
+      (conv3): Conv1d(128, 1024, kernel_size=(1,), stride=(1,))
+      (fc1): Linear(in_features=1024, out_features=512, bias=True)
+      (fc2): Linear(in_features=512, out_features=256, bias=True)
+      (fc3): Linear(in_features=256, out_features=9, bias=True)
+      (relu): ReLU()
+      (bn1): BatchNorm1d(64, eps=1e-05, momentum=0.1, affine=True, track_running_stats=True)
+      (bn2): BatchNorm1d(128, eps=1e-05, momentum=0.1, affine=True, track_running_stats=True)
+      (bn3): BatchNorm1d(1024, eps=1e-05, momentum=0.1, affine=True, track_running_stats=True)
+      (bn4): BatchNorm1d(512, eps=1e-05, momentum=0.1, affine=True, track_running_stats=True)
+      (bn5): BatchNorm1d(256, eps=1e-05, momentum=0.1, affine=True, track_running_stats=True)
+    )
+    (conv1): Conv1d(3, 64, kernel_size=(1,), stride=(1,))
+    (conv2): Conv1d(64, 128, kernel_size=(1,), stride=(1,))
+    (conv3): Conv1d(128, 1024, kernel_size=(1,), stride=(1,))
+    (bn1): BatchNorm1d(64, eps=1e-05, momentum=0.1, affine=True, track_running_stats=True)
+    (bn2): BatchNorm1d(128, eps=1e-05, momentum=0.1, affine=True, track_running_stats=True)
+    (bn3): BatchNorm1d(1024, eps=1e-05, momentum=0.1, affine=True, track_running_stats=True)
+    (fstn): STNkd(
+      (conv1): Conv1d(64, 64, kernel_size=(1,), stride=(1,))
+      (conv2): Conv1d(64, 128, kernel_size=(1,), stride=(1,))
+      (conv3): Conv1d(128, 1024, kernel_size=(1,), stride=(1,))
+      (fc1): Linear(in_features=1024, out_features=512, bias=True)
+      (fc2): Linear(in_features=512, out_features=256, bias=True)
+      (fc3): Linear(in_features=256, out_features=4096, bias=True)
+      (relu): ReLU()
+      (bn1): BatchNorm1d(64, eps=1e-05, momentum=0.1, affine=True, track_running_stats=True)
+      (bn2): BatchNorm1d(128, eps=1e-05, momentum=0.1, affine=True, track_running_stats=True)
+      (bn3): BatchNorm1d(1024, eps=1e-05, momentum=0.1, affine=True, track_running_stats=True)
+      (bn4): BatchNorm1d(512, eps=1e-05, momentum=0.1, affine=True, track_running_stats=True)
+      (bn5): BatchNorm1d(256, eps=1e-05, momentum=0.1, affine=True, track_running_stats=True)
+    )
+  )
+  (fc1): Linear(in_features=1024, out_features=512, bias=True)
+  (fc2): Linear(in_features=512, out_features=256, bias=True)
+  (fc3): Linear(in_features=256, out_features=10, bias=True)
+  (dropout): Dropout(p=0.4, inplace=False)
+  (bn1): BatchNorm1d(512, eps=1e-05, momentum=0.1, affine=True, track_running_stats=True)
+  (bn2): BatchNorm1d(256, eps=1e-05, momentum=0.1, affine=True, track_running_stats=True)
+  (relu): ReLU()
+)

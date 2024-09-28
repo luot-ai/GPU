@@ -284,6 +284,9 @@ void CBR_3 (int OC1,int OC2,int OC3,int batchSize,int numPoints,int inics,const 
     //printVector<int>(output);
 }
 
+
+
+
 void MaxPooling(int ics, int batchSize, int numPoints,std::vector<float> input, std::vector<float> &output)
 {
     std::cout << "----START MAXPOOLING" << std::endl;
@@ -725,7 +728,8 @@ int main(int argc, char *argv[]) {
     int correct_num =0;
 
     // 开始计时，使用chrono计时，不支持其它计时方式
-    for (size_t i = 0; i < list_of_points[i].size(); i+=batchSize) {
+    std::cout << "total :" << list_of_labels.size() << std::endl;
+    for (size_t i = 0; i < list_of_points.size(); i+=batchSize) {
 
         std::cout << "ITERATION: " << i << ": ";
 
@@ -739,7 +743,7 @@ int main(int argc, char *argv[]) {
             np = (list_of_points[i + j].size() / ic < np) ? list_of_points[i + j].size() / ic : np;
         }
 
-        // 进行截断
+        std::cout << "CUTOFF INPUT: " << i << ": " <<std::endl;;
         std::vector<float> input(curB * np * ic);
         std::vector<float> trans(curB * ic * ic);
         std::vector<float> trans_feat(curB * 64 * 64);
@@ -768,7 +772,8 @@ int main(int argc, char *argv[]) {
             if (result[b] == list_of_labels[i + b])
                 std::cout << (i + b) << std::endl;
         }
-        std::cout << "iter :" << i << " correct_num :" << correct_num << " iter_batchsize :" << curB << std::endl;
+        std::cout << "END INFERENCE:: iter :" << i << " correct_num :" << correct_num << " iter_batchsize :" << curB << std::endl;
+        std::cout << "total :" << list_of_labels.size() << std::endl;
         //printVector<int> (result);
     }
     std::cout << "total :" << list_of_labels.size() << std::endl;

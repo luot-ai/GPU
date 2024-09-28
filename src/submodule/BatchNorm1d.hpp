@@ -12,23 +12,26 @@ void BatchNorm1d_CPU(int numFeatures, int batchSize, int numPoints,std::vector<f
     // Input: (BatchSize, numFeatures, numPoints)
     // Output: (BatchSize, numFeatures, numPoints)
     // 检验输入输出是否合法
-    int L = numPoints;
-    if (input.size() != L * numFeatures)
+    std::cout << "------------LAYER:batchnorm" << std::endl;
+    if (input.size() != batchSize * numPoints * numFeatures)
     {
         throw "BatchNorm1d_cpu input size error";
     }
 
-    for (int ic = 0; ic < numFeatures; ic++)
+    for(int b=0;b<batchSize;b++)
     {
-        float mean = running_mean[ic];
-        float var = running_var[ic];
-        for (int n = 0; n < L; n++)
+        for (int ic = 0; ic < numFeatures; ic++)
         {
-            output[n + ic * L] =
-                (input[n + ic * L] - mean) / sqrt(var + esp) * weight[ic] + bias[ic];
+            float mean = running_mean[ic];
+            float var = running_var[ic];
+            for (int n = 0; n < numPoints; n++)
+            {
+                output[b * numFeatures * numPoints + n + ic * numPoints] =
+                    (input[b * numFeatures * numPoints + n + ic * numPoints] - mean) / sqrt(var + esp) * weight[ic] + bias[ic];
+            }
         }
     }
-    std::cout << "bn done" << std::endl;
+    //std::cout << "bn done" << std::endl;
 }
 
 #endif 

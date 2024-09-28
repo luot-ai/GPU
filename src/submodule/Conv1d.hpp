@@ -2,29 +2,29 @@
 #define CONV1D_HPP
 
 
-void Conv1d_CPU(int numPoints,int inChannels,
+void Conv1d_CPU(int batchSize,int numPoints,int inChannels,
           int outChannels,
           int kSize,std::vector<float> input, std::vector<float> weights, std::vector<float> bias, std::vector<float> &output ){
     int L=numPoints;
-    std::cout << "conv begin" << std::endl;
-    std::cout << "WIDTH: " << numPoints << ", IC: " << inChannels << ", OC: " << outChannels << std::endl;
-    std::cout << "isize: " << input.size() << ", wsize: " << weights.size() << ", bsize: " << bias.size() << ", osize: " << output.size() << std::endl;
-    for (int oc = 0; oc < outChannels; oc++)
+    std::cout << "------------LAYER:convolution" << std::endl;
+    // std::cout << "WIDTH: " << numPoints << ", IC: " << inChannels << ", OC: " << outChannels << std::endl;
+    // std::cout << "isize: " << input.size() << ", wsize: " << weights.size() << ", bsize: " << bias.size() << ", osize: " << output.size() << std::endl;
+    for (int b = 0; b<batchSize; b++)
     {
-        for (int n = 0; n < L; n++)
+        for (int oc = 0; oc < outChannels; oc++)
         {
-            output[n + oc * L] = bias[oc];
-            //std::cout << "bias" << n  << std::endl;
-            for (int ic = 0; ic < inChannels; ic++)
+            for (int n = 0; n < L; n++)
             {
-                output[oc * L + n] +=
-                    input[ic * L + n] *
-                    weights[ic + oc * inChannels];
+                output[n + oc * L + b * L *outChannels] = bias[oc];
+                for (int ic = 0; ic < inChannels; ic++)
+                {
+                    output[n + oc * L + b * L *outChannels] +=
+                        input[ic * L + n + b * L * inChannels] *
+                        weights[ic + oc * inChannels];
+                }
             }
-            //std::cout << "madd" << std::endl;
         }
     }
-    std::cout << "conv done" << std::endl;
 }
 
 template <int inChannels,

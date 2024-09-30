@@ -20,7 +20,18 @@
 #include "ReLU.hpp"
 #include "Bmm.hpp"
 #include "compare.hpp"
+#include <cuda_runtime.h>
 
+// 定义一个宏用于检查 CUDA 错误
+#define CUDA_CHECK(call) \
+    do { \
+        cudaError_t err = call; \
+        if(err != cudaSuccess) { \
+            std::cerr << "CUDA Error: " << cudaGetErrorString(err) \
+                      << " (error code " << err << ") at " << __FILE__ << ":" << __LINE__ << std::endl; \
+            exit(EXIT_FAILURE); \
+        } \
+    } while(0)
 
 
 
@@ -160,6 +171,26 @@ void printVector(const std::vector<T>& vec) {
     }
     std::cout << std::endl; // 输出换行
 }
+
+void printVector_GPU(float* vec, int size) {
+    // 在主机端创建一个标准向量以存储从设备复制的数据
+    std::vector<float> vec_cpu(size);
+
+    // 从设备复制数据到主机
+    cudaError_t err = cudaMemcpy(vec_cpu.data(), vec, size * sizeof(float), cudaMemcpyDeviceToHost);
+    if (err != cudaSuccess) {
+        std::cerr << "cudaMemcpy failed: " << cudaGetErrorString(err) << std::endl;
+        return;
+    }
+
+    // 打印向量内容
+    for (const auto& value : vec_cpu) {
+        std::cout << value << " ";
+    }
+    std::cout << std::endl; // 输出换行
+
+}
+
 template <typename T>
 bool compareVectors(const std::vector<T>& vec1, const std::vector<T>& vec2) {
     // 首先比较大小
@@ -178,6 +209,7 @@ bool compareVectors(const std::vector<T>& vec1, const std::vector<T>& vec2) {
     std::cout << "TRUE" << std::endl;
     return true; // 两个向量相等
 }
+
 
 
 /****************************************************************************************
@@ -304,6 +336,559 @@ void MaxPooling(int ics, int batchSize, int numPoints,std::vector<float> input, 
         }
     }
 }
+
+__global__ void Maxpooling_Kernel(float* input,float* output,int numPoints)
+{
+    int tx = threadIdx.x;
+    int bx = blockIdx.x;
+    int idx = tx + bx * blockDim.x;
+
+    if (idx < gridDim.x)
+    {
+        float max_val = -FLT_MAX;
+        for (int n = 0; n < numPoints; n++)
+        {
+            float value = input[idx*numPoints + n];
+            if (value > max_val)
+            {
+                max_val = value;
+            }
+        }
+        output[idx] = max_val;
+    }
+}
+void GPU_MaxPooling(int ics, int batchSize, int numPoints,float* input, float* output)
+{
+    std::cout << "----START MAXPOOLING" << std::endl;
+    dim3 gridDim(ics*batchSize);
+    dim3 blockDim(ics);
+    Maxpooling_Kernel<<<gridDim, blockDim>>>(input, output,numPoints);
+    // 检查内核启动是否成功
+    CUDA_CHECK(cudaGetLastError());
+
+    // 同步设备并检查执行错误
+    CUDA_CHECK(cudaDeviceSynchronize());
+}
+__global__ void BMM_Kernel(float* input_A,float* input_B,float* output,int M_A,int K_A,int K_B,int N_B,int BatchSize)
+{
+    int tx = threadIdx.x;
+    int ty = threadIdx.y;
+    int bx = blockIdx.x;
+    int by = blockIdx.y;
+    int bz = blockIdx.z;
+
+    int idx = tx + bx * blockDim.x;
+    int idy = ty + by * blockDim.y;
+    int idz = bz;
+    int index = idx + idy * M_A + idz * M_A * N_B;
+
+    if (idy < M_A && idx < N_B && idz < BatchSize)
+    {
+        float tmp = 0;
+        for (int k =0;k<K_A;k++)
+        {
+            tmp += input_A[idz * M_A * K_A + idy * K_A + k] * input_B[idz * K_B * N_B + k * N_B + idy];
+        }
+        output[index] = tmp;
+    }
+}
+void GPU_Bmm(float* input_A,float* input_B,float* output,int M_A,int K_A,int K_B,int N_B,int BatchSize = 1)
+{
+    std::cout << "--------BMM" << std::endl;
+
+    const int BLK_X = 32;
+    const int BLK_Y = 32;
+
+    dim3 blockDim(BLK_X, BLK_Y);
+    dim3 gridDim((M_A + BLK_X - 1) / BLK_X, (N_B + BLK_Y - 1) / BLK_Y, BatchSize);
+    BMM_Kernel<<<gridDim, blockDim>>>(input_A, input_B, output, M_A, K_A, K_B, N_B, BatchSize);
+    // 检查内核启动是否成功
+    CUDA_CHECK(cudaGetLastError());
+
+    // 同步设备并检查执行错误
+    CUDA_CHECK(cudaDeviceSynchronize());
+}
+
+__global__ void transpose_Kernel(float* input,float* output,int dim0,int dim1,int dim2)
+{
+    int tx = threadIdx.x;
+    int ty = threadIdx.y;
+    int bx = blockIdx.x;
+    int by = blockIdx.y;
+
+    int idx = tx + bx * blockDim.x;
+    int idy = ty + by * blockDim.y;
+    int index = idx + idy * dim1;
+
+    if (idx < dim1 && idy < dim2)
+    {
+        for (int b=0;b<dim0;b++)
+        {
+            int bdd = b*dim1*dim2;
+            output[bdd+index]=input[bdd+idx*dim2+idy];
+        }
+    }
+}
+void GPU_transpose(float* input,float* output,int dim0,int dim1,int dim2)
+{
+    const int BLK_X = 32;
+    const int BLK_Y = 32;
+
+    dim3 blockDim(BLK_X, BLK_Y);
+    dim3 gridDim((dim1 + BLK_X -1)/BLK_X,  (dim2+BLK_Y-1)/BLK_Y);
+    transpose_Kernel<<<gridDim, blockDim>>>(input,output,dim0,dim1,dim2);
+    // 检查内核启动是否成功
+    CUDA_CHECK(cudaGetLastError());
+
+    // 同步设备并检查执行错误
+    CUDA_CHECK(cudaDeviceSynchronize());
+}
+
+__global__ void linear_Kernel(int inFeatures,float* weight,float* bias,float* input,float* output)
+{
+    int curB = threadIdx.x;
+    int curOC = blockIdx.y;
+    int index = curB + curOC * gridDim.x;
+
+    output[index] = bias[curOC];
+    for (int ic = 0; ic < inFeatures; ic++)
+    {
+        output[index] +=
+            input[curB * inFeatures + ic] *
+            weight[curOC * inFeatures + ic];
+    }
+}
+void Linear_GPU(int batchSize,int inFeatures, int outFeatures,float* weight,float* bias,float* input,float* output){
+
+    float* cudaWeights;
+    float* cudaBias;
+    cudaMalloc((void **)&cudaWeights, inFeatures * outFeatures * sizeof(float));
+    cudaMalloc((void **)&cudaBias, outFeatures * sizeof(float));
+    cudaMemcpy(cudaWeights, weight, inFeatures * outFeatures * sizeof(float), cudaMemcpyHostToDevice);
+    cudaMemcpy(cudaBias, bias, outFeatures * sizeof(float), cudaMemcpyHostToDevice);
+    
+    std::cout << "------------LAYER:linear" << std::endl;
+    dim3 blockDim(batchSize);
+    dim3 gridDim(batchSize,outFeatures);
+    linear_Kernel<<<gridDim,blockDim>>>(inFeatures,cudaWeights,cudaBias,input,output);
+    // 检查内核启动是否成功
+    CUDA_CHECK(cudaGetLastError());
+
+    // 同步设备并检查执行错误
+    CUDA_CHECK(cudaDeviceSynchronize());
+    cudaFree(cudaWeights);
+    cudaFree(cudaBias);
+}
+
+__global__ void ReLu_Kernel(float *input,float *output,int X,int Y)
+{
+    int tx = threadIdx.x;
+    int ty = threadIdx.y;
+    int bx = blockIdx.x;
+    int by = blockIdx.y;
+
+    int idx = tx + bx * blockDim.x;
+    int idy = ty + by * blockDim.y;
+    int index = idx + idy * X;
+
+    if (idx < X && idy < Y)
+    {
+        output[index] = input[index] > 0 ? input[index] : 0;
+    }
+}
+void ReLU_GPU(int X,int Y,float* input,float* output){
+    std::cout << "------------LAYER:relu" << std::endl;
+    const int BLK_X = 32;
+    const int BLK_Y = 32;
+
+    dim3 blockDim(BLK_X, BLK_Y);
+    dim3 gridDim((X + BLK_X - 1) / BLK_X, (Y + BLK_Y - 1) / BLK_Y);
+    ReLu_Kernel<<<gridDim, blockDim>>>(input, output, X,Y);
+    // 检查内核启动是否成功
+    CUDA_CHECK(cudaGetLastError());
+
+    // 同步设备并检查执行错误
+    CUDA_CHECK(cudaDeviceSynchronize());
+}
+
+__global__ void BatchNorm1d_Kernel(int numPoints,float* weight,float* bias,float* running_mean,float* running_var,float* input,float* output,float esp = 1e-5)
+{
+    int tx = threadIdx.x;
+    int bx = blockIdx.x;
+    int idx = tx + bx * blockDim.x;
+    int index = idx;
+
+    if (idx < gridDim.x)
+    {
+        float mean = running_mean[tx];
+        float var = running_var[tx];
+        for (int n = 0; n < numPoints; n++)
+        {
+            int iIdx = index * numPoints + n;
+            output[iIdx] = (input[iIdx] - mean) / sqrt(var + esp) * weight[tx] + bias[tx];
+        }
+    }
+}
+void BatchNorm1d_GPU(int numFeatures, int batchSize, int numPoints,float* weight,float* bias,float* running_mean,float* running_var,float* input,float* output,float esp = 1e-5)
+{
+    float* cudaWeights;
+    float* cudaBias;
+    float* cudaRV;
+    float* cudaRM;
+
+    cudaMalloc((void **)&cudaWeights, numFeatures * sizeof(float));
+    cudaMalloc((void **)&cudaBias, numFeatures * sizeof(float));
+    cudaMalloc((void **)&cudaRV, numFeatures * sizeof(float));
+    cudaMalloc((void **)&cudaRM, numFeatures * sizeof(float));
+
+    cudaMemcpy(cudaWeights, weight, numFeatures * sizeof(float), cudaMemcpyHostToDevice);
+    cudaMemcpy(cudaBias, bias, numFeatures * sizeof(float), cudaMemcpyHostToDevice);
+    cudaMemcpy(cudaRV, running_var, numFeatures * sizeof(float), cudaMemcpyHostToDevice);
+    cudaMemcpy(cudaRM, running_mean, numFeatures * sizeof(float), cudaMemcpyHostToDevice);
+
+    std::cout << "------------LAYER:batchnorm" << std::endl;
+    dim3 blockDim(numFeatures);
+    dim3 gridDim(numFeatures*batchSize);
+    BatchNorm1d_Kernel<<<gridDim, blockDim>>>(numPoints,cudaWeights,cudaBias,cudaRM,cudaRV,input,output);
+
+    cudaFree(cudaWeights);
+    cudaFree(cudaBias);
+    cudaFree(cudaRV);
+    cudaFree(cudaRM);
+    // 检查内核启动是否成功
+    CUDA_CHECK(cudaGetLastError());
+
+    // 同步设备并检查执行错误
+    CUDA_CHECK(cudaDeviceSynchronize());
+}
+
+__global__ void Conv1d_Kernel(int outChannels,int batchSize,int numPoints,int inChannels,float* input, float* weights, float* bias, float* output)
+{
+    int oc = threadIdx.x;
+    int b = blockIdx.x;
+    int index = oc + b * blockDim.x;
+    //printf("index %d\n", index);
+    if(index >= outChannels * batchSize)
+        return ;
+    for (int n=0;n<numPoints;n++)
+    {
+        float res = bias[oc];
+        for (int ic=0;ic<inChannels;ic++ )
+        {
+            res += input[b*inChannels*numPoints+ic*numPoints+n]*weights[oc*inChannels+ic];
+        }
+        output[index*numPoints+n]=res;
+    }
+    // cudaFree(w);
+}
+void Conv1d_GPU(int batchSize,int numPoints,int inChannels,int outChannels,int kSize,float* input, float* weights, float* bias, float* output ){
+    //int L=numPoints;
+    std::cout << "------------LAYER:convolution" << std::endl;
+
+    float* cudaWeights;
+    float* cudaBias;
+    cudaMalloc((void **)&cudaWeights, inChannels * outChannels * sizeof(float));
+    cudaMalloc((void **)&cudaBias, outChannels * sizeof(float));
+    cudaMemcpy(cudaWeights, weights, inChannels * outChannels * sizeof(float), cudaMemcpyHostToDevice);
+    cudaMemcpy(cudaBias, bias, outChannels * sizeof(float), cudaMemcpyHostToDevice);
+
+    dim3 blockDim(outChannels);
+    dim3 gridDim(batchSize);
+    std::cout << "WIDTH: " << numPoints << ", IC: " << inChannels << ", OC: " << outChannels << std::endl;
+    //std::cout << "isize: " << input.size() << ", wsize: " << weights.size() << ", bsize: " << bias.size() << ", osize: " << output.size() << std::endl;
+    Conv1d_Kernel<<<gridDim,blockDim>>>(outChannels,batchSize,numPoints,inChannels,input,cudaWeights,cudaBias,output);
+    //printVector_GPU(output,batchSize*numPoints*outChannels);
+    cudaFree(cudaWeights);
+    cudaFree(cudaBias);
+    // 检查内核启动是否成功
+    CUDA_CHECK(cudaGetLastError());
+
+    // 同步设备并检查执行错误
+    CUDA_CHECK(cudaDeviceSynchronize());
+}
+
+__global__ void LogSoftMax_Kernel(float* input,float* output,int L,int BatchSize = 32)
+{
+    int bx = blockIdx.x;
+    int index = bx;
+    if (index < gridDim.x)
+    {
+        float sum = 0;
+        for (int l = 0; l < L; l++)
+        {
+            int iIdx = l + index * L;
+            input[iIdx] = exp(input[iIdx]);
+            sum += input[iIdx];
+        }
+        for (int l = 0; l < L; l++)
+        {
+            int iIdx = l + index * L;
+            output[iIdx] = log(input[iIdx] / sum);
+        }
+    }
+}
+void LogSoftMax_GPU(float* input,float* output,int L,int BatchSize = 32)
+{   
+    dim3 blockDim(1);
+    dim3 gridDim(BatchSize);
+    LogSoftMax_Kernel<<<gridDim,blockDim>>>(input,output,L,BatchSize);
+    // 检查内核启动是否成功
+    CUDA_CHECK(cudaGetLastError());
+
+    // 同步设备并检查执行错误
+    CUDA_CHECK(cudaDeviceSynchronize());
+}
+
+void GPU_FBR(int i, int batchSize, int inFeatures, 
+int outFeatures,const std::string &layer, float* input, float* reluOutput , int param_offset)
+{
+    std::cout << "--------FBR" << i << std::endl;
+    int bOF = batchSize * outFeatures;
+    float* fc;
+    float* bn;
+    cudaMalloc((void **)&fc, bOF);
+    cudaMalloc((void **)&bn, bOF);
+
+    std::string fiStr = std::to_string(i);
+    std::string biStr = std::to_string(i+param_offset);
+    std::string fcStr = layer + "fc" + fiStr;
+    std::string bnStr = layer + "bn" + biStr;
+    // std::cout << bnStr  << std::endl;
+    Linear_GPU(batchSize,inFeatures, outFeatures,params[fcStr + ".weight"].data(), params[fcStr + ".bias"].data(), input, fc);
+    BatchNorm1d_GPU(outFeatures, batchSize, 1,params[bnStr + ".weight"].data(), params[bnStr + ".bias"].data(), params[RM(bnStr)].data(), params[RV(bnStr)].data(), fc, bn);
+    ReLU_GPU(batchSize,outFeatures,bn, reluOutput);
+
+    cudaFree(fc);
+    cudaFree(bn);
+}
+
+void GPU_FBR_2_F(int OC1,int OC2,int OC3,int batchSize,int inics,const std::string& layer, float* input, float* output,int param_offset=3)
+{
+    std::cout << "----START FBR_2_F" << std::endl;
+    float* relu1_output;
+    float* relu2_output;
+
+    cudaMalloc((void **)&relu1_output, batchSize*OC1);
+    cudaMalloc((void **)&relu2_output, batchSize*OC2);
+
+    GPU_FBR(1,batchSize,inics,OC1,layer,input,relu1_output,param_offset);
+    GPU_FBR(2,batchSize,OC1,OC2,layer,relu1_output,relu2_output,param_offset);
+
+    std::string iStr = std::to_string(3);
+    std::string fcStr = layer + "fc" + iStr;
+    Linear_GPU(batchSize,OC2, OC3,params[fcStr + ".weight"].data(), params[fcStr + ".bias"].data(), relu2_output, output);
+
+    cudaFree(relu1_output);
+    cudaFree(relu2_output);
+}
+
+void GPU_CBR(int i, int batchSize, int numPoints, int inics, int OC,const std::string &layer, float* input, float* reluOutput)
+{
+    std::cout << "--------CBR" << i << std::endl;
+    int bnOC = batchSize * numPoints * OC;
+    float* conv;
+    float* bn;
+
+    cudaError_t err1 = cudaMalloc((void **)&conv, bnOC);
+    cudaError_t err = cudaMalloc((void **)&bn, bnOC);
+if (err1 != cudaSuccess) {
+    std::cerr << "Error allocating conv: " << cudaGetErrorString(err) << std::endl;
+    return;
+}
+if (err1 != cudaSuccess) {
+    std::cerr << "Error allocating bn: " << cudaGetErrorString(err) << std::endl;
+    return;
+}
+    std::string iStr = std::to_string(i);
+    std::string convStr = layer + "conv" + iStr;
+    std::string bnStr = layer + "bn" + iStr;
+    //std::cout << convStr  << std::endl;
+
+    Conv1d_GPU(batchSize,numPoints,inics, OC, 1,input, params[convStr + ".weight"].data(), params[convStr + ".bias"].data(), conv);
+    BatchNorm1d_GPU(OC, batchSize, numPoints,params[bnStr + ".weight"].data(), params[bnStr + ".bias"].data(), params[RM(bnStr)].data(), params[RV(bnStr)].data(),conv,bn);
+    ReLU_GPU(batchSize*numPoints,OC,bn,reluOutput);
+
+    cudaFree(conv);
+    cudaFree(bn);
+    
+}
+
+void GPU_CBR_3 (int OC1,int OC2,int OC3,int batchSize,int numPoints,int inics,const std::string& layer, float* input, float* output) {
+    std::cout << "----START CBR_3" << std::endl;
+    int bn = batchSize * numPoints;
+    float* relu1_output;
+    float* relu2_output;
+    
+    cudaMalloc((void **)&relu1_output, bn*OC1 * sizeof(float));
+    cudaMalloc((void **)&relu2_output, bn*OC2 * sizeof(float));
+
+    GPU_CBR(1, batchSize, numPoints, inics, OC1, layer, input, relu1_output);
+    GPU_CBR(2, batchSize, numPoints, OC1, OC2, layer, relu1_output, relu2_output);
+    GPU_CBR(3, batchSize, numPoints, OC2, OC3, layer, relu2_output, output);
+    printVector_GPU(output, bn * OC3);
+    cudaFree(relu1_output);
+    cudaFree(relu2_output);
+}
+
+__global__ void matrix_add_I_kernel(float *input, int n)
+{
+    int i = threadIdx.x;
+    input[i * n + i] = input[i * n + i] + 1.0f;
+}
+
+__global__ void matrix_add_I_kernel_normal(float *input, int n)
+{
+    int i = threadIdx.x + blockIdx.x * blockDim.x;
+    if (i < n)
+        input[i * n + i] = input[i * n + i] + 1.0f;
+}
+
+/*输入矩阵A应当是一个方阵*/
+void matrix_add_I(float *input, int n)
+{
+    if (n <= 1024)
+    {
+        dim3 blockDim(n);
+        dim3 gridDim(1);
+        matrix_add_I_kernel<<<gridDim, blockDim>>>(input, n);
+    }
+    else
+    {
+        dim3 blockDim(1024);
+        dim3 gridDim((n + 1023) / 1024);
+        matrix_add_I_kernel_normal<<<gridDim, blockDim>>>(input, n);
+    }
+    cudaDeviceSynchronize();
+}
+
+std::vector<int> Inference_GPU (int inChannels,
+            int batchSize,
+            int numPoints,float* input,float* output,
+            float* stn3d_out,
+            float* stnkd_out) {
+    std::cout << "**********************START INFERENCE************************" << std::endl;
+    std::cout << "PART1:STN3d" << std::endl;
+    int bn = batchSize * numPoints;
+    int OC1 = 64;
+    int OC2 = 128;
+    int OC3 = 1024;
+    int FC_OC1 = 512;
+    int FC_OC2 = 256;
+    int FC_OC3 = 9;
+    float* CBR3_output;
+    float* maxp_output;
+    cudaMalloc((void **)&CBR3_output, bn * OC3 * sizeof(float));
+    cudaMalloc((void **)&maxp_output, batchSize * OC3 * sizeof(float));
+    GPU_CBR_3(OC1,OC2,OC3, batchSize, numPoints,inChannels,"feat.stn.", input, CBR3_output);   // conv-bn-relu * 3
+    GPU_MaxPooling(OC3, batchSize, numPoints,CBR3_output, maxp_output); // Max pooling    
+    GPU_FBR_2_F(FC_OC1,FC_OC2,FC_OC3,batchSize,OC3,"feat.stn.",maxp_output,stn3d_out);// fc-bn-relu * 2 + fc
+    matrix_add_I(stn3d_out,3);
+
+    cudaFree(CBR3_output);
+    cudaFree(maxp_output);
+
+    std::cout << "PART2:TRANS->BMM->TRANS->CBR" << std::endl;
+    int encoderIC1 = inChannels;
+    int fstn_inChannel = 64;//encoderOC1
+    float* input_trans;
+    float* bmm1_res;
+    float* bmm1_res_trans;
+    float* fstn_input;
+    cudaMalloc((void **)&input_trans, bn * inChannels * sizeof(float));
+    cudaMalloc((void **)&bmm1_res, batchSize*numPoints*encoderIC1 * sizeof(float));
+    cudaMalloc((void **)&bmm1_res_trans, batchSize*encoderIC1*numPoints * sizeof(float));
+    cudaMalloc((void **)&fstn_input, batchSize*fstn_inChannel*numPoints * sizeof(float));
+    GPU_transpose(input,input_trans,batchSize,inChannels,numPoints);
+    GPU_Bmm(input_trans,stn3d_out,bmm1_res,numPoints,inChannels,inChannels,encoderIC1,batchSize);
+    GPU_transpose(bmm1_res,bmm1_res_trans,batchSize,numPoints,encoderIC1);
+    GPU_CBR(1,batchSize,numPoints,encoderIC1,fstn_inChannel,"feat.",bmm1_res_trans,fstn_input);
+    cudaFree(input_trans);
+    cudaFree(bmm1_res);
+    cudaFree(bmm1_res_trans);
+
+    std::cout << "PART3:STNkd"<< std::endl;
+    int fstn_OC1 = 64;
+    int fstn_OC2 = 128;
+    int fstn_OC3 = 1024;
+    int fstn_FC_OC1 = 512;
+    int fstn_FC_OC2 = 256;
+    int fstn_FC_OC3 = fstn_inChannel * fstn_inChannel ;
+    float* fstn_CBR3_output;
+    float* fstn_maxp_output;
+    cudaMalloc((void **)&fstn_CBR3_output, bn * fstn_OC3 * sizeof(float));
+    cudaMalloc((void **)&fstn_maxp_output, batchSize * fstn_OC3 * sizeof(float));
+    GPU_CBR_3(fstn_OC1,fstn_OC2,fstn_OC3, batchSize, numPoints,fstn_inChannel,"feat.fstn.", fstn_input, fstn_CBR3_output);   // conv-bn-relu * 3
+    GPU_MaxPooling(fstn_OC3, batchSize, numPoints,fstn_CBR3_output, fstn_maxp_output); // Max pooling
+    GPU_FBR_2_F(fstn_FC_OC1,fstn_FC_OC2,fstn_FC_OC3,batchSize,fstn_OC3,"feat.fstn.",fstn_maxp_output,stnkd_out);// fc-bn-relu * 2 + fc
+    matrix_add_I(stnkd_out,64);
+    cudaFree(fstn_CBR3_output);
+    cudaFree(fstn_maxp_output);
+
+    std::cout << "PART4:TRANS->BMM->TRANS->CBR->CBM" << std::endl;
+    int encoderOC2 = 128;
+    float* fstn_input_trans;
+    float* fstn_bmm1_res;
+    float* fstn_bmm1_res_trans; // B C N
+    float* cbr2_output;
+    cudaMalloc((void **)&fstn_input_trans, bn * fstn_inChannel * sizeof(float));
+    cudaMalloc((void **)&fstn_bmm1_res, batchSize*numPoints*fstn_inChannel * sizeof(float));
+    cudaMalloc((void **)&fstn_bmm1_res_trans, batchSize*fstn_inChannel*numPoints * sizeof(float));
+    cudaMalloc((void **)&cbr2_output, batchSize*encoderOC2*numPoints * sizeof(float));
+    GPU_transpose(fstn_input,fstn_input_trans,batchSize,fstn_inChannel,numPoints);
+    GPU_Bmm(fstn_input_trans,stnkd_out,fstn_bmm1_res,numPoints,fstn_inChannel,fstn_inChannel,fstn_inChannel,batchSize);
+    GPU_transpose(fstn_bmm1_res,fstn_bmm1_res_trans,batchSize,numPoints,fstn_inChannel);
+    GPU_CBR(2,batchSize,numPoints,fstn_inChannel,encoderOC2,"feat.",fstn_bmm1_res_trans,cbr2_output);
+    //------CB MAX
+    int encoderOC3 = 1024;
+    int bnEOC3 = batchSize * numPoints * encoderOC3;
+    float* feat_conv3;
+    float* feat_bn3;
+    float* encoder_output;
+    cudaMalloc((void **)&feat_conv3, bnEOC3 * sizeof(float));
+    cudaMalloc((void **)&feat_bn3, bnEOC3 * sizeof(float));
+    cudaMalloc((void **)&encoder_output, batchSize * encoderOC3 * sizeof(float));
+    std::string convStr = "feat.conv3";
+    std::string bnStr = "feat.bn3";
+    Conv1d_GPU(batchSize,numPoints,encoderOC2, encoderOC3, 1,cbr2_output, params[convStr + ".weight"].data(), params[convStr + ".bias"].data(), feat_conv3);
+    BatchNorm1d_GPU(encoderOC3, batchSize, numPoints,params[bnStr + ".weight"].data(), params[bnStr + ".bias"].data(), params[RM(bnStr)].data(), params[RV(bnStr)].data(),feat_conv3,feat_bn3);
+    GPU_MaxPooling(encoderOC3, batchSize, numPoints,feat_bn3, encoder_output); // Max pooling
+    cudaFree(fstn_input_trans);
+    cudaFree(fstn_bmm1_res);
+    cudaFree(fstn_bmm1_res_trans); // B C N
+    cudaFree(cbr2_output);
+    cudaFree(feat_conv3);
+    cudaFree(feat_bn3);
+
+    std::cout << "PART5:CLASSIFY" << std::endl;
+    float* softmax_input;
+    cudaMalloc((void **)&softmax_input,batchSize*10);
+    GPU_FBR_2_F(512,256,10,batchSize,encoderOC3,"",encoder_output,softmax_input,0);// fc-bn-relu * 2 + fc
+    LogSoftMax_GPU(softmax_input, output, 10 , batchSize);
+    std::cout << "----FINAL RESULT" << std::endl;
+    std::vector<int> result(batchSize);
+
+    std::vector<float> softmax_output_cpu(batchSize * 10);
+    cudaMemcpy(softmax_output_cpu.data(), output, batchSize * 10 * sizeof(float), cudaMemcpyDeviceToHost);
+    {
+        for (int i = 0; i < batchSize; i++)
+        {
+            float max_value = softmax_output_cpu[i * 10];
+            int max_index = 0;
+            for (int j = 1; j < 10; j++)
+            {
+                if (softmax_output_cpu[i * 10 + j] > max_value)
+                {
+                    max_value = softmax_output_cpu[i * 10 + j];
+                    max_index = j;
+                }
+            }
+            result[i] = max_index;
+        }
+    }
+    cudaFree(softmax_input);
+    return result;
+}
+
 
 
 std::vector<int> Inference_CPU (int inChannels,
@@ -654,141 +1239,154 @@ std::vector<int> get_model(float* x, int batch_size, int ic, int N, float* trans
         return result;
 }
 
-// int main(int argc, char *argv[]) {
-    
-//     // 读取模型参数
-//     std::string dir = "./params/150epoch";  
-//     read_params(dir);
-
-//     // 读取训练集数据：此处无用
-//     std::string file_path = "./data/test_point_clouds.h5";
-//     std::vector<std::vector<float>> list_of_points;
-//     std::vector<int> list_of_labels;
-//     read_h5_file(file_path, list_of_points, list_of_labels);
-
-//     //设定参数：ic*b*np
-//     int ic = 3;
-//     int b = 32;
-//     int np = 10;
-//     std::vector<float> input(ic * b * np);
-//     //基准
-//     std::vector<float> trans(b * ic * ic);
-//     std::vector<float> trans_feat(b * 64 * 64);
-//     std::vector<float> final_y(b * 10);
-//     std::vector<int> result;
-//     //待验证
-//     std::vector<float> trans_lt(b * ic * ic);
-//     std::vector<float> trans_feat_lt(b * 64 * 64);
-//     std::vector<float> final_x(b * 10);
-//     std::vector<int> result_lt;
-
-//     // 生成输入
-//     std::random_device rd;  
-//     std::mt19937 eng(rd()); 
-//     std::uniform_real_distribution<float> distr(0.0f, 1.0f); 
-//     for (auto& value : input) {
-//         value = distr(eng); 
-//     }
-//     std::vector<float> input_trans(b * np  * ic);
-//     transpose(input,input_trans,b,np,ic );
-
-//     //推理
-//     result_lt=Inference_CPU(ic, b, np, input_trans, final_x, trans_lt, trans_feat_lt);
-//     result=get_model(input_trans.data(), b, ic, np, trans.data(), trans_feat.data(), final_y.data());
-
-//     //对比结果
-//     compareVectors<int>(result_lt,result);
-//     for (const auto& value : result) {
-//         std::cout << value << " ";
-//     }
-//     std::cout << std::endl;
-//     for (const auto& value : result_lt) {
-//         std::cout << value << " ";
-//     }
-//     std::cout << std::endl;
-//     return 0;
-// }
-
 int main(int argc, char *argv[]) {
     
     // 读取模型参数
-    std::string dir = "./params/150epoch"; 
+    std::string dir = "./params/150epoch";  
     read_params(dir);
 
-    // 读取训练集数据
+    // 读取训练集数据：此处无用
     std::string file_path = "./data/test_point_clouds.h5";
     std::vector<std::vector<float>> list_of_points;
     std::vector<int> list_of_labels;
     read_h5_file(file_path, list_of_points, list_of_labels);
 
-    // 开始计时，使用chrono计时，不支持其它计时方式
-    auto start = std::chrono::high_resolution_clock::now();
-    int batchSize = 32;
+    //设定参数：ic*b*np
     int ic = 3;
-    int correct_num =0;
+    int b = 32;
+    int np = 10;
+    std::vector<float> input(ic * b * np);
+    //基准
+    std::vector<float> trans(b * ic * ic);
+    std::vector<float> trans_feat(b * 64 * 64);
+    std::vector<float> final_y(b * 10);
+    std::vector<int> result;
+    //待验证
+    std::vector<int> result_lt;
+    // std::vector<float> trans_lt(b * ic * ic);
+    // std::vector<float> trans_feat_lt(b * 64 * 64);
+    // std::vector<float> netOut(b * 10);
+    float *trans_lt_gpu;
+    float *trans_feat_lt_gpu;
+    float *netOut_gpu;
+    cudaMalloc((void **)&trans_lt_gpu, b * ic * ic * sizeof(float));
+    cudaMalloc((void **)&trans_feat_lt_gpu, b * 64 * 64 * sizeof(float));
+    cudaMalloc((void **)&netOut_gpu, b * 10 * sizeof(float));
 
-    // 开始计时，使用chrono计时，不支持其它计时方式
-    std::cout << "total :" << list_of_labels.size() << std::endl;
-    for (size_t i = 0; i < list_of_points.size(); i+=batchSize) {
-
-        std::cout << "ITERATION: " << i << ": ";
-
-        //当前循环BATCHSIZE
-        size_t curB = (batchSize < list_of_points.size() - i) ? batchSize : list_of_points.size() - i;
-        
-        //当前循环中NUMPOINTS最少的点
-        int np = list_of_points[i].size() / ic;
-        for (int j = 0; j < curB; j++) 
-        {
-            np = (list_of_points[i + j].size() / ic < np) ? list_of_points[i + j].size() / ic : np;
-        }
-
-        std::cout << "CUTOFF INPUT: " << i << ": " <<std::endl;;
-        std::vector<float> input(curB * np * ic);
-        std::vector<float> trans(curB * ic * ic);
-        std::vector<float> trans_feat(curB * 64 * 64);
-        std::vector<float> final_x(curB * 10);
-        for (int b = 0; b < curB; ++b)
-        {
-            for (int w = 0; w < np; ++w)
-            {
-                for (int c = 0; c < ic; ++c)
-                {
-                    input[b * np * ic + w * ic + c] = list_of_points[i + b][w * ic + c];
-                }
-            }
-        }
-
-        //输入输出
-        std::vector<float> input_trans(curB * np * ic);
-        transpose(input, input_trans, curB, np, ic);
-        std::vector<int> result(curB,0);
-
-        //推理与结果
-        result=Inference_CPU(ic,curB,np, input_trans,final_x,trans,trans_feat);
-        for (int b = 0; b < curB; ++b)
-        {
-            correct_num += (result[b] == list_of_labels[i + b]);
-            if (result[b] == list_of_labels[i + b])
-                std::cout << (i + b) << std::endl;
-        }
-        std::cout << "END INFERENCE:: iter :" << i << " correct_num :" << correct_num << " iter_batchsize :" << curB << std::endl;
-        std::cout << "total :" << list_of_labels.size() << std::endl;
-        //printVector<int> (result);
+    // 生成输入
+    std::random_device rd;  
+    std::mt19937 eng(rd()); 
+    std::uniform_real_distribution<float> distr(0.0f, 1.0f); 
+    for (auto& value : input) {
+        value = distr(eng); 
     }
-    std::cout << "total :" << list_of_labels.size() << std::endl;
-    std::cout << "correct_num :" << correct_num << std::endl;
-	float correct_rate = (float)correct_num/(float)list_of_labels.size();
+    std::vector<float> input_trans(b * np  * ic);
+    transpose(input,input_trans,b,np,ic );
 
-	// 向主机端同步以等待所有异步调用的GPU kernel执行完毕，这句必须要有
-	cudaDeviceSynchronize();
+    //推理
+    float* device_input_trans;
+    cudaMalloc((void **)&device_input_trans, b * np  * ic * sizeof(float));
+    cudaMemcpy(device_input_trans, input_trans.data(), b * np  * ic * sizeof(float), cudaMemcpyHostToDevice);
+    //cudaMem
+    result_lt=Inference_GPU(ic, b, np, device_input_trans, netOut_gpu, trans_lt_gpu, trans_feat_lt_gpu);
+    //result_lt=Inference_CPU(ic, b, np, input_trans, netOut_gpu, trans_lt_gpu, trans_feat_lt_gpu);
+    result=get_model(input_trans.data(), b, ic, np, trans.data(), trans_feat.data(), final_y.data());
+    cudaFree(trans_lt_gpu);
+    cudaFree(trans_feat_lt_gpu);
+    cudaFree(netOut_gpu);
 
-    // 结束计时
-    auto end = std::chrono::high_resolution_clock::now();
-    std::chrono::duration<double> diff = end - start;
-
-    // 输出结果，请严格保持此输出格式，并把0.0001替换成实际的准确率，请不要输出除了此结果之外的任何内容！！！
-    std::cout << std::fixed << std::setprecision(4) << diff.count() << correct_rate;
-
+    //对比结果
+    compareVectors<int>(result_lt,result);
+    for (const auto& value : result) {
+        std::cout << value << " ";
+    }
+    std::cout << std::endl;
+    for (const auto& value : result_lt) {
+        std::cout << value << " ";
+    }
+    std::cout << std::endl;
     return 0;
 }
+// int main(int argc, char *argv[]) {
+    
+//     // 读取模型参数
+//     std::string dir = "./params/150epoch"; 
+//     read_params(dir);
+
+//     // 读取训练集数据
+//     std::string file_path = "./data/test_point_clouds.h5";
+//     std::vector<std::vector<float>> list_of_points;
+//     std::vector<int> list_of_labels;
+//     read_h5_file(file_path, list_of_points, list_of_labels);
+
+//     // 开始计时，使用chrono计时，不支持其它计时方式
+//     auto start = std::chrono::high_resolution_clock::now();
+//     int batchSize = 32;
+//     int ic = 3;
+//     int correct_num =0;
+
+//     // 开始计时，使用chrono计时，不支持其它计时方式
+//     std::cout << "total :" << list_of_labels.size() << std::endl;
+//     for (size_t i = 0; i < list_of_points.size(); i+=batchSize) {
+
+//         std::cout << "ITERATION: " << i << ": ";
+
+//         //当前循环BATCHSIZE
+//         size_t curB = (batchSize < list_of_points.size() - i) ? batchSize : list_of_points.size() - i;
+        
+//         //当前循环中NUMPOINTS最少的点
+//         int np = list_of_points[i].size() / ic;
+//         for (int j = 0; j < curB; j++) 
+//         {
+//             np = (list_of_points[i + j].size() / ic < np) ? list_of_points[i + j].size() / ic : np;
+//         }
+
+//         std::cout << "CUTOFF INPUT: " << i << ": " <<std::endl;;
+//         std::vector<float> input(curB * np * ic);
+//         std::vector<float> trans(curB * ic * ic);
+//         std::vector<float> trans_feat(curB * 64 * 64);
+//         std::vector<float> final_x(curB * 10);
+//         for (int b = 0; b < curB; ++b)
+//         {
+//             for (int w = 0; w < np; ++w)
+//             {
+//                 for (int c = 0; c < ic; ++c)
+//                 {
+//                     input[b * np * ic + w * ic + c] = list_of_points[i + b][w * ic + c];
+//                 }
+//             }
+//         }
+
+//         //输入输出
+//         std::vector<float> input_trans(curB * np * ic);
+//         transpose(input, input_trans, curB, np, ic);
+//         std::vector<int> result(curB,0);
+
+//         //推理与结果
+//         result=Inference_CPU(ic,curB,np, input_trans,final_x,trans,trans_feat);
+//         for (int b = 0; b < curB; ++b)
+//         {
+//             correct_num += (result[b] == list_of_labels[i + b]);
+//             if (result[b] == list_of_labels[i + b])
+//                 std::cout << (i + b) << std::endl;
+//         }
+//         std::cout << "END INFERENCE:: iter :" << i << " correct_num :" << correct_num << " iter_batchsize :" << curB << std::endl;
+//         std::cout << "total :" << list_of_labels.size() << std::endl;
+//         //printVector<int> (result);
+//     }
+//     std::cout << "total :" << list_of_labels.size() << std::endl;
+//     std::cout << "correct_num :" << correct_num << std::endl;
+// 	float correct_rate = (float)correct_num/(float)list_of_labels.size();
+
+// 	// 向主机端同步以等待所有异步调用的GPU kernel执行完毕，这句必须要有
+// 	cudaDeviceSynchronize();
+
+//     // 结束计时
+//     auto end = std::chrono::high_resolution_clock::now();
+//     std::chrono::duration<double> diff = end - start;
+
+//     // 输出结果，请严格保持此输出格式，并把0.0001替换成实际的准确率，请不要输出除了此结果之外的任何内容！！！
+//     std::cout << std::fixed << std::setprecision(4) << diff.count() << correct_rate;
+
+//     return 0;
+// }

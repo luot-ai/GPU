@@ -744,7 +744,7 @@ const std::vector<float>& C1={},const std::vector<float>& C2={},bool compare=fal
 }
 
 void GPU_CBR(int i, int batchSize, int numPoints, int inics, int OC,const std::string &layer, float* input, float* reluOutput,
-            const std::vector<float>& C1={},const std::vector<float>& C2={}, const std::vector<float>& C3={},bool compare=false )
+        const std::vector<float>& C1={},const std::vector<float>& C2={}, const std::vector<float>& C3={},bool compare=false )
 {
     std::cout << "--------CBR" << i << std::endl;
     int bnOC = batchSize * numPoints * OC;

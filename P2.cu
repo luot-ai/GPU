@@ -231,8 +231,6 @@ bool compareVectors_GPU_float(float* vec1, float* vec2,int size) {
     std::cout << "TRUE" << std::endl;
     return true; // 两个向量相等
 }
-
-
 bool compareVectors_GPU(const std::vector<float>& vec1, float* vec2,int size) {
 
     std::vector<float> vec_cpu(size);
@@ -362,9 +360,6 @@ void CBR_3 (int OC1,int OC2,int OC3,int batchSize,int numPoints,int inics,const 
     CBR(3,batchSize,numPoints,OC2,OC3,layer,relu2_output,output);
     //printVector<int>(output);
 }
-
-
-
 
 void MaxPooling(int ics, int batchSize, int numPoints,std::vector<float> input, std::vector<float> &output)
 {
@@ -662,6 +657,86 @@ void Conv1d_GPU(int batchSize,int numPoints,int inChannels,int outChannels,int k
     CUDA_CHECK(cudaDeviceSynchronize());
     //printVector_GPU(output,batchSize*numPoints*outChannels);
 }
+
+__global__ void CBRWRAP_Kernel(int outChannels,int batchSize,int numPoints,int inChannels,float* input, 
+float* convWeights, float* convBias, 
+float* bnWeights,float* bnBias,float* bnRM,float* bnRV,float esp = 1e-5,
+float* output )
+{
+    int oc = threadIdx.x;
+    int b = blockIdx.x;
+    int index = oc + b * blockDim.x;
+    //printf("oc %d, batch %d, index %d\n",oc,b, index);
+    if(index >= outChannels * batchSize)
+        return ;
+    for (int n=0;n<numPoints;n++)
+    {
+        //printf("numpoint: %d\n",n);
+        float mean = bnRM[oc];
+        float var = bnRV[oc];
+        float res = convBias[oc];
+        //printf("the res of index %d is : %f\n",index*numPoints+n,res);
+        for (int ic=0;ic<inChannels;ic++ )
+        {
+            int ii = b*inChannels*numPoints+ic*numPoints+n;
+            int ww = oc*inChannels+ic;
+            //printf("input: %d,weight: %d\n",ii,ww);
+            res += input[ii]*convWeights[ww];
+            //printf("the res of index %d is : %f\n",index*numPoints+n,res);
+        }
+        res = (res - mean) / sqrt(var + esp) * bnWeights[oc] + bnBias[oc];
+        res = res > 0 ? res : 0;
+        output[index*numPoints+n]=res;
+    }
+    // cudaFree(w);
+}
+void CBRWRAP_GPU(int batchSize,int numPoints,int inChannels,int outChannels,int kSize,float* input, 
+float* convWeights, float* convBias, 
+float* bnWeights,float* bnBias,float* bnRM,float* bnRV,float esp = 1e-5,
+float* output ){
+    std::cout << "------------LAYER:CBRWRAP" << std::endl;
+
+    float* cudaConvWeights;
+    float* cudaConvBias;
+    cudaMalloc((void **)&cudaConvWeights, inChannels * outChannels * sizeof(float));
+    cudaMalloc((void **)&cudaConvBias, outChannels * sizeof(float));
+    cudaMemcpy(cudaConvWeights, convWeights, inChannels * outChannels * sizeof(float), cudaMemcpyHostToDevice);
+    cudaMemcpy(cudaConvBias, convBias, outChannels * sizeof(float), cudaMemcpyHostToDevice);
+
+    float* cudaBnWeights;
+    float* cudaBnBias;
+    float* cudaBnRV;
+    float* cudaBnRM;
+    cudaMalloc((void **)&cudaBnWeights, outChannels * sizeof(float));
+    cudaMalloc((void **)&cudaBnBias, outChannels * sizeof(float));
+    cudaMalloc((void **)&cudaBnRV, outChannels * sizeof(float));
+    cudaMalloc((void **)&cudaBnRM, outChannels * sizeof(float));
+
+    cudaMemcpy(cudaBnWeights, bnWeights, outChannels * sizeof(float), cudaMemcpyHostToDevice);
+    cudaMemcpy(cudaBnBias, bnBias, outChannels * sizeof(float), cudaMemcpyHostToDevice);
+    cudaMemcpy(cudaBnRV, bnRV, outChannels * sizeof(float), cudaMemcpyHostToDevice);
+    cudaMemcpy(cudaBnRM, bnRM, outChannels * sizeof(float), cudaMemcpyHostToDevice);
+
+    dim3 blockDim(outChannels);
+    dim3 gridDim(batchSize);
+    //std::cout << "WIDTH: " << numPoints << ", IC: " << inChannels << ", OC: " << outChannels << std::endl;
+    //std::cout << "isize: " << input.size() << ", wsize: " << weights.size() << ", bsize: " << bias.size() << ", osize: " << output.size() << std::endl;
+    Conv1d_Kernel<<<gridDim,blockDim>>>(outChannels,batchSize,numPoints,inChannels,input,cudaWeights,cudaBias,output);
+
+    cudaFree(cudaConvWeights);
+    cudaFree(cudaConvBias);
+    cudaFree(cudaBnWeights);
+    cudaFree(cudaBnBias);
+    cudaFree(cudaBnRV);
+    cudaFree(cudaBnRM);
+
+    // 检查内核启动是否成功
+    CUDA_CHECK(cudaGetLastError());
+
+    // 同步设备并检查执行错误
+    CUDA_CHECK(cudaDeviceSynchronize());
+}
+
 
 __global__ void LogSoftMax_Kernel(float* input,float* output,int L,int BatchSize = 32)
 {

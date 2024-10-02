@@ -662,32 +662,33 @@ __global__ void CBRWRAP_Kernel(int outChannels,int batchSize,int numPoints,int i
 float* convWeights, float* convBias, 
 float* bnWeights,float* bnBias,float* bnRM,float* bnRV,float* output,float esp = 1e-5 )
 {
-    int oc = threadIdx.x;
-    int b = blockIdx.x;
-    int index = oc + b * blockDim.x;
+    int tx = threadIdx.x;
+    int ty = threadIdx.y;
+    int bx = blockIdx.x;
+    int by = blockIdx.y;
+    int np = tx + bx * blockDim.x;
+    int oc = ty + by * blockDim.y;
     //printf("oc %d, batch %d, index %d\n",oc,b, index);
-    if(index >= outChannels * batchSize)
+    if(oc >= outChannels || np >= numPoints)
         return ;
-    for (int n=0;n<numPoints;n++)
+
+    float mean = bnRM[oc];
+    float var = bnRV[oc];
+    float bnW = bnWeights[oc];
+    float bnB = bnBias[oc];
+    for ( int b =0 ; b<batchSize ; b++)
     {
-        //printf("numpoint: %d\n",n);
-        float mean = bnRM[oc];
-        float var = bnRV[oc];
         float res = convBias[oc];
-        //printf("the res of index %d is : %f\n",index*numPoints+n,res);
         for (int ic=0;ic<inChannels;ic++ )
         {
-            int ii = b*inChannels*numPoints+ic*numPoints+n;
+            int ii = b*inChannels*numPoints+np*inChannels+ic;
             int ww = oc*inChannels+ic;
-            //printf("input: %d,weight: %d\n",ii,ww);
             res += input[ii]*convWeights[ww];
-            //printf("the res of index %d is : %f\n",index*numPoints+n,res);
         }
-        res = (res - mean) / sqrt(var + esp) * bnWeights[oc] + bnBias[oc];
+        res = (res - mean) / sqrt(var + esp) * bnW + bnB;
         res = res > 0 ? res : 0;
-        output[index*numPoints+n]=res;
+        output[b*numPoints*outChannels+np*outChannels+oc]=res;
     }
-    // cudaFree(w);
 }
 void CBRWRAP_GPU(int batchSize,int numPoints,int inChannels,int outChannels,int kSize,float* input, 
 float* convWeights, float* convBias, 
@@ -716,8 +717,11 @@ float* bnWeights,float* bnBias,float* bnRM,float* bnRV,float* output,float esp =
     cudaMemcpy(cudaBnRV, bnRV, outChannels * sizeof(float), cudaMemcpyHostToDevice);
     cudaMemcpy(cudaBnRM, bnRM, outChannels * sizeof(float), cudaMemcpyHostToDevice);
 
-    dim3 blockDim(outChannels);
-    dim3 gridDim(batchSize);
+    const int BLK_X = 32;
+    const int BLK_Y = 32;
+    dim3 blockDim(BLK_X,BLK_Y);
+    dim3 gridDim((numPoints + BLK_X - 1) / BLK_X,(outChannels + BLK_Y - 1) / BLK_Y);//X:宽度 Y：高度
+
     //std::cout << "WIDTH: " << numPoints << ", IC: " << inChannels << ", OC: " << outChannels << std::endl;
     //std::cout << "isize: " << input.size() << ", wsize: " << weights.size() << ", bsize: " << bias.size() << ", osize: " << output.size() << std::endl;
     CBRWRAP_Kernel<<<gridDim,blockDim>>>(outChannels,batchSize,numPoints,inChannels,input,cudaConvWeights,cudaConvBias,

@@ -660,8 +660,7 @@ void Conv1d_GPU(int batchSize,int numPoints,int inChannels,int outChannels,int k
 
 __global__ void CBRWRAP_Kernel(int outChannels,int batchSize,int numPoints,int inChannels,float* input, 
 float* convWeights, float* convBias, 
-float* bnWeights,float* bnBias,float* bnRM,float* bnRV,float esp = 1e-5,
-float* output )
+float* bnWeights,float* bnBias,float* bnRM,float* bnRV,float* output,float esp = 1e-5 )
 {
     int oc = threadIdx.x;
     int b = blockIdx.x;
@@ -692,8 +691,8 @@ float* output )
 }
 void CBRWRAP_GPU(int batchSize,int numPoints,int inChannels,int outChannels,int kSize,float* input, 
 float* convWeights, float* convBias, 
-float* bnWeights,float* bnBias,float* bnRM,float* bnRV,float esp = 1e-5,
-float* output ){
+float* bnWeights,float* bnBias,float* bnRM,float* bnRV,float* output,float esp = 1e-5
+){
     std::cout << "------------LAYER:CBRWRAP" << std::endl;
 
     float* cudaConvWeights;
@@ -721,7 +720,8 @@ float* output ){
     dim3 gridDim(batchSize);
     //std::cout << "WIDTH: " << numPoints << ", IC: " << inChannels << ", OC: " << outChannels << std::endl;
     //std::cout << "isize: " << input.size() << ", wsize: " << weights.size() << ", bsize: " << bias.size() << ", osize: " << output.size() << std::endl;
-    Conv1d_Kernel<<<gridDim,blockDim>>>(outChannels,batchSize,numPoints,inChannels,input,cudaWeights,cudaBias,output);
+    CBRWRAP_Kernel<<<gridDim,blockDim>>>(outChannels,batchSize,numPoints,inChannels,input,cudaConvWeights,cudaConvBias,
+    cudaBnWeights,cudaBnBias,cudaBnRM,cudaBnRV,output);
 
     cudaFree(cudaConvWeights);
     cudaFree(cudaConvBias);
@@ -822,40 +822,31 @@ void GPU_CBR(int i, int batchSize, int numPoints, int inics, int OC,const std::s
         const std::vector<float>& C1={},const std::vector<float>& C2={}, const std::vector<float>& C3={},bool compare=false )
 {
     std::cout << "--------CBR" << i << std::endl;
-    int bnOC = batchSize * numPoints * OC;
-    float* conv;
-    float* bn;
-
-    cudaError_t err1 = cudaMalloc((void **)&conv, bnOC*sizeof(float));
-    cudaError_t err = cudaMalloc((void **)&bn, bnOC*sizeof(float));
-    if (err1 != cudaSuccess)
-    {
-        std::cerr << "Error allocating conv: " << cudaGetErrorString(err) << std::endl;
-        return;
-    }
-    if (err1 != cudaSuccess)
-    {
-        std::cerr << "Error allocating bn: " << cudaGetErrorString(err) << std::endl;
-        return;
-    }
     std::string iStr = std::to_string(i);
     std::string convStr = layer + "conv" + iStr;
     std::string bnStr = layer + "bn" + iStr;
-    //std::cout << convStr  << std::endl;
 
-    Conv1d_GPU(batchSize,numPoints,inics, OC, 1,input, params[convStr + ".weight"].data(), params[convStr + ".bias"].data(), conv);
-    if(compare)
-        compareVectors_GPU(C1,conv,bnOC);
-    BatchNorm1d_GPU(OC, batchSize, numPoints,params[bnStr + ".weight"].data(), params[bnStr + ".bias"].data(), params[RM(bnStr)].data(), params[RV(bnStr)].data(),conv,bn);
-    if(compare)
-        compareVectors_GPU(C2,bn,bnOC);
-    ReLU_GPU(batchSize,numPoints,OC,bn,reluOutput);
-    if(compare)
-        compareVectors_GPU(C3,reluOutput,bnOC);
-
-    cudaFree(conv);
-    cudaFree(bn);
+    //**No wrap**:
+    // int bnOC = batchSize * numPoints * OC;
+    // float* conv;
+    // float* bn;
+    // cudaError_t err1 = cudaMalloc((void **)&conv, bnOC*sizeof(float));
+    // cudaError_t err = cudaMalloc((void **)&bn, bnOC*sizeof(float));
+    // Conv1d_GPU(batchSize,numPoints,inics, OC, 1,input, params[convStr + ".weight"].data(), params[convStr + ".bias"].data(), conv);
+    // BatchNorm1d_GPU(OC, batchSize, numPoints,params[bnStr + ".weight"].data(), params[bnStr + ".bias"].data(), params[RM(bnStr)].data(), params[RV(bnStr)].data(),conv,bn);
+    // ReLU_GPU(batchSize,numPoints,OC,bn,reluOutput);
+    // if(compare)
+    // {
+    //     compareVectors_GPU(C1,conv,bnOC);
+    //     compareVectors_GPU(C2,bn,bnOC);
+    //     compareVectors_GPU(C3,reluOutput,bnOC);
+    // }
+    // cudaFree(conv);
+    // cudaFree(bn);
     
+    //**wrap */
+    CBRWRAP_GPU(batchSize,numPoints,inics,OC,1,input,params[convStr + ".weight"].data(),params[convStr + ".bias"].data(),
+    params[bnStr + ".weight"].data(),params[bnStr + ".bias"].data(),params[RM(bnStr)].data(),params[RV(bnStr)].data(),reluOutput);
 }
 
 void GPU_CBR_3 (int OC1,int OC2,int OC3,int batchSize,int numPoints,int inics,const std::string& layer, float* input, float* output) {

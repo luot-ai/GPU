@@ -668,6 +668,7 @@ float* bnWeights,float* bnBias,float* bnRM,float* bnRV,float* output,float esp =
     int by = blockIdx.y;
     int np = tx + bx * blockDim.x;
     int oc = ty + by * blockDim.y;
+    int b = blockIdx.z;
     //printf("oc %d, batch %d, index %d\n",oc,b, index);
     if(oc >= outChannels || np >= numPoints)
         return ;
@@ -676,19 +677,17 @@ float* bnWeights,float* bnBias,float* bnRM,float* bnRV,float* output,float esp =
     float var = bnRV[oc];
     float bnW = bnWeights[oc];
     float bnB = bnBias[oc];
-    for ( int b =0 ; b<batchSize ; b++)
+    float res = convBias[oc];
+    
+    for (int ic = 0; ic < inChannels; ic++)
     {
-        float res = convBias[oc];
-        for (int ic = 0; ic < inChannels; ic++)
-        {
-            int ii = b * inChannels * numPoints + ic * numPoints + np ;
-            int ww = oc * inChannels + ic;
-            res += input[ii] * convWeights[ww];
-        }
-        res = (res - mean) / sqrt(var + esp) * bnW + bnB;
-        res = res > 0 ? res : 0;
-        output[b * numPoints * outChannels + oc * numPoints + np] = res;
+        int ii = b * inChannels * numPoints + ic * numPoints + np;
+        int ww = oc * inChannels + ic;
+        res += input[ii] * convWeights[ww];
     }
+    res = (res - mean) / sqrt(var + esp) * bnW + bnB;
+    res = res > 0 ? res : 0;
+    output[b * numPoints * outChannels + oc * numPoints + np] = res;
 }
 void CBRWRAP_GPU(int batchSize,int numPoints,int inChannels,int outChannels,int kSize,float* input, 
 float* convWeights, float* convBias, 
@@ -720,7 +719,7 @@ float* bnWeights,float* bnBias,float* bnRM,float* bnRV,float* output,float esp =
     const int BLK_X = 32;
     const int BLK_Y = 32;
     dim3 blockDim(BLK_X,BLK_Y);
-    dim3 gridDim((numPoints + BLK_X - 1) / BLK_X,(outChannels + BLK_Y - 1) / BLK_Y);//X:宽度 Y：高度
+    dim3 gridDim((numPoints + BLK_X - 1) / BLK_X,(outChannels + BLK_Y - 1) / BLK_Y,batchSize);//X:宽度 Y：高度
 
     //std::cout << "WIDTH: " << numPoints << ", IC: " << inChannels << ", OC: " << outChannels << std::endl;
     //std::cout << "isize: " << input.size() << ", wsize: " << weights.size() << ", bsize: " << bias.size() << ", osize: " << output.size() << std::endl;

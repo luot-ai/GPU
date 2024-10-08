@@ -658,7 +658,65 @@ void Conv1d_GPU(int batchSize,int numPoints,int inChannels,int outChannels,int k
     //printVector_GPU(output,batchSize*numPoints*outChannels);
 }
 
+template<int TILEX,int TILEY>
 __global__ void CBRWRAP_Kernel(int outChannels,int batchSize,int numPoints,int inChannels,float* input, 
+float* convWeights, float* convBias, 
+float* bnWeights,float* bnBias,float* bnRM,float* bnRV,float* output,float esp = 1e-5 )
+{
+    int tx = threadIdx.x;
+    int ty = threadIdx.y;
+    int bx = blockIdx.x;
+    int by = blockIdx.y;
+    int np = tx + bx * blockDim.x;
+    int oc = ty + by * blockDim.y;
+    int b = blockIdx.z;
+    //printf("KERNEL: inchannel %d, outchannel %d, numPoints %d\n",inChannels,outChannels,numPoints);
+    // if(oc >= outChannels || np >= numPoints)
+    //     return ;
+    
+    __shared__ float ds_weights[TILEX][TILEY];
+    __shared__ float ds_input[TILEX][TILEY];
+    // __shared__ float ds_bias[TILEY];
+    // __shared__ float ds_bnRM[TILEY];
+    // __shared__ float ds_bnRV[TILEY];
+    // __shared__ float ds_bnB[TILEY];
+    // __shared__ float ds_bnW[TILEY];
+    // __shared__ float ds_res[TILEY];
+
+    //phases
+    float mean = bnRM[oc];
+    float var = bnRV[oc];
+    float bnW = bnWeights[oc];
+    float bnB = bnBias[oc];
+    float res = convBias[oc];
+    for (int i = 0; i < inChannels / TILEX; ++i)
+    {
+        // loading input and weights
+        ds_weights[ty][tx] = convWeights[oc * inChannels + i * TILEX + tx];
+        if (np < numPoints)
+        {
+            ds_input[tx][ty] = input[b * numPoints * inChannels + (i * TILEY + ty) * numPoints + np];
+        }
+        else
+        {
+            ds_input[tx][ty] = 0;
+        }
+        __syncthreads();
+        // calculate:iterations
+        for (int j = 0; j < TILEX; ++j)
+        {
+            res += ds_weights[ty][j] * ds_input[tx][j];
+        }
+        __syncthreads();
+    }
+    res = (res - mean) / sqrt(var + esp) * bnW + bnB;
+    if (res < 0)
+        res = 0;
+    if(np < numPoints)
+        output[b * numPoints * outChannels + oc * numPoints + np] = res;
+}
+
+__global__ void CBRWRAP_Kernel_3(int TILEX,int TILEY,int outChannels,int batchSize,int numPoints,int inChannels,float* input, 
 float* convWeights, float* convBias, 
 float* bnWeights,float* bnBias,float* bnRM,float* bnRV,float* output,float esp = 1e-5 )
 {
@@ -672,13 +730,13 @@ float* bnWeights,float* bnBias,float* bnRM,float* bnRV,float* output,float esp =
     //printf("oc %d, batch %d, index %d\n",oc,b, index);
     if(oc >= outChannels || np >= numPoints)
         return ;
-
+    
     float mean = bnRM[oc];
     float var = bnRV[oc];
     float bnW = bnWeights[oc];
     float bnB = bnBias[oc];
     float res = convBias[oc];
-    
+
     for (int ic = 0; ic < inChannels; ic++)
     {
         int ii = b * inChannels * numPoints + ic * numPoints + np;
@@ -694,7 +752,7 @@ float* convWeights, float* convBias,
 float* bnWeights,float* bnBias,float* bnRM,float* bnRV,float* output,float esp = 1e-5
 ){
     std::cout << "------------LAYER:CBRWRAP" << std::endl;
-
+    // printf("inchannel %d,numPoints %d\n",inChannels,numPoints);
     float* cudaConvWeights;
     float* cudaConvBias;
     cudaMalloc((void **)&cudaConvWeights, inChannels * outChannels * sizeof(float));
@@ -716,15 +774,24 @@ float* bnWeights,float* bnBias,float* bnRM,float* bnRV,float* output,float esp =
     cudaMemcpy(cudaBnRV, bnRV, outChannels * sizeof(float), cudaMemcpyHostToDevice);
     cudaMemcpy(cudaBnRM, bnRM, outChannels * sizeof(float), cudaMemcpyHostToDevice);
 
-    const int BLK_X = 32;
-    const int BLK_Y = 32;
+    const int BLK_X = 8;
+    const int BLK_Y = 8;
     dim3 blockDim(BLK_X,BLK_Y);
     dim3 gridDim((numPoints + BLK_X - 1) / BLK_X,(outChannels + BLK_Y - 1) / BLK_Y,batchSize);//X:宽度 Y：高度
 
     //std::cout << "WIDTH: " << numPoints << ", IC: " << inChannels << ", OC: " << outChannels << std::endl;
     //std::cout << "isize: " << input.size() << ", wsize: " << weights.size() << ", bsize: " << bias.size() << ", osize: " << output.size() << std::endl;
-    CBRWRAP_Kernel<<<gridDim,blockDim>>>(outChannels,batchSize,numPoints,inChannels,input,cudaConvWeights,cudaConvBias,
-    cudaBnWeights,cudaBnBias,cudaBnRM,cudaBnRV,output);
+    if (inChannels == 3)
+    {
+        CBRWRAP_Kernel_3<<<gridDim, blockDim>>>(BLK_X, BLK_Y, outChannels, batchSize, numPoints, inChannels, input, cudaConvWeights, cudaConvBias,
+                                                cudaBnWeights, cudaBnBias, cudaBnRM, cudaBnRV, output);
+    }
+    else
+    {
+        printf("KERNEL: inchannel %d, outchannel %d, numPoints %d\n",inChannels,outChannels,numPoints);
+        CBRWRAP_Kernel<BLK_X, BLK_Y><<<gridDim, blockDim>>>( outChannels, batchSize, numPoints, inChannels, input, cudaConvWeights, cudaConvBias,
+                                              cudaBnWeights, cudaBnBias, cudaBnRM, cudaBnRV, output);
+    }
 
     cudaFree(cudaConvWeights);
     cudaFree(cudaConvBias);
@@ -1599,7 +1666,7 @@ float* C1,float* C2,float* C3){
 int main(int argc, char *argv[]) {
     
     // 读取模型参数
-    std::string dir = "./params/150epoch"; 
+    std::string dir = "./params/30epoch"; 
     read_params(dir);
 
     // 读取训练集数据
@@ -1630,7 +1697,7 @@ int main(int argc, char *argv[]) {
             np = (list_of_points[i + j].size() / ic < np) ? list_of_points[i + j].size() / ic : np;
         }
 
-        std::cout << "CUTOFF INPUT: " << i << ": " <<std::endl;;
+        std::cout << "CUTOFF INPUT: " << i << "np is : " << np <<std::endl;;
         std::vector<float> input(curB * np * ic);
         std::vector<float> trans(curB * ic * ic);
         std::vector<float> trans_feat(curB * 64 * 64);
@@ -1673,7 +1740,7 @@ int main(int argc, char *argv[]) {
         }
         std::cout << "END INFERENCE:: iter :" << i << " correct_num :" << correct_num << " iter_batchsize :" << curB << std::endl;
         std::cout << "total :" << list_of_labels.size() << std::endl;
-        //printVector<int> (result);
+        printVector<int> (result);
     }
     std::cout << "total :" << list_of_labels.size() << std::endl;
     std::cout << "correct_num :" << correct_num << std::endl;

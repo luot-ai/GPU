@@ -716,7 +716,58 @@ float* bnWeights,float* bnBias,float* bnRM,float* bnRV,float* output,float esp =
         output[b * numPoints * outChannels + oc * numPoints + np] = res;
 }
 
-__global__ void CBRWRAP_Kernel_3(int TILEX,int TILEY,int outChannels,int batchSize,int numPoints,int inChannels,float* input, 
+template<int TILEX,int TILEY>
+__global__ void CBRWRAP_Kernel_np4tms(int outChannels,int batchSize,int numPoints,int inChannels,float* input, 
+float* convWeights, float* convBias, 
+float* bnWeights,float* bnBias,float* bnRM,float* bnRV,float* output,float esp = 1e-5 )
+{
+    int tx = threadIdx.x;
+    int ty = threadIdx.y;
+    int bx = blockIdx.x;
+    int by = blockIdx.y;
+    int np = tx + bx * blockDim.x;
+    int oc = ty + by * blockDim.y;
+    int b = blockIdx.z;
+    //printf("KERNEL: inchannel %d, outchannel %d, numPoints %d\n",inChannels,outChannels,numPoints);
+    // if(oc >= outChannels || np >= numPoints)
+    //     return ;
+    
+    __shared__ float ds_weights[TILEX][TILEY];
+    __shared__ float ds_input[TILEX][TILEY];
+    // __shared__ float ds_bias[TILEY];
+    // __shared__ float ds_bnRM[TILEY];
+    // __shared__ float ds_bnRV[TILEY];
+    // __shared__ float ds_bnB[TILEY];
+    // __shared__ float ds_bnW[TILEY];
+    // __shared__ float ds_res[TILEY];
+
+    //phases
+    float mean = bnRM[oc];
+    float var = bnRV[oc];
+    float bnW = bnWeights[oc];
+    float bnB = bnBias[oc];
+    float res = convBias[oc];
+    for (int i = 0; i < inChannels / TILEX; ++i)
+    {
+        // loading input and weights
+        ds_weights[ty][tx] = convWeights[oc * inChannels + i * TILEX + tx];
+        ds_input[tx][ty] = input[b * numPoints * inChannels + (i * TILEY + ty) * numPoints + np];
+        __syncthreads();
+        // calculate:iterations
+        for (int j = 0; j < TILEX; ++j)
+        {
+            res += ds_weights[ty][j] * ds_input[tx][j];
+        }
+        __syncthreads();
+    }
+    res = (res - mean) / sqrt(var + esp) * bnW + bnB;
+    if (res < 0)
+        res = 0;
+    output[b * numPoints * outChannels + oc * numPoints + np] = res;
+}
+
+
+__global__ void CBRWRAP_Kernel_ic3(int TILEX,int TILEY,int outChannels,int batchSize,int numPoints,int inChannels,float* input, 
 float* convWeights, float* convBias, 
 float* bnWeights,float* bnBias,float* bnRM,float* bnRV,float* output,float esp = 1e-5 )
 {
@@ -783,18 +834,108 @@ float* bnWeights,float* bnBias,float* bnRM,float* bnRV,float* output,float esp =
     //std::cout << "isize: " << input.size() << ", wsize: " << weights.size() << ", bsize: " << bias.size() << ", osize: " << output.size() << std::endl;
     if (inChannels == 3)
     {
-        CBRWRAP_Kernel_3<<<gridDim, blockDim>>>(BLK_X, BLK_Y, outChannels, batchSize, numPoints, inChannels, input, cudaConvWeights, cudaConvBias,
+        CBRWRAP_Kernel_ic3<<<gridDim, blockDim>>>(BLK_X, BLK_Y, outChannels, batchSize, numPoints, inChannels, input, cudaConvWeights, cudaConvBias,
                                                 cudaBnWeights, cudaBnBias, cudaBnRM, cudaBnRV, output);
     }
     else
     {
-        printf("KERNEL: inchannel %d, outchannel %d, numPoints %d\n",inChannels,outChannels,numPoints);
-        CBRWRAP_Kernel<BLK_X, BLK_Y><<<gridDim, blockDim>>>( outChannels, batchSize, numPoints, inChannels, input, cudaConvWeights, cudaConvBias,
+        //printf("KERNEL: inchannel %d, outchannel %d, numPoints %d\n",inChannels,outChannels,numPoints);
+        if (numPoints % BLK_X == 0)
+        {
+            printf("hey!!\n");
+            CBRWRAP_Kernel_np4tms<BLK_X, BLK_Y><<<gridDim, blockDim>>>( outChannels, batchSize, numPoints, inChannels, input, cudaConvWeights, cudaConvBias,
                                               cudaBnWeights, cudaBnBias, cudaBnRM, cudaBnRV, output);
+        }
+        else
+        {
+            CBRWRAP_Kernel<BLK_X, BLK_Y><<<gridDim, blockDim>>>( outChannels, batchSize, numPoints, inChannels, input, cudaConvWeights, cudaConvBias,
+                                              cudaBnWeights, cudaBnBias, cudaBnRM, cudaBnRV, output);
+        }
     }
 
     cudaFree(cudaConvWeights);
     cudaFree(cudaConvBias);
+    cudaFree(cudaBnWeights);
+    cudaFree(cudaBnBias);
+    cudaFree(cudaBnRV);
+    cudaFree(cudaBnRM);
+
+    // 检查内核启动是否成功
+    CUDA_CHECK(cudaGetLastError());
+
+    // 同步设备并检查执行错误
+    CUDA_CHECK(cudaDeviceSynchronize());
+}
+
+__global__ void FBRWRAP_Kernel(int TILEX,int TILEY,int outFeatures,int batchSize,int inFeatures,float* input, 
+float* fcWeights, float* fcBias, 
+float* bnWeights,float* bnBias,float* bnRM,float* bnRV,float* output,float esp = 1e-5 )
+{
+    int tx = threadIdx.x;
+    int ty = threadIdx.y;
+    int bx = blockIdx.x;
+    int by = blockIdx.y;
+
+    int oc = tx + bx * blockDim.x;
+    int curB = ty + by * blockDim.y;
+
+    if (oc < outFeatures && curB < batchSize)
+    {
+        float mean = bnRM[oc];
+        float var = bnRV[oc];
+        float bnW = bnWeights[oc];
+        float bnB = bnBias[oc];
+        float res = fcBias[oc];
+        for (int ic = 0; ic < inFeatures; ic++)
+        {
+            res +=
+                input[curB * inFeatures + ic] *
+                fcWeights[oc * inFeatures + ic];
+        }
+        res = (res - mean) / sqrt(var + esp) * bnW + bnB;
+        res = res > 0 ? res : 0;
+        int index = oc + curB * outFeatures;
+        output[index] = res;
+    }
+}
+
+
+void FBRWRAP_GPU(int batchSize,int inFeatures,int outFeatures,float* input, 
+float* fcWeights, float* fcBias, 
+float* bnWeights,float* bnBias,float* bnRM,float* bnRV,float* output,float esp = 1e-5
+){
+    std::cout << "------------LAYER:FBRWRAP" << std::endl;
+    // printf("inchannel %d,numPoints %d\n",inChannels,numPoints);
+    float* cudaFcWeights;
+    float* cudaFcBias;
+    cudaMalloc((void **)&cudaFcWeights, inFeatures * outFeatures * sizeof(float));
+    cudaMalloc((void **)&cudaFcBias, outFeatures * sizeof(float));
+    cudaMemcpy(cudaFcWeights, fcWeights, inFeatures * outFeatures * sizeof(float), cudaMemcpyHostToDevice);
+    cudaMemcpy(cudaFcBias, fcBias, outFeatures * sizeof(float), cudaMemcpyHostToDevice);
+
+    float* cudaBnWeights;
+    float* cudaBnBias;
+    float* cudaBnRV;
+    float* cudaBnRM;
+    cudaMalloc((void **)&cudaBnWeights, outFeatures * sizeof(float));
+    cudaMalloc((void **)&cudaBnBias, outFeatures * sizeof(float));
+    cudaMalloc((void **)&cudaBnRV, outFeatures * sizeof(float));
+    cudaMalloc((void **)&cudaBnRM, outFeatures * sizeof(float));
+
+    cudaMemcpy(cudaBnWeights, bnWeights, outFeatures * sizeof(float), cudaMemcpyHostToDevice);
+    cudaMemcpy(cudaBnBias, bnBias, outFeatures * sizeof(float), cudaMemcpyHostToDevice);
+    cudaMemcpy(cudaBnRV, bnRV, outFeatures * sizeof(float), cudaMemcpyHostToDevice);
+    cudaMemcpy(cudaBnRM, bnRM, outFeatures * sizeof(float), cudaMemcpyHostToDevice);
+
+    const int BLK_X = 32;
+    const int BLK_Y = 32;
+    dim3 blockDim(BLK_X,BLK_Y);
+    dim3 gridDim((outFeatures + BLK_X - 1) / BLK_X,(batchSize + BLK_Y - 1) / BLK_Y);//X:宽度 Y：高度
+    FBRWRAP_Kernel<<<gridDim,blockDim>>>(BLK_X,BLK_Y,outFeatures,batchSize,inFeatures,input,cudaFcWeights,cudaFcBias,cudaBnWeights,cudaBnBias,cudaBnRM,cudaBnRV,
+    output);
+
+    cudaFree(cudaFcWeights);
+    cudaFree(cudaFcBias);
     cudaFree(cudaBnWeights);
     cudaFree(cudaBnBias);
     cudaFree(cudaBnRV);
@@ -844,23 +985,25 @@ void GPU_FBR(int i, int batchSize, int inFeatures,
 int outFeatures,const std::string &layer, float* input, float* reluOutput , int param_offset)
 {
     std::cout << "--------FBR" << i << std::endl;
-    int bOF = batchSize * outFeatures;
-    float* fc;
-    float* bn;
-    cudaMalloc((void **)&fc, bOF * sizeof(float));
-    cudaMalloc((void **)&bn, bOF * sizeof(float));
-
     std::string fiStr = std::to_string(i);
     std::string biStr = std::to_string(i+param_offset);
     std::string fcStr = layer + "fc" + fiStr;
-    std::string bnStr = layer + "bn" + biStr;
-    // std::cout << bnStr  << std::endl;
-    Linear_GPU(batchSize,inFeatures, outFeatures,params[fcStr + ".weight"].data(), params[fcStr + ".bias"].data(), input, fc);
-    BatchNorm1d_GPU(outFeatures, batchSize, 1,params[bnStr + ".weight"].data(), params[bnStr + ".bias"].data(), params[RM(bnStr)].data(), params[RV(bnStr)].data(), fc, bn);
-    ReLU_GPU(batchSize,1,outFeatures,bn, reluOutput);
+    std::string bnStr = layer + "bn" + biStr;    
+    //**wrap */
+    FBRWRAP_GPU(batchSize,inFeatures,outFeatures,input,params[fcStr + ".weight"].data(),params[fcStr + ".bias"].data(),
+    params[bnStr + ".weight"].data(),params[bnStr + ".bias"].data(),params[RM(bnStr)].data(),params[RV(bnStr)].data(),reluOutput);
 
-    cudaFree(fc);
-    cudaFree(bn);
+    //**No wrap**:
+    // int bOF = batchSize * outFeatures;
+    // float* fc;
+    // float* bn;
+    // cudaMalloc((void **)&fc, bOF * sizeof(float));
+    // cudaMalloc((void **)&bn, bOF * sizeof(float));
+    // Linear_GPU(batchSize,inFeatures, outFeatures,params[fcStr + ".weight"].data(), params[fcStr + ".bias"].data(), input, fc);
+    // BatchNorm1d_GPU(outFeatures, batchSize, 1,params[bnStr + ".weight"].data(), params[bnStr + ".bias"].data(), params[RM(bnStr)].data(), params[RV(bnStr)].data(), fc, bn);
+    // ReLU_GPU(batchSize,1,outFeatures,bn, reluOutput);
+    // cudaFree(fc);
+    // cudaFree(bn);
 }
 
 void GPU_FBR_2_F(int OC1,int OC2,int OC3,int batchSize,int inics,const std::string& layer, float* input, float* output,int param_offset=3,

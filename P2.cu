@@ -679,15 +679,15 @@ float* bnWeights,float* bnBias,float* bnRM,float* bnRV,float* output,float esp =
     for ( int b =0 ; b<batchSize ; b++)
     {
         float res = convBias[oc];
-        for (int ic=0;ic<inChannels;ic++ )
+        for (int ic = 0; ic < inChannels; ic++)
         {
-            int ii = b*inChannels*numPoints+np*inChannels+ic;
-            int ww = oc*inChannels+ic;
-            res += input[ii]*convWeights[ww];
+            int ii = b * inChannels * numPoints + ic * numPoints + np ;
+            int ww = oc * inChannels + ic;
+            res += input[ii] * convWeights[ww];
         }
         res = (res - mean) / sqrt(var + esp) * bnW + bnB;
         res = res > 0 ? res : 0;
-        output[b*numPoints*outChannels+np*outChannels+oc]=res;
+        output[b * numPoints * outChannels + oc * numPoints + np] = res;
     }
 }
 void CBRWRAP_GPU(int batchSize,int numPoints,int inChannels,int outChannels,int kSize,float* input, 

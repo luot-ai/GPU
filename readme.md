@@ -1,0 +1,4 @@
+传上去的代码：记得修改读参数路径
+nvprof
+batchsize
+malloc

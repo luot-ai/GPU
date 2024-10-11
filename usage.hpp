@@ -24,6 +24,13 @@
 #include "usage.hpp"
 #include <cuda_runtime.h>
 
+
+// 字符串拼接
+std::string RM(const std::string& a) 
+{return a + ".running_mean";}
+std::string RV(const std::string& a) 
+{return a + ".running_var";}
+std::map<std::string, std::vector<float>> cparams;
 // 定义一个宏用于检查 CUDA 错误
 #define CUDA_CHECK(call) \
     do { \
@@ -190,8 +197,8 @@ int outFeatures,const std::string &layer, std::vector<float> input, std::vector<
     std::string fcStr = layer + "fc" + fiStr;
     std::string bnStr = layer + "bn" + biStr;
     // std::cout << bnStr  << std::endl;
-    Linear_CPU(batchSize,inFeatures, outFeatures,params[fcStr + ".weight"], params[fcStr + ".bias"], input, fc);
-    BatchNorm1d_CPU(outFeatures, batchSize, 1,params[bnStr + ".weight"], params[bnStr + ".bias"], params[RM(bnStr)], params[RV(bnStr)], fc, bn);
+    Linear_CPU(batchSize,inFeatures, outFeatures,cparams[fcStr + ".weight"], cparams[fcStr + ".bias"], input, fc);
+    BatchNorm1d_CPU(outFeatures, batchSize, 1,cparams[bnStr + ".weight"], cparams[bnStr + ".bias"], cparams[RM(bnStr)], cparams[RV(bnStr)], fc, bn);
     ReLU_CPU(bOF,bn, reluOutput);
 }
 
@@ -206,7 +213,7 @@ void FBR_2_F(int OC1,int OC2,int OC3,int batchSize,int inics,const std::string& 
 
     std::string iStr = std::to_string(3);
     std::string fcStr = layer + "fc" + iStr;
-    Linear_CPU(batchSize,OC2, OC3,params[fcStr + ".weight"], params[fcStr + ".bias"], relu2_output, output);
+    Linear_CPU(batchSize,OC2, OC3,cparams[fcStr + ".weight"], cparams[fcStr + ".bias"], relu2_output, output);
 }
 
 void CBR(int i, int batchSize, int numPoints, int inics, int OC,const std::string &layer, std::vector<float> input, std::vector<float> &reluOutput)
@@ -221,8 +228,8 @@ void CBR(int i, int batchSize, int numPoints, int inics, int OC,const std::strin
     std::string bnStr = layer + "bn" + iStr;
     //std::cout << convStr  << std::endl;
 
-    Conv1d_CPU(batchSize,numPoints,inics, OC, 1,input, params[convStr + ".weight"], params[convStr + ".bias"], conv);
-    BatchNorm1d_CPU(OC, batchSize, numPoints,params[bnStr + ".weight"], params[bnStr + ".bias"], params[RM(bnStr)], params[RV(bnStr)],conv,bn);
+    Conv1d_CPU(batchSize,numPoints,inics, OC, 1,input, cparams[convStr + ".weight"], cparams[convStr + ".bias"], conv);
+    BatchNorm1d_CPU(OC, batchSize, numPoints,cparams[bnStr + ".weight"], cparams[bnStr + ".bias"], cparams[RM(bnStr)], cparams[RV(bnStr)],conv,bn);
     ReLU_CPU(bnOC,bn,reluOutput);
     
 }

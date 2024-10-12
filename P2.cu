@@ -209,29 +209,42 @@ void matrix_add_I(float *input, int n,int batchSize)
 
 __global__ void Maxpooling_Kernel(float* input,float* output,int numPoints)
 {
+    __shared__ float sharedMax[1024];
+    
     int tx = threadIdx.x;
-    int bx = blockIdx.x;
-    int idx = tx + bx * blockDim.x;
+    int channel = blockIdx.x;
 
-    if (idx < gridDim.x)
-    {
-        float max_val = -FLT_MAX;
-        for (int n = 0; n < numPoints; n++)
-        {
-            float value = input[idx*numPoints + n];
-            if (value > max_val)
-            {
-                max_val = value;
+    float localMax = -FLT_MAX;
+    int cnum = channel * numPoints;
+    for (int i = tx; i < numPoints; i += blockDim.x) {
+        float val = input[cnum + i];
+        if (val > localMax) {
+            localMax = val;
+        }
+    }
+    sharedMax[tx] = localMax;
+    __syncthreads();
+
+    // 归约：逐步计算块内的最大值
+    for (int stride = blockDim.x / 2; stride > 0; stride >>= 1) {
+        if (tx < stride) {
+            if (sharedMax[tx + stride] > sharedMax[tx]) {
+                sharedMax[tx] = sharedMax[tx + stride];
             }
         }
-        output[idx] = max_val;
+        __syncthreads();
+    }
+
+    // 线程0写入最终的最大值
+    if (tx == 0) {
+        output[channel] = sharedMax[0];
     }
 }
 void GPU_MaxPooling(int ics, int batchSize, int numPoints,float* input, float* output)
 {
     std::cout << "----START MAXPOOLING" << std::endl;
     dim3 gridDim(ics*batchSize);
-    dim3 blockDim(ics);
+    dim3 blockDim(1024);
     Maxpooling_Kernel<<<gridDim, blockDim>>>(input, output,numPoints);
     // 检查内核启动是否成功
     CUDA_CHECK(cudaGetLastError());

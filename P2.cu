@@ -1,5 +1,5 @@
 // 这是程序二的模板程序，我们已经准备好了加载数据集和加载程序一模型参数的部分，请实现CUDA的深度学习推理过程，请严格保持输出格式输出
-// 编译的命令为：nvcc P2.cu -o P2 -I./src/submodule -Xcompiler "-O3 -std=c++14" -gencode arch=compute_50,code=sm_50 -gencode arch=compute_52,code=sm_52 -gencode arch=compute_53,code=sm_53 -gencode arch=compute_60,code=sm_60 -gencode arch=compute_61,code=sm_61 -gencode arch=compute_62,code=sm_62 -gencode arch=compute_70,code=sm_70 -lhdf5 -lhdf5_cpp
+// 编译的命令为：nvcc P2.cu -o P2 -I./src/submodule -Xcompiler "-O3 -std=c++14" -gencode arch=compute_60,code=sm_60 -gencode arch=compute_61,code=sm_61 -gencode arch=compute_70,code=sm_70 -lhdf5_cpp -lhdf5
 
 #include <random>
 #include <iostream>
@@ -1671,7 +1671,7 @@ std::vector<int> get_model(float* x, int batch_size, int ic, int N, float* trans
 int main(int argc, char *argv[]) {
     
     // 读取模型参数
-    std::string dir = "./params/30epoch"; 
+    std::string dir = argv[1]; 
     read_params(dir);
 
     // 读取训练集数据
@@ -1682,7 +1682,7 @@ int main(int argc, char *argv[]) {
 
     // 开始计时，使用chrono计时，不支持其它计时方式
     auto start = std::chrono::high_resolution_clock::now();
-    int batchSize = 1;
+    int batchSize = 4;
     int ic = 3;
     int correct_num =0;
 

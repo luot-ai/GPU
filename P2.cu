@@ -62,7 +62,6 @@ std::vector<float> read_param(const std::string& filepath) {
     }
     return data;
 }
-
 void read_params(std::string dir) {
     // std::string dir = "."; // 当前目录
 
@@ -84,6 +83,125 @@ void read_params(std::string dir) {
 
     return ;
 }
+
+struct fcp {
+    float* weight; // Conv weight
+    float* bias;   // Conv bias
+};
+void read_fcp(const std::string& layer, fcp& wbp,int i) {
+    std::string fiStr = std::to_string(i);;
+    std::string name = layer + "fc" + fiStr;  
+    //std::cout << name << std::endl;
+    cudaMalloc((void**)&wbp.weight, params[name + ".weight"].size() * sizeof(float));
+    cudaMalloc((void**)&wbp.bias, params[name + ".bias"].size() * sizeof(float));
+    cudaMemcpy(wbp.weight, params[name + ".weight"].data(), params[name + ".weight"].size() * sizeof(float), cudaMemcpyHostToDevice);
+    cudaMemcpy(wbp.bias, params[name + ".bias"].data(), params[name + ".bias"].size() * sizeof(float), cudaMemcpyHostToDevice);
+}
+void free_fcp(fcp& wbp){
+    cudaFree(wbp.bias);
+    cudaFree(wbp.weight);
+}
+
+struct wbBnP {
+    float* weight; // Conv weight
+    float* bias;   // Conv bias
+    float* bn_weight; // BatchNorm weight
+    float* bn_bias;   // BatchNorm bias
+    float* bn_mean;   // BatchNorm running mean
+    float* bn_var;    // BatchNorm running var
+};
+void read_wbBnP(const std::string& layer,const std::string& cf,wbBnP& wbBnP,int i,int param_offset=0) {
+
+    std::string cfiStr = std::to_string(i);
+    std::string biStr = std::to_string(i+param_offset);
+    std::string name = layer + cf + cfiStr;
+    std::string bnStr = layer + "bn" + biStr;   
+    //std::cout << name << std::endl;
+    //std::cout << bnStr << std::endl;
+    cudaMalloc((void**)&wbBnP.weight, params[name + ".weight"].size() * sizeof(float));
+    cudaMalloc((void**)&wbBnP.bias, params[name + ".bias"].size() * sizeof(float));
+    cudaMalloc((void**)&wbBnP.bn_weight, params[bnStr + ".weight"].size() * sizeof(float));
+    cudaMalloc((void**)&wbBnP.bn_bias, params[bnStr + ".bias"].size() * sizeof(float));
+    cudaMalloc((void**)&wbBnP.bn_mean, params[bnStr + ".running_mean"].size() * sizeof(float));
+    cudaMalloc((void**)&wbBnP.bn_var, params[bnStr + ".running_var"].size() * sizeof(float));
+    cudaMemcpy(wbBnP.weight, params[name + ".weight"].data(), params[name + ".weight"].size() * sizeof(float), cudaMemcpyHostToDevice);
+    cudaMemcpy(wbBnP.bias, params[name + ".bias"].data(), params[name + ".bias"].size() * sizeof(float), cudaMemcpyHostToDevice);
+    cudaMemcpy(wbBnP.bn_weight, params[bnStr + ".weight"].data(), params[bnStr + ".weight"].size() * sizeof(float), cudaMemcpyHostToDevice);
+    cudaMemcpy(wbBnP.bn_bias, params[bnStr + ".bias"].data(), params[bnStr + ".bias"].size() * sizeof(float), cudaMemcpyHostToDevice);
+    cudaMemcpy(wbBnP.bn_mean, params[bnStr + ".running_mean"].data(), params[bnStr + ".running_mean"].size() * sizeof(float), cudaMemcpyHostToDevice);
+    cudaMemcpy(wbBnP.bn_var, params[bnStr + ".running_var"].data(), params[bnStr + ".running_var"].size() * sizeof(float), cudaMemcpyHostToDevice);
+}
+void free_wbBnP(wbBnP& wbBnP){
+    cudaFree(wbBnP.bias);
+    cudaFree(wbBnP.weight);
+    cudaFree(wbBnP.bn_bias);
+    cudaFree(wbBnP.bn_mean);
+    cudaFree(wbBnP.bn_var);
+    cudaFree(wbBnP.bn_weight);
+}
+
+struct CB3P {
+    wbBnP cb1;
+    wbBnP cb2;
+    wbBnP cb3;
+};
+void read_CB3P(const std::string& layer,CB3P& CB3P) {
+    read_wbBnP(layer,"conv",CB3P.cb1,1);
+    read_wbBnP(layer,"conv",CB3P.cb2,2);
+    read_wbBnP(layer,"conv",CB3P.cb3,3);   
+}
+void free_CB3P(CB3P &CB3P){
+    free_wbBnP(CB3P.cb1);
+    free_wbBnP(CB3P.cb2);
+    free_wbBnP(CB3P.cb3);
+}
+
+
+struct FB2FP {
+    wbBnP fb1;
+    wbBnP fb2;
+    fcp   f3;
+};
+void read_FB2FP(const std::string& layer,FB2FP& FB2FP,int param_offset=0)    {
+    read_wbBnP(layer,"fc",FB2FP.fb1,1,param_offset);
+    read_wbBnP(layer,"fc",FB2FP.fb2,2,param_offset);
+    read_fcp(layer,FB2FP.f3,3);
+}
+void free_FB2FP(FB2FP &FB2FP){
+    free_wbBnP(FB2FP.fb1);
+    free_wbBnP(FB2FP.fb2);
+    free_fcp(FB2FP.f3);
+}
+
+struct stndP {
+    CB3P cb3;
+    FB2FP fb2f;
+};
+void read_stndP(const std::string& layer,stndP& stndP) {
+    read_CB3P(layer,stndP.cb3);
+    read_FB2FP(layer,stndP.fb2f,3);
+}
+void free_stndP(stndP& stndP){
+    free_CB3P(stndP.cb3);
+    free_FB2FP(stndP.fb2f);
+}
+
+struct cudaP {
+    stndP stn3dp;
+    stndP stnkdp;
+    CB3P  featp;
+    FB2FP nonep;
+};
+void freeDP(cudaP &dp)
+{
+    free_stndP(dp.stn3dp);
+    free_stndP(dp.stnkdp);
+    free_CB3P(dp.featp);
+    free_FB2FP(dp.nonep);
+}
+
+cudaP dParams;
+
 
 /****************************************************************************************
  * 读取训练集数据
@@ -348,26 +466,15 @@ __global__ void linear_Kernel(int inFeatures,float* weight,float* bias,float* in
         }
     }
 }
-void Linear_GPU(int batchSize,int inFeatures, int outFeatures,float* weight,float* bias,float* input,float* output){
-
-    float* cudaWeights;
-    float* cudaBias;
-    cudaMalloc((void **)&cudaWeights, inFeatures * outFeatures * sizeof(float));
-    cudaMalloc((void **)&cudaBias, outFeatures * sizeof(float));
-    cudaMemcpy(cudaWeights, weight, inFeatures * outFeatures * sizeof(float), cudaMemcpyHostToDevice);
-    cudaMemcpy(cudaBias, bias, outFeatures * sizeof(float), cudaMemcpyHostToDevice);
-    
+void Linear_GPU(int batchSize,int inFeatures, int outFeatures,float* cudaWeights,float* cudaBias,float* input,float* output){
     std::cout << "------------LAYER:linear" << std::endl;
     dim3 blockDim(32,32);
     dim3 gridDim((outFeatures+31)/32,(batchSize+31)/32);
     linear_Kernel<<<gridDim,blockDim>>>(inFeatures,cudaWeights,cudaBias,input,output,outFeatures,batchSize);
     // 检查内核启动是否成功
     CUDA_CHECK(cudaGetLastError());
-
     // 同步设备并检查执行错误
     CUDA_CHECK(cudaDeviceSynchronize());
-    cudaFree(cudaWeights);
-    cudaFree(cudaBias);
 }
 
 __global__ void ReLu_Kernel(float *input,float *output)
@@ -606,42 +713,15 @@ float* bnWeights,float* bnBias,float* bnRM,float* bnRV,float* output,float esp =
 
 
 void CBWRAP_GPU(int batchSize,int numPoints,int inChannels,int outChannels,int kSize,float* input, 
-float* convWeights, float* convBias, 
-float* bnWeights,float* bnBias,float* bnRM,float* bnRV,float* output,float esp = 1e-5
+float* cudaConvWeights, float* cudaConvBias, 
+float* cudaBnWeights,float* cudaBnBias,float* cudaBnRM,float* cudaBnRV,float* output,float esp = 1e-5
 ){
     std::cout << "------------LAYER:CBWRAP" << std::endl;
-    // printf("inchannel %d,numPoints %d\n",inChannels,numPoints);
-    float* cudaConvWeights;
-    float* cudaConvBias;
-    cudaMalloc((void **)&cudaConvWeights, inChannels * outChannels * sizeof(float));
-    cudaMalloc((void **)&cudaConvBias, outChannels * sizeof(float));
-    cudaMemcpy(cudaConvWeights, convWeights, inChannels * outChannels * sizeof(float), cudaMemcpyHostToDevice);
-    cudaMemcpy(cudaConvBias, convBias, outChannels * sizeof(float), cudaMemcpyHostToDevice);
-
-    float* cudaBnWeights;
-    float* cudaBnBias;
-    float* cudaBnRV;
-    float* cudaBnRM;
-    cudaMalloc((void **)&cudaBnWeights, outChannels * sizeof(float));
-    cudaMalloc((void **)&cudaBnBias, outChannels * sizeof(float));
-    cudaMalloc((void **)&cudaBnRV, outChannels * sizeof(float));
-    cudaMalloc((void **)&cudaBnRM, outChannels * sizeof(float));
-
-    cudaMemcpy(cudaBnWeights, bnWeights, outChannels * sizeof(float), cudaMemcpyHostToDevice);
-    cudaMemcpy(cudaBnBias, bnBias, outChannels * sizeof(float), cudaMemcpyHostToDevice);
-    cudaMemcpy(cudaBnRV, bnRV, outChannels * sizeof(float), cudaMemcpyHostToDevice);
-    cudaMemcpy(cudaBnRM, bnRM, outChannels * sizeof(float), cudaMemcpyHostToDevice);
-
     const int BLK_X = 8;
     const int BLK_Y = 8;
     dim3 blockDim(BLK_X, BLK_Y);
-    // dim3 gridDim((numPoints + BLK_X - 1) / BLK_X,(outChannels + BLK_Y - 1) / BLK_Y);//X:宽度 Y：高度
     dim3 gridDim((numPoints + BLK_X - 1) / BLK_X, (outChannels + BLK_Y - 1) / BLK_Y, batchSize); // X:宽度 Y：高度
 
-    // std::cout << "WIDTH: " << numPoints << ", IC: " << inChannels << ", OC: " << outChannels << std::endl;
-    // std::cout << "isize: " << input.size() << ", wsize: " << weights.size() << ", bsize: " << bias.size() << ", osize: " << output.size() << std::endl;
-
-    // printf("KERNEL: inchannel %d, outchannel %d, numPoints %d\n",inChannels,outChannels,numPoints);
     if (numPoints % BLK_X == 0)
     {
         printf("hey!!\n");
@@ -653,13 +733,6 @@ float* bnWeights,float* bnBias,float* bnRM,float* bnRV,float* output,float esp =
         CBWRAP_Kernel<BLK_X, BLK_Y><<<gridDim, blockDim>>>(outChannels, batchSize, numPoints, inChannels, input, cudaConvWeights, cudaConvBias,
                                                            cudaBnWeights, cudaBnBias, cudaBnRM, cudaBnRV, output);
     }
-
-    cudaFree(cudaConvWeights);
-    cudaFree(cudaConvBias);
-    cudaFree(cudaBnWeights);
-    cudaFree(cudaBnBias);
-    cudaFree(cudaBnRV);
-    cudaFree(cudaBnRM);
 
     // 检查内核启动是否成功
     CUDA_CHECK(cudaGetLastError());
@@ -810,37 +883,17 @@ float* bnWeights,float* bnBias,float* bnRM,float* bnRV,float* output,float esp =
     output[b * numPoints * outChannels + oc * numPoints + np] = res;
 }
 void CBRWRAP_GPU(int batchSize,int numPoints,int inChannels,int outChannels,int kSize,float* input, 
-float* convWeights, float* convBias, 
-float* bnWeights,float* bnBias,float* bnRM,float* bnRV,float* output,float esp = 1e-5
+float* cudaConvWeights, float* cudaConvBias, 
+float* cudaBnWeights,float* cudaBnBias,float* cudaBnRM,float* cudaBnRV,float* output,float esp = 1e-5
 ){
     std::cout << "------------LAYER:CBRWRAP" << std::endl;
     // printf("inchannel %d,numPoints %d\n",inChannels,numPoints);
-    float* cudaConvWeights;
-    float* cudaConvBias;
-    cudaMalloc((void **)&cudaConvWeights, inChannels * outChannels * sizeof(float));
-    cudaMalloc((void **)&cudaConvBias, outChannels * sizeof(float));
-    cudaMemcpy(cudaConvWeights, convWeights, inChannels * outChannels * sizeof(float), cudaMemcpyHostToDevice);
-    cudaMemcpy(cudaConvBias, convBias, outChannels * sizeof(float), cudaMemcpyHostToDevice);
-
-    float* cudaBnWeights;
-    float* cudaBnBias;
-    float* cudaBnRV;
-    float* cudaBnRM;
-    cudaMalloc((void **)&cudaBnWeights, outChannels * sizeof(float));
-    cudaMalloc((void **)&cudaBnBias, outChannels * sizeof(float));
-    cudaMalloc((void **)&cudaBnRV, outChannels * sizeof(float));
-    cudaMalloc((void **)&cudaBnRM, outChannels * sizeof(float));
-
-    cudaMemcpy(cudaBnWeights, bnWeights, outChannels * sizeof(float), cudaMemcpyHostToDevice);
-    cudaMemcpy(cudaBnBias, bnBias, outChannels * sizeof(float), cudaMemcpyHostToDevice);
-    cudaMemcpy(cudaBnRV, bnRV, outChannels * sizeof(float), cudaMemcpyHostToDevice);
-    cudaMemcpy(cudaBnRM, bnRM, outChannels * sizeof(float), cudaMemcpyHostToDevice);
 
     const int BLK_X = 8;
     const int BLK_Y = 8;
     dim3 blockDim(BLK_X,BLK_Y);
     //dim3 gridDim((numPoints + BLK_X - 1) / BLK_X,(outChannels + BLK_Y - 1) / BLK_Y);//X:宽度 Y：高度
-     dim3 gridDim((numPoints + BLK_X - 1) / BLK_X,(outChannels + BLK_Y - 1) / BLK_Y,batchSize);//X:宽度 Y：高度
+    dim3 gridDim((numPoints + BLK_X - 1) / BLK_X,(outChannels + BLK_Y - 1) / BLK_Y,batchSize);//X:宽度 Y：高度
 
     //std::cout << "WIDTH: " << numPoints << ", IC: " << inChannels << ", OC: " << outChannels << std::endl;
     //std::cout << "isize: " << input.size() << ", wsize: " << weights.size() << ", bsize: " << bias.size() << ", osize: " << output.size() << std::endl;
@@ -864,52 +917,18 @@ float* bnWeights,float* bnBias,float* bnRM,float* bnRV,float* output,float esp =
                                               cudaBnWeights, cudaBnBias, cudaBnRM, cudaBnRV, output);
         }
     }
-
-    cudaFree(cudaConvWeights);
-    cudaFree(cudaConvBias);
-    cudaFree(cudaBnWeights);
-    cudaFree(cudaBnBias);
-    cudaFree(cudaBnRV);
-    cudaFree(cudaBnRM);
-
     // 检查内核启动是否成功
     CUDA_CHECK(cudaGetLastError());
-
     // 同步设备并检查执行错误
     CUDA_CHECK(cudaDeviceSynchronize());
 }
 
-void GPU_CBR(int i, int batchSize, int numPoints, int inics, int OC,const std::string &layer, float* input, float* reluOutput,
-        const std::vector<float>& C1={},const std::vector<float>& C2={}, const std::vector<float>& C3={},bool compare=false )
+void GPU_CBR(int batchSize, int numPoints, int inics, int OC,wbBnP& wbBnP, float* input, float* reluOutput)
 {
-    std::cout << "--------CBR" << i << std::endl;
-    std::string iStr = std::to_string(i);
-    std::string convStr = layer + "conv" + iStr;
-    std::string bnStr = layer + "bn" + iStr;
-
-    //**No wrap**:
-    // int bnOC = batchSize * numPoints * OC;
-    // float* conv;
-    // float* bn;
-    // cudaError_t err1 = cudaMalloc((void **)&conv, bnOC*sizeof(float));
-    // cudaError_t err = cudaMalloc((void **)&bn, bnOC*sizeof(float));
-    // Conv1d_GPU(batchSize,numPoints,inics, OC, 1,input, params[convStr + ".weight"].data(), params[convStr + ".bias"].data(), conv);
-    // BatchNorm1d_GPU(OC, batchSize, numPoints,params[bnStr + ".weight"].data(), params[bnStr + ".bias"].data(), params[RM(bnStr)].data(), params[RV(bnStr)].data(),conv,bn);
-    // ReLU_GPU(batchSize,numPoints,OC,bn,reluOutput);
-    // if(compare)
-    // {
-    //     compareVectors_GPU(C1,conv,bnOC);
-    //     compareVectors_GPU(C2,bn,bnOC);
-    //     compareVectors_GPU(C3,reluOutput,bnOC);
-    // }
-    // cudaFree(conv);
-    // cudaFree(bn);
-    
-    //**wrap */
-    CBRWRAP_GPU(batchSize,numPoints,inics,OC,1,input,params[convStr + ".weight"].data(),params[convStr + ".bias"].data(),
-    params[bnStr + ".weight"].data(),params[bnStr + ".bias"].data(),params[RM(bnStr)].data(),params[RV(bnStr)].data(),reluOutput);
+    CBRWRAP_GPU(batchSize,numPoints,inics,OC,1,input,wbBnP.weight,wbBnP.bias,
+    wbBnP.bn_weight,wbBnP.bn_bias,wbBnP.bn_mean,wbBnP.bn_var,reluOutput);
 }
-void GPU_CBR_3 (int OC1,int OC2,int OC3,int batchSize,int numPoints,int inics,const std::string& layer, float* input, float* output) {
+void GPU_CBR_3 (int OC1,int OC2,int OC3,int batchSize,int numPoints,int inics,CB3P &cb3p, float* input, float* output) {
     std::cout << "----START CBR_3" << std::endl;
     int bn = batchSize * numPoints;
     float* relu1_output;
@@ -918,9 +937,9 @@ void GPU_CBR_3 (int OC1,int OC2,int OC3,int batchSize,int numPoints,int inics,co
     cudaMalloc((void **)&relu1_output, bn*OC1 * sizeof(float));
     cudaMalloc((void **)&relu2_output, bn*OC2 * sizeof(float));
 
-    GPU_CBR(1, batchSize, numPoints, inics, OC1, layer, input, relu1_output);
-    GPU_CBR(2, batchSize, numPoints, OC1, OC2, layer, relu1_output, relu2_output);
-    GPU_CBR(3, batchSize, numPoints, OC2, OC3, layer, relu2_output, output);
+    GPU_CBR(batchSize, numPoints, inics, OC1, cb3p.cb1, input, relu1_output);
+    GPU_CBR(batchSize, numPoints, OC1, OC2, cb3p.cb2, relu1_output, relu2_output);
+    GPU_CBR(batchSize, numPoints, OC2, OC3, cb3p.cb3, relu2_output, output);
     //printVector_GPU(output, bn * OC3);
     cudaFree(relu1_output);
     cudaFree(relu2_output);
@@ -960,32 +979,11 @@ float* bnWeights,float* bnBias,float* bnRM,float* bnRV,float* output,float esp =
     }
 }
 void FBRWRAP_GPU(int batchSize,int inFeatures,int outFeatures,float* input, 
-float* fcWeights, float* fcBias, 
-float* bnWeights,float* bnBias,float* bnRM,float* bnRV,float* output,float esp = 1e-5
+float* cudaFcWeights, float* cudaFcBias, 
+float* cudaBnWeights,float* cudaBnBias,float* cudaBnRM,float* cudaBnRV,float* output,float esp = 1e-5
 ){
     std::cout << "------------LAYER:FBRWRAP" << std::endl;
     // printf("inchannel %d,numPoints %d\n",inChannels,numPoints);
-    float* cudaFcWeights;
-    float* cudaFcBias;
-    cudaMalloc((void **)&cudaFcWeights, inFeatures * outFeatures * sizeof(float));
-    cudaMalloc((void **)&cudaFcBias, outFeatures * sizeof(float));
-    cudaMemcpy(cudaFcWeights, fcWeights, inFeatures * outFeatures * sizeof(float), cudaMemcpyHostToDevice);
-    cudaMemcpy(cudaFcBias, fcBias, outFeatures * sizeof(float), cudaMemcpyHostToDevice);
-
-    float* cudaBnWeights;
-    float* cudaBnBias;
-    float* cudaBnRV;
-    float* cudaBnRM;
-    cudaMalloc((void **)&cudaBnWeights, outFeatures * sizeof(float));
-    cudaMalloc((void **)&cudaBnBias, outFeatures * sizeof(float));
-    cudaMalloc((void **)&cudaBnRV, outFeatures * sizeof(float));
-    cudaMalloc((void **)&cudaBnRM, outFeatures * sizeof(float));
-
-    cudaMemcpy(cudaBnWeights, bnWeights, outFeatures * sizeof(float), cudaMemcpyHostToDevice);
-    cudaMemcpy(cudaBnBias, bnBias, outFeatures * sizeof(float), cudaMemcpyHostToDevice);
-    cudaMemcpy(cudaBnRV, bnRV, outFeatures * sizeof(float), cudaMemcpyHostToDevice);
-    cudaMemcpy(cudaBnRM, bnRM, outFeatures * sizeof(float), cudaMemcpyHostToDevice);
-
     const int BLK_X = 32;
     const int BLK_Y = 32;
     dim3 blockDim(BLK_X,BLK_Y);
@@ -993,45 +991,20 @@ float* bnWeights,float* bnBias,float* bnRM,float* bnRV,float* output,float esp =
     FBRWRAP_Kernel<<<gridDim,blockDim>>>(BLK_X,BLK_Y,outFeatures,batchSize,inFeatures,input,cudaFcWeights,cudaFcBias,cudaBnWeights,cudaBnBias,cudaBnRM,cudaBnRV,
     output);
 
-    cudaFree(cudaFcWeights);
-    cudaFree(cudaFcBias);
-    cudaFree(cudaBnWeights);
-    cudaFree(cudaBnBias);
-    cudaFree(cudaBnRV);
-    cudaFree(cudaBnRM);
-
     // 检查内核启动是否成功
     CUDA_CHECK(cudaGetLastError());
-
     // 同步设备并检查执行错误
     CUDA_CHECK(cudaDeviceSynchronize());
 }
-void GPU_FBR(int i, int batchSize, int inFeatures, 
-int outFeatures,const std::string &layer, float* input, float* reluOutput , int param_offset)
+void GPU_FBR(int batchSize, int inFeatures, 
+int outFeatures,wbBnP& fbp, float* input, float* reluOutput)
 {
-    std::cout << "--------FBR" << i << std::endl;
-    std::string fiStr = std::to_string(i);
-    std::string biStr = std::to_string(i+param_offset);
-    std::string fcStr = layer + "fc" + fiStr;
-    std::string bnStr = layer + "bn" + biStr;    
-    //**wrap */
-    FBRWRAP_GPU(batchSize,inFeatures,outFeatures,input,params[fcStr + ".weight"].data(),params[fcStr + ".bias"].data(),
-    params[bnStr + ".weight"].data(),params[bnStr + ".bias"].data(),params[RM(bnStr)].data(),params[RV(bnStr)].data(),reluOutput);
-
-    //**No wrap**:
-    // int bOF = batchSize * outFeatures;
-    // float* fc;
-    // float* bn;
-    // cudaMalloc((void **)&fc, bOF * sizeof(float));
-    // cudaMalloc((void **)&bn, bOF * sizeof(float));
-    // Linear_GPU(batchSize,inFeatures, outFeatures,params[fcStr + ".weight"].data(), params[fcStr + ".bias"].data(), input, fc);
-    // BatchNorm1d_GPU(outFeatures, batchSize, 1,params[bnStr + ".weight"].data(), params[bnStr + ".bias"].data(), params[RM(bnStr)].data(), params[RV(bnStr)].data(), fc, bn);
-    // ReLU_GPU(batchSize,1,outFeatures,bn, reluOutput);
-    // cudaFree(fc);
-    // cudaFree(bn);
+    FBRWRAP_GPU(batchSize,inFeatures,outFeatures,input,
+    fbp.weight,fbp.bias,
+    fbp.bn_weight,fbp.bn_bias,
+    fbp.bn_mean,fbp.bn_var,reluOutput);
 }
-void GPU_FBR_2_F(int OC1,int OC2,int OC3,int batchSize,int inics,const std::string& layer, float* input, float* output,int param_offset=3,
-const std::vector<float>& C1={},const std::vector<float>& C2={},bool compare=false)
+void GPU_FBR_2_F(int OC1,int OC2,int OC3,int batchSize,int inics,FB2FP &fb2f, float* input, float* output,int param_offset=3)
 {
     std::cout << "----START FBR_2_F" << std::endl;
     float* relu1_output;
@@ -1040,16 +1013,9 @@ const std::vector<float>& C1={},const std::vector<float>& C2={},bool compare=fal
     cudaMalloc((void **)&relu1_output, batchSize*OC1 * sizeof(float));
     cudaMalloc((void **)&relu2_output, batchSize*OC2 * sizeof(float));
 
-    GPU_FBR(1,batchSize,inics,OC1,layer,input,relu1_output,param_offset);
-    if(compare)
-        compareVectors_GPU(C1,relu1_output,batchSize*OC1);
-    GPU_FBR(2,batchSize,OC1,OC2,layer,relu1_output,relu2_output,param_offset);
-    if(compare)
-        compareVectors_GPU(C2,relu2_output,batchSize*OC2);
-
-    std::string iStr = std::to_string(3);
-    std::string fcStr = layer + "fc" + iStr;
-    Linear_GPU(batchSize,OC2, OC3,params[fcStr + ".weight"].data(), params[fcStr + ".bias"].data(), relu2_output, output);
+    GPU_FBR(batchSize,inics,OC1,fb2f.fb1,input,relu1_output);
+    GPU_FBR(batchSize,OC1,OC2,fb2f.fb2,relu1_output,relu2_output);
+    Linear_GPU(batchSize,OC2, OC3,fb2f.f3.weight, fb2f.f3.bias, relu2_output, output);
 
     cudaFree(relu1_output);
     cudaFree(relu2_output);
@@ -1082,9 +1048,9 @@ std::vector<int> Inference_GPU (int inChannels,
     float* maxp_output;
     cudaMalloc((void **)&CBR3_output, bn * OC3 * sizeof(float));
     cudaMalloc((void **)&maxp_output, batchSize * OC3 * sizeof(float));
-    GPU_CBR_3(OC1,OC2,OC3, batchSize, numPoints,inChannels,"feat.stn.", input, CBR3_output);   // conv-bn-relu * 3
+    GPU_CBR_3(OC1,OC2,OC3, batchSize, numPoints,inChannels,dParams.stn3dp.cb3, input, CBR3_output);   // conv-bn-relu * 3
     GPU_MaxPooling(OC3, batchSize, numPoints,CBR3_output, maxp_output); // Max pooling    
-    GPU_FBR_2_F(FC_OC1,FC_OC2,FC_OC3,batchSize,OC3,"feat.stn.",maxp_output,stn3d_out);// fc-bn-relu * 2 + fc
+    GPU_FBR_2_F(FC_OC1,FC_OC2,FC_OC3,batchSize,OC3,dParams.stn3dp.fb2f,maxp_output,stn3d_out);// fc-bn-relu * 2 + fc
     if (compare)
     {
         compareVectors_GPU(C1,CBR3_output,bn*OC3);
@@ -1117,7 +1083,7 @@ std::vector<int> Inference_GPU (int inChannels,
     GPU_transpose(input,input_trans,batchSize,inChannels,numPoints);
     GPU_Bmm(input_trans,stn3d_out,bmm1_res,numPoints,inChannels,inChannels,encoderIC1,batchSize);
     GPU_transpose(bmm1_res,bmm1_res_trans,batchSize,numPoints,encoderIC1);
-    GPU_CBR(1,batchSize,numPoints,encoderIC1,fstn_inChannel,"feat.",bmm1_res_trans,fstn_input);
+    GPU_CBR(batchSize,numPoints,encoderIC1,fstn_inChannel,dParams.featp.cb1,bmm1_res_trans,fstn_input);
     cudaFree(input_trans);
     cudaFree(bmm1_res);
     cudaFree(bmm1_res_trans);
@@ -1133,9 +1099,9 @@ std::vector<int> Inference_GPU (int inChannels,
     float* fstn_maxp_output;
     cudaMalloc((void **)&fstn_CBR3_output, bn * fstn_OC3 * sizeof(float));
     cudaMalloc((void **)&fstn_maxp_output, batchSize * fstn_OC3 * sizeof(float));
-    GPU_CBR_3(fstn_OC1,fstn_OC2,fstn_OC3, batchSize, numPoints,fstn_inChannel,"feat.fstn.", fstn_input, fstn_CBR3_output);   // conv-bn-relu * 3
+    GPU_CBR_3(fstn_OC1,fstn_OC2,fstn_OC3, batchSize, numPoints,fstn_inChannel,dParams.stnkdp.cb3, fstn_input, fstn_CBR3_output);   // conv-bn-relu * 3
     GPU_MaxPooling(fstn_OC3, batchSize, numPoints,fstn_CBR3_output, fstn_maxp_output); // Max pooling
-    GPU_FBR_2_F(fstn_FC_OC1,fstn_FC_OC2,fstn_FC_OC3,batchSize,fstn_OC3,"feat.fstn.",fstn_maxp_output,stnkd_out);// fc-bn-relu * 2 + fc
+    GPU_FBR_2_F(fstn_FC_OC1,fstn_FC_OC2,fstn_FC_OC3,batchSize,fstn_OC3,dParams.stnkdp.fb2f,fstn_maxp_output,stnkd_out);// fc-bn-relu * 2 + fc
     matrix_add_I(stnkd_out,64,batchSize);
     cudaFree(fstn_CBR3_output);
     cudaFree(fstn_maxp_output);
@@ -1153,7 +1119,7 @@ std::vector<int> Inference_GPU (int inChannels,
     GPU_transpose(fstn_input,fstn_input_trans,batchSize,fstn_inChannel,numPoints);
     GPU_Bmm(fstn_input_trans,stnkd_out,fstn_bmm1_res,numPoints,fstn_inChannel,fstn_inChannel,fstn_inChannel,batchSize);
     GPU_transpose(fstn_bmm1_res,fstn_bmm1_res_trans,batchSize,numPoints,fstn_inChannel);
-    GPU_CBR(2,batchSize,numPoints,fstn_inChannel,encoderOC2,"feat.",fstn_bmm1_res_trans,cbr2_output);
+    GPU_CBR(batchSize,numPoints,fstn_inChannel,encoderOC2,dParams.featp.cb2,fstn_bmm1_res_trans,cbr2_output);
     //------CB MAX
     int encoderOC3 = 1024;
     int bnEOC3 = batchSize * numPoints * encoderOC3;
@@ -1165,22 +1131,22 @@ std::vector<int> Inference_GPU (int inChannels,
     cudaMalloc((void **)&encoder_output, batchSize * encoderOC3 * sizeof(float));
     std::string convStr = "feat.conv3";
     std::string bnStr = "feat.bn3";
-    CBWRAP_GPU(batchSize,numPoints,encoderOC2,encoderOC3,1,cbr2_output,params[convStr + ".weight"].data(), params[convStr + ".bias"].data(),
-    params[bnStr + ".weight"].data(), params[bnStr + ".bias"].data(), params[RM(bnStr)].data(), params[RV(bnStr)].data(),feat_bn3);
-    // Conv1d_GPU(batchSize,numPoints,encoderOC2, encoderOC3, 1,cbr2_output, params[convStr + ".weight"].data(), params[convStr + ".bias"].data(), feat_conv3);
-    // BatchNorm1d_GPU(encoderOC3, batchSize, numPoints,params[bnStr + ".weight"].data(), params[bnStr + ".bias"].data(), params[RM(bnStr)].data(), params[RV(bnStr)].data(),feat_conv3,feat_bn3);
+    CBWRAP_GPU(batchSize,numPoints,encoderOC2,encoderOC3,1,cbr2_output,
+    dParams.featp.cb3.weight, dParams.featp.cb3.bias,
+    dParams.featp.cb3.bn_weight, dParams.featp.cb3.bn_bias, 
+    dParams.featp.cb3.bn_mean, dParams.featp.cb3.bn_var,feat_bn3);
     GPU_MaxPooling(encoderOC3, batchSize, numPoints,feat_bn3, encoder_output); // Max pooling
+    
     cudaFree(fstn_input_trans);
     cudaFree(fstn_bmm1_res);
     cudaFree(fstn_bmm1_res_trans); // B C N
     cudaFree(cbr2_output);
-    //cudaFree(feat_conv3);
     cudaFree(feat_bn3);
 
     std::cout << "PART5:CLASSIFY" << std::endl;
     float* softmax_input;
     cudaMalloc((void **)&softmax_input,sizeof(float)*batchSize*10);
-    GPU_FBR_2_F(512,256,10,batchSize,encoderOC3,"",encoder_output,softmax_input,0);// fc-bn-relu * 2 + fc
+    GPU_FBR_2_F(512,256,10,batchSize,encoderOC3,dParams.nonep,encoder_output,softmax_input,0);// fc-bn-relu * 2 + fc
     LogSoftMax_GPU(softmax_input, output, 10 , batchSize);
     std::cout << "----FINAL RESULT" << std::endl;
     std::vector<int> result(batchSize);
@@ -1686,6 +1652,12 @@ int main(int argc, char *argv[]) {
     int ic = 3;
     int correct_num =0;
 
+    //迁移参数
+    read_stndP("feat.stn.", dParams.stn3dp);
+    read_stndP("feat.fstn.", dParams.stnkdp);
+    read_CB3P("feat.", dParams.featp);
+    read_FB2FP("", dParams.nonep, 0);
+
     // 开始计时，使用chrono计时，不支持其它计时方式
     std::cout << "total :" << list_of_labels.size() << std::endl;
     for (size_t i = 0; i < list_of_points.size(); i+=batchSize) {
@@ -1750,7 +1722,7 @@ int main(int argc, char *argv[]) {
     std::cout << "total :" << list_of_labels.size() << std::endl;
     std::cout << "correct_num :" << correct_num << std::endl;
 	float correct_rate = (float)correct_num/(float)list_of_labels.size();
-
+    freeDP(dParams);
 	// 向主机端同步以等待所有异步调用的GPU kernel执行完毕，这句必须要有
 	cudaDeviceSynchronize();
 

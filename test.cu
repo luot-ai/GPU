@@ -347,7 +347,7 @@ __global__ void Maxpooling_Kernel(float* input,float* output,int numPoints)
 }
 void GPU_MaxPooling(int ics, int batchSize, int numPoints,float* input, float* output)
 {
-    std::cout << "----START MAXPOOLING" << std::endl;
+    //std::cout << "----START MAXPOOLING" << std::endl;
     dim3 gridDim(ics*batchSize);
     dim3 blockDim(1024);
     Maxpooling_Kernel<<<gridDim, blockDim>>>(input, output,numPoints);
@@ -381,7 +381,7 @@ __global__ void BMM_Kernel(float* input_A,float* input_B,float* output,int M_A,i
 }
 void GPU_Bmm(float* input_A,float* input_B,float* output,int M_A,int K_A,int K_B,int N_B,int BatchSize = 1)
 {
-    std::cout << "--------BMM" << std::endl;
+    //std::cout << "--------BMM" << std::endl;
 
     const int BLK_X = 32;
     const int BLK_Y = 32;
@@ -454,7 +454,7 @@ __global__ void linear_Kernel(int inFeatures,float* weight,float* bias,float* in
     }
 }
 void Linear_GPU(int batchSize,int inFeatures, int outFeatures,float* cudaWeights,float* cudaBias,float* input,float* output){
-    std::cout << "------------LAYER:linear" << std::endl;
+    //std::cout << "------------LAYER:linear" << std::endl;
     dim3 blockDim(32,32);
     dim3 gridDim((outFeatures+31)/32,(batchSize+31)/32);
     linear_Kernel<<<gridDim,blockDim>>>(inFeatures,cudaWeights,cudaBias,input,output,outFeatures,batchSize);
@@ -476,7 +476,7 @@ __global__ void ReLu_Kernel(float *input,float *output)
 
 }
 void ReLU_GPU(int batchSize,int numPoints,int OC,float* input,float* output){
-    std::cout << "------------LAYER:relu" << std::endl;
+    //std::cout << "------------LAYER:relu" << std::endl;
     // const int BLK_X = 32;
     // const int BLK_Y = 32;
 
@@ -525,7 +525,7 @@ void BatchNorm1d_GPU(int numFeatures, int batchSize, int numPoints,float* weight
     cudaMemcpy(cudaRV, running_var, numFeatures * sizeof(float), cudaMemcpyHostToDevice);
     cudaMemcpy(cudaRM, running_mean, numFeatures * sizeof(float), cudaMemcpyHostToDevice);
 
-    std::cout << "------------LAYER:batchnorm" << std::endl;
+    //std::cout << "------------LAYER:batchnorm" << std::endl;
     dim3 blockDim(numFeatures);
     dim3 gridDim(batchSize);
     BatchNorm1d_Kernel<<<gridDim, blockDim>>>(numPoints,cudaWeights,cudaBias,cudaRM,cudaRV,input,output);
@@ -568,7 +568,7 @@ __global__ void Conv1d_Kernel(int outChannels,int batchSize,int numPoints,int in
 }
 void Conv1d_GPU(int batchSize,int numPoints,int inChannels,int outChannels,int kSize,float* input, float* weights, float* bias, float* output ){
     //int L=numPoints;
-    std::cout << "------------LAYER:convolution" << std::endl;
+    //std::cout << "------------LAYER:convolution" << std::endl;
 
     float* cudaWeights;
     float* cudaBias;
@@ -702,7 +702,7 @@ void CBWRAP_GPU(int batchSize,int numPoints,int inChannels,int outChannels,int k
 float* cudaConvWeights, float* cudaConvBias, 
 float* cudaBnWeights,float* cudaBnBias,float* cudaBnRM,float* cudaBnRV,float* output,float esp = 1e-5
 ){
-    std::cout << "------------LAYER:CBWRAP" << std::endl;
+    //std::cout << "------------LAYER:CBWRAP" << std::endl;
     const int BLK_X = 8;
     const int BLK_Y = 8;
     dim3 blockDim(BLK_X, BLK_Y);
@@ -710,7 +710,7 @@ float* cudaBnWeights,float* cudaBnBias,float* cudaBnRM,float* cudaBnRV,float* ou
 
     if (numPoints % BLK_X == 0)
     {
-        printf("hey!!\n");
+        //printf("hey!!\n");
         CBWRAP_Kernel_np4tms<BLK_X, BLK_Y><<<gridDim, blockDim>>>(outChannels, batchSize, numPoints, inChannels, input, cudaConvWeights, cudaConvBias,
                                                                   cudaBnWeights, cudaBnBias, cudaBnRM, cudaBnRV, output);
     }
@@ -870,7 +870,7 @@ void CBRWRAP_GPU(int batchSize,int numPoints,int inChannels,int outChannels,int 
 float* cudaConvWeights, float* cudaConvBias, 
 float* cudaBnWeights,float* cudaBnBias,float* cudaBnRM,float* cudaBnRV,float* output,float esp = 1e-5
 ){
-    std::cout << "------------LAYER:CBRWRAP" << std::endl;
+    //std::cout << "------------LAYER:CBRWRAP" << std::endl;
     // printf("inchannel %d,numPoints %d\n",inChannels,numPoints);
 
     const int BLK_X = 8;
@@ -891,7 +891,7 @@ float* cudaBnWeights,float* cudaBnBias,float* cudaBnRM,float* cudaBnRV,float* ou
         //printf("KERNEL: inchannel %d, outchannel %d, numPoints %d\n",inChannels,outChannels,numPoints);
         if (numPoints % BLK_X == 0)
         {
-            printf("hey!!\n");
+            //printf("hey!!\n");
             CBRWRAP_Kernel_np4tms<BLK_X, BLK_Y><<<gridDim, blockDim>>>( outChannels, batchSize, numPoints, inChannels, input, cudaConvWeights, cudaConvBias,
                                               cudaBnWeights, cudaBnBias, cudaBnRM, cudaBnRV, output);
         }
@@ -912,7 +912,7 @@ void GPU_CBR(int batchSize, int numPoints, int inics, int OC,wbBnP& wbBnP, float
     wbBnP.bn_weight,wbBnP.bn_bias,wbBnP.bn_mean,wbBnP.bn_var,reluOutput);
 }
 void GPU_CBR_3 (int OC1,int OC2,int OC3,int batchSize,int numPoints,int inics,CB3P &cb3p, float* input, float* output) {
-    std::cout << "----START CBR_3" << std::endl;
+    //std::cout << "----START CBR_3" << std::endl;
     int bn = batchSize * numPoints;
     float* relu1_output;
     float* relu2_output;
@@ -965,7 +965,7 @@ void FBRWRAP_GPU(int batchSize,int inFeatures,int outFeatures,float* input,
 float* cudaFcWeights, float* cudaFcBias, 
 float* cudaBnWeights,float* cudaBnBias,float* cudaBnRM,float* cudaBnRV,float* output,float esp = 1e-5
 ){
-    std::cout << "------------LAYER:FBRWRAP" << std::endl;
+    //std::cout << "------------LAYER:FBRWRAP" << std::endl;
     // printf("inchannel %d,numPoints %d\n",inChannels,numPoints);
     const int BLK_X = 32;
     const int BLK_Y = 32;
@@ -989,7 +989,7 @@ int outFeatures,wbBnP& fbp, float* input, float* reluOutput)
 }
 void GPU_FBR_2_F(int OC1,int OC2,int OC3,int batchSize,int inics,FB2FP &fb2f, float* input, float* output,int param_offset=3)
 {
-    std::cout << "----START FBR_2_F" << std::endl;
+    //std::cout << "----START FBR_2_F" << std::endl;
     float* relu1_output;
     float* relu2_output;
 
@@ -1016,8 +1016,8 @@ std::vector<int> Inference_GPU (int inChannels,
             const std::vector<float>& C3={},
             const std::vector<float>& C4={},
             bool compare=false) {
-    std::cout << "**********************START INFERENCE************************" << std::endl;
-    std::cout << "PART1:STN3d" << std::endl;
+    // std::cout << "**********************START INFERENCE************************" << std::endl;
+    // std::cout << "PART1:STN3d" << std::endl;
     int bn = batchSize * numPoints;
     int OC1 = 64;
     int OC2 = 128;
@@ -1050,7 +1050,7 @@ std::vector<int> Inference_GPU (int inChannels,
     cudaFree(CBR3_output);
     cudaFree(maxp_output);
 
-    std::cout << "PART2:TRANS->BMM->TRANS->CBR" << std::endl;
+    // std::cout << "PART2:TRANS->BMM->TRANS->CBR" << std::endl;
     int encoderIC1 = inChannels;
     int fstn_inChannel = 64;//encoderOC1
     float* input_trans;
@@ -1069,7 +1069,7 @@ std::vector<int> Inference_GPU (int inChannels,
     cudaFree(bmm1_res);
     cudaFree(bmm1_res_trans);
 
-    std::cout << "PART3:STNkd"<< std::endl;
+    // std::cout << "PART3:STNkd"<< std::endl;
     int fstn_OC1 = 64;
     int fstn_OC2 = 128;
     int fstn_OC3 = 1024;
@@ -1087,7 +1087,7 @@ std::vector<int> Inference_GPU (int inChannels,
     cudaFree(fstn_CBR3_output);
     cudaFree(fstn_maxp_output);
 
-    std::cout << "PART4:TRANS->BMM->TRANS->CBR->CBM" << std::endl;
+    // std::cout << "PART4:TRANS->BMM->TRANS->CBR->CBM" << std::endl;
     int encoderOC2 = 128;
     float* fstn_input_trans;
     float* fstn_bmm1_res;
@@ -1124,12 +1124,12 @@ std::vector<int> Inference_GPU (int inChannels,
     cudaFree(cbr2_output);
     cudaFree(feat_bn3);
 
-    std::cout << "PART5:CLASSIFY" << std::endl;
+    // std::cout << "PART5:CLASSIFY" << std::endl;
     float* softmax_input;
     cudaMalloc((void **)&softmax_input,sizeof(float)*batchSize*10);
     GPU_FBR_2_F(512,256,10,batchSize,encoderOC3,dParams.nonep,encoder_output,softmax_input,0);// fc-bn-relu * 2 + fc
     LogSoftMax_GPU(softmax_input, output, 10 , batchSize);
-    std::cout << "----FINAL RESULT" << std::endl;
+    // std::cout << "----FINAL RESULT" << std::endl;
     std::vector<int> result(batchSize);
 
     std::vector<float> softmax_output_cpu(batchSize * 10);
@@ -1179,10 +1179,10 @@ int main(int argc, char *argv[]) {
     read_FB2FP("", dParams.nonep, 0);
 
     // 开始计时，使用chrono计时，不支持其它计时方式
-    std::cout << "total :" << list_of_labels.size() << std::endl;
+    //std::cout << "total :" << list_of_labels.size() << std::endl;
     for (size_t i = 0; i < list_of_points.size(); i+=batchSize) {
 
-        std::cout << "ITERATION: " << i << ": ";
+        //std::cout << "ITERATION: " << i << ": ";
 
         //当前循环BATCHSIZE
         size_t curB = (batchSize < list_of_points.size() - i) ? batchSize : list_of_points.size() - i;
@@ -1194,7 +1194,7 @@ int main(int argc, char *argv[]) {
             np = (list_of_points[i + j].size() / ic < np) ? list_of_points[i + j].size() / ic : np;
         }
 
-        std::cout << "CUTOFF INPUT: " << i << "np is : " << np <<std::endl;;
+        //std::cout << "CUTOFF INPUT: " << i << "np is : " << np <<std::endl;;
         std::vector<float> input(curB * np * ic);
         std::vector<float> trans(curB * ic * ic);
         std::vector<float> trans_feat(curB * 64 * 64);
@@ -1232,15 +1232,13 @@ int main(int argc, char *argv[]) {
         for (int b = 0; b < curB; ++b)
         {
             correct_num += (result[b] == list_of_labels[i + b]);
-            if (result[b] == list_of_labels[i + b])
-                std::cout << (i + b) << std::endl;
         }
-        std::cout << "END INFERENCE:: iter :" << i << " correct_num :" << correct_num << " iter_batchsize :" << curB << std::endl;
-        std::cout << "total :" << list_of_labels.size() << std::endl;
-        printVector<int> (result);
+        //std::cout << "END INFERENCE:: iter :" << i << " correct_num :" << correct_num << " iter_batchsize :" << curB << std::endl;
+        //std::cout << "total :" << list_of_labels.size() << std::endl;
+        //printVector<int> (result);
     }
-    std::cout << "total :" << list_of_labels.size() << std::endl;
-    std::cout << "correct_num :" << correct_num << std::endl;
+    //std::cout << "total :" << list_of_labels.size() << std::endl;
+    //std::cout << "correct_num :" << correct_num << std::endl;
 	float correct_rate = (float)correct_num/(float)list_of_labels.size();
     freeDP(dParams);
 	// 向主机端同步以等待所有异步调用的GPU kernel执行完毕，这句必须要有

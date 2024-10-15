@@ -1,5 +1,5 @@
 // 这是程序二的模板程序，我们已经准备好了加载数据集和加载程序一模型参数的部分，请实现CUDA的深度学习推理过程，请严格保持输出格式输出
-// 编译的命令为：nvcc P2.cu -o P2 -I./src/submodule -Xcompiler "-O3 -std=c++14" -gencode arch=compute_60,code=sm_60 -gencode arch=compute_61,code=sm_61 -gencode arch=compute_70,code=sm_70 -lhdf5_cpp -lhdf5
+// 编译的命令为：nvcc test.cu -o test -Xcompiler "-O3 -std=c++14" -gencode arch=compute_50,code=sm_50 -gencode arch=compute_52,code=sm_52 -gencode arch=compute_53,code=sm_53 -gencode arch=compute_60,code=sm_60 -gencode arch=compute_61,code=sm_61 -gencode arch=compute_62,code=sm_62 -gencode arch=compute_70,code=sm_70 -lhdf5 -lhdf5_cpp
 
 #include <random>
 #include <iostream>
@@ -14,13 +14,9 @@
 #include <dirent.h>
 #include <cstring>
 #include <hdf5/serial/H5Cpp.h>
-#include "Conv1d.hpp"
-#include "BatchNorm1d.hpp"
-#include "Linear.hpp"
-#include "ReLU.hpp"
-#include "Bmm.hpp"
-#include "compare.hpp"
-#include "usage.hpp"
+
+
+
 #include <cuda_runtime.h>
 
 
@@ -1034,16 +1030,16 @@ std::vector<int> Inference_GPU (int inChannels,
     GPU_FBR_2_F(FC_OC1,FC_OC2,FC_OC3,batchSize,OC3,dParams.stn3dp.fb2f,maxp_output,stn3d_out);// fc-bn-relu * 2 + fc
     if (compare)
     {
-        compareVectors_GPU(C1,CBR3_output,bn*OC3);
-        compareVectors_GPU(C2,maxp_output,batchSize*OC3);
-        compareVectors_GPU(C3,stn3d_out,batchSize*FC_OC3);
+        // compareVectors_GPU(C1,CBR3_output,bn*OC3);
+        // compareVectors_GPU(C2,maxp_output,batchSize*OC3);
+        // compareVectors_GPU(C3,stn3d_out,batchSize*FC_OC3);
     }
     matrix_add_I(stn3d_out,3,batchSize);
     if(compare)
     {
-        compareVectors_GPU(C4,stn3d_out,batchSize*FC_OC3);
-        printVector(C3);
-        printVector(C4);
+        // compareVectors_GPU(C4,stn3d_out,batchSize*FC_OC3);
+        // printVector(C3);
+        // printVector(C4);
     }
 
     
@@ -1211,16 +1207,17 @@ int main(int argc, char *argv[]) {
         }
 
         //输入输出
-        std::vector<float> input_trans(curB * np * ic);
-        transpose(input, input_trans, curB, np, ic);
+        float *device_input;
+        float *device_input_trans;
+        cudaMalloc((void **)&device_input_trans, curB * np * ic * sizeof(float));
+        cudaMalloc((void **)&device_input, curB * np * ic * sizeof(float));
+        cudaMemcpy(device_input, input.data(), curB * np * ic * sizeof(float), cudaMemcpyHostToDevice);
+        GPU_transpose(device_input,device_input_trans,curB, np, ic);
         std::vector<int> result(curB,0);
 
         //推理与结果
         int transSize = curB * ic * ic;
         int transFeatSize = curB * 64 * 64;
-        float *device_input_trans;
-        cudaMalloc((void **)&device_input_trans, curB * np * ic * sizeof(float));
-        cudaMemcpy(device_input_trans, input_trans.data(), curB * np * ic * sizeof(float), cudaMemcpyHostToDevice);
         float *trans_lt_gpu;
         float *trans_feat_lt_gpu;
         float *netOut_gpu;
@@ -1249,8 +1246,7 @@ int main(int argc, char *argv[]) {
     std::chrono::duration<double> diff = end - start;
 
     // 输出结果，请严格保持此输出格式，并把0.0001替换成实际的准确率，请不要输出除了此结果之外的任何内容！！！
-    std::cout << std::fixed << std::setprecision(4) << diff.count() << correct_rate;
-
+    std::cout << std::fixed << std::setprecision(4) << diff.count() << ":" << std::setprecision(4) << correct_rate;
     return 0;
 }
 

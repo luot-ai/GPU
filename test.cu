@@ -985,9 +985,7 @@ void GPU_FBR_2_F(int OC1,int OC2,int OC3,int batchSize,int inics,FB2FP &fb2f, fl
 
 std::vector<int> Inference_GPU (int inChannels,
             int batchSize,
-            int numPoints,float* input,float* output,
-            float* stn3d_out,
-            float* stnkd_out,
+            int numPoints,float* input,
             const std::vector<float>& C1={},
             const std::vector<float>& C2={},
             const std::vector<float>& C3={},
@@ -1012,33 +1010,76 @@ std::vector<int> Inference_GPU (int inChannels,
     int encoderOC2 = 128;
     int encoderOC3 = 1024;
     int bnEOC3 = batchSize * numPoints * encoderOC3;
+    int transSize = batchSize * inChannels * inChannels;
+    int transFeatSize = batchSize * fstn_inChannel * fstn_inChannel;
 
+    //stn3d
     float* relu1_output_stn_cbr;
     float* relu2_output_stn_cbr;
     float* CBR3_output;
     float* maxp_output;
     float* relu1_output_stn_fbr2f;
     float* relu2_output_stn_fbr2f;
+    float* stn3d_out;
+    //part2
+    float* input_trans;
+    float* bmm1_res;
+    float* bmm1_res_trans;
+    float* fstn_input;
+    //stnkd
     float* relu1_output_fstn_cbr;
     float* relu2_output_fstn_cbr;
+    float* fstn_CBR3_output;
+    float* fstn_maxp_output;
     float* relu1_output_fstn_fbr2f;
     float* relu2_output_fstn_fbr2f;
+    float* stnkd_out;
+    //part4
+    float* fstn_input_trans;
+    float* fstn_bmm1_res;
+    float* fstn_bmm1_res_trans; // B C N
+    float* cbr2_output;
+    float* feat_bn3;
+    float* encoder_output;
+    //classify
     float* relu1_output_part5_fbr2f;
     float* relu2_output_part5_fbr2f;
+    float* softmax_input;
+    float* output;
 
+    //stn3d
     cudaMalloc((void **)&relu1_output_stn_cbr, bn*OC1 * sizeof(float));
     cudaMalloc((void **)&relu2_output_stn_cbr, bn*OC2 * sizeof(float));
     cudaMalloc((void **)&CBR3_output, bn * OC3 * sizeof(float));
     cudaMalloc((void **)&maxp_output, batchSize * OC3 * sizeof(float));
     cudaMalloc((void **)&relu1_output_stn_fbr2f, batchSize*FC_OC1 * sizeof(float));
     cudaMalloc((void **)&relu2_output_stn_fbr2f, batchSize*FC_OC2 * sizeof(float));
-    
+    cudaMalloc((void **)&stn3d_out, transSize * sizeof(float));
+    //part2
+    cudaMalloc((void **)&input_trans, bn * inChannels * sizeof(float));
+    cudaMalloc((void **)&bmm1_res, batchSize*numPoints*encoderIC1 * sizeof(float));
+    cudaMalloc((void **)&bmm1_res_trans, batchSize*encoderIC1*numPoints * sizeof(float));
+    cudaMalloc((void **)&fstn_input, batchSize*fstn_inChannel*numPoints * sizeof(float));
+    //stnkd
     cudaMalloc((void **)&relu1_output_fstn_cbr, bn * fstn_OC1 * sizeof(float));
     cudaMalloc((void **)&relu2_output_fstn_cbr, bn * fstn_OC2 * sizeof(float));
+    cudaMalloc((void **)&fstn_CBR3_output, bn * fstn_OC3 * sizeof(float));
+    cudaMalloc((void **)&fstn_maxp_output, batchSize * fstn_OC3 * sizeof(float));
     cudaMalloc((void **)&relu1_output_fstn_fbr2f, batchSize * fstn_FC_OC1 * sizeof(float));
     cudaMalloc((void **)&relu2_output_fstn_fbr2f, batchSize * fstn_FC_OC2 * sizeof(float));
+    cudaMalloc((void **)&stnkd_out, transFeatSize * sizeof(float));
+    //part4
+    cudaMalloc((void **)&fstn_input_trans, bn * fstn_inChannel * sizeof(float));
+    cudaMalloc((void **)&fstn_bmm1_res, batchSize*numPoints*fstn_inChannel * sizeof(float));
+    cudaMalloc((void **)&fstn_bmm1_res_trans, batchSize*fstn_inChannel*numPoints * sizeof(float));
+    cudaMalloc((void **)&cbr2_output, batchSize*encoderOC2*numPoints * sizeof(float));
+    cudaMalloc((void **)&feat_bn3, bnEOC3 * sizeof(float));
+    cudaMalloc((void **)&encoder_output, batchSize * encoderOC3 * sizeof(float));
+    //classify
     cudaMalloc((void **)&relu1_output_part5_fbr2f, batchSize * 512 * sizeof(float));
     cudaMalloc((void **)&relu2_output_part5_fbr2f, batchSize * 256 * sizeof(float));
+    cudaMalloc((void **)&softmax_input,sizeof(float)*batchSize*10);
+    cudaMalloc((void **)&output, batchSize * 10 * sizeof(float));
 
     // std::cout << "PART1:STN3d" << std::endl;
     GPU_CBR_3(OC1,OC2,OC3, batchSize, numPoints,inChannels,dParams.stn3dp.cb3, input, CBR3_output,relu1_output_stn_cbr,relu2_output_stn_cbr);   // conv-bn-relu * 3
@@ -1060,14 +1101,6 @@ std::vector<int> Inference_GPU (int inChannels,
 
 
     // std::cout << "PART2:TRANS->BMM->TRANS->CBR" << std::endl;
-    float* input_trans;
-    float* bmm1_res;
-    float* bmm1_res_trans;
-    float* fstn_input;
-    cudaMalloc((void **)&input_trans, bn * inChannels * sizeof(float));
-    cudaMalloc((void **)&bmm1_res, batchSize*numPoints*encoderIC1 * sizeof(float));
-    cudaMalloc((void **)&bmm1_res_trans, batchSize*encoderIC1*numPoints * sizeof(float));
-    cudaMalloc((void **)&fstn_input, batchSize*fstn_inChannel*numPoints * sizeof(float));
     GPU_transpose(input,input_trans,batchSize,inChannels,numPoints);
     GPU_Bmm(input_trans,stn3d_out,bmm1_res,numPoints,inChannels,inChannels,encoderIC1,batchSize);
     GPU_transpose(bmm1_res,bmm1_res_trans,batchSize,numPoints,encoderIC1);
@@ -1075,10 +1108,6 @@ std::vector<int> Inference_GPU (int inChannels,
 
 
     // std::cout << "PART3:STNkd"<< std::endl;
-    float* fstn_CBR3_output;
-    float* fstn_maxp_output;
-    cudaMalloc((void **)&fstn_CBR3_output, bn * fstn_OC3 * sizeof(float));
-    cudaMalloc((void **)&fstn_maxp_output, batchSize * fstn_OC3 * sizeof(float));
     GPU_CBR_3(fstn_OC1,fstn_OC2,fstn_OC3, batchSize, numPoints,fstn_inChannel,dParams.stnkdp.cb3, fstn_input, fstn_CBR3_output,relu1_output_fstn_cbr,relu2_output_fstn_cbr);   // conv-bn-relu * 3
     GPU_MaxPooling(fstn_OC3, batchSize, numPoints,fstn_CBR3_output, fstn_maxp_output); // Max pooling
     GPU_FBR_2_F(fstn_FC_OC1,fstn_FC_OC2,fstn_FC_OC3,batchSize,fstn_OC3,dParams.stnkdp.fb2f,fstn_maxp_output,stnkd_out,relu1_output_fstn_fbr2f,relu2_output_fstn_fbr2f);// fc-bn-relu * 2 + fc
@@ -1086,23 +1115,11 @@ std::vector<int> Inference_GPU (int inChannels,
 
 
     // std::cout << "PART4:TRANS->BMM->TRANS->CBR->CBM" << std::endl;
-    float* fstn_input_trans;
-    float* fstn_bmm1_res;
-    float* fstn_bmm1_res_trans; // B C N
-    float* cbr2_output;
-    cudaMalloc((void **)&fstn_input_trans, bn * fstn_inChannel * sizeof(float));
-    cudaMalloc((void **)&fstn_bmm1_res, batchSize*numPoints*fstn_inChannel * sizeof(float));
-    cudaMalloc((void **)&fstn_bmm1_res_trans, batchSize*fstn_inChannel*numPoints * sizeof(float));
-    cudaMalloc((void **)&cbr2_output, batchSize*encoderOC2*numPoints * sizeof(float));
     GPU_transpose(fstn_input,fstn_input_trans,batchSize,fstn_inChannel,numPoints);
     GPU_Bmm(fstn_input_trans,stnkd_out,fstn_bmm1_res,numPoints,fstn_inChannel,fstn_inChannel,fstn_inChannel,batchSize);
     GPU_transpose(fstn_bmm1_res,fstn_bmm1_res_trans,batchSize,numPoints,fstn_inChannel);
     GPU_CBR(batchSize,numPoints,fstn_inChannel,encoderOC2,dParams.featp.cb2,fstn_bmm1_res_trans,cbr2_output);
     //------CB MAX
-    float* feat_bn3;
-    float* encoder_output;
-    cudaMalloc((void **)&feat_bn3, bnEOC3 * sizeof(float));
-    cudaMalloc((void **)&encoder_output, batchSize * encoderOC3 * sizeof(float));
     std::string convStr = "feat.conv3";
     std::string bnStr = "feat.bn3";
     CBWRAP_GPU(batchSize,numPoints,encoderOC2,encoderOC3,1,cbr2_output,
@@ -1113,13 +1130,10 @@ std::vector<int> Inference_GPU (int inChannels,
     
 
     // std::cout << "PART5:CLASSIFY" << std::endl;
-    float* softmax_input;
-    cudaMalloc((void **)&softmax_input,sizeof(float)*batchSize*10);
     GPU_FBR_2_F(512,256,10,batchSize,encoderOC3,dParams.nonep,encoder_output,softmax_input,relu1_output_part5_fbr2f,relu2_output_part5_fbr2f,0);// fc-bn-relu * 2 + fc
     LogSoftMax_GPU(softmax_input, output, 10 , batchSize);
     // std::cout << "----FINAL RESULT" << std::endl;
     std::vector<int> result(batchSize);
-
     std::vector<float> softmax_output_cpu(batchSize * 10);
     cudaMemcpy(softmax_output_cpu.data(), output, batchSize * 10 * sizeof(float), cudaMemcpyDeviceToHost);
     {
@@ -1139,30 +1153,36 @@ std::vector<int> Inference_GPU (int inChannels,
         }
     }
 
+    //stn3d
     cudaFree(relu1_output_stn_cbr);
     cudaFree(relu2_output_stn_cbr);
-    cudaFree(relu1_output_stn_fbr2f);
-    cudaFree(relu2_output_stn_fbr2f);
-    cudaFree(relu1_output_fstn_cbr);
-    cudaFree(relu2_output_fstn_cbr);
-    cudaFree(relu1_output_fstn_fbr2f);
-    cudaFree(relu2_output_fstn_fbr2f);
-    cudaFree(relu1_output_part5_fbr2f);
-    cudaFree(relu2_output_part5_fbr2f);
-
     cudaFree(CBR3_output);
     cudaFree(maxp_output);
+    cudaFree(relu1_output_stn_fbr2f);
+    cudaFree(relu2_output_stn_fbr2f);
+    cudaFree(stn3d_out);
     cudaFree(input_trans);
     cudaFree(bmm1_res);
     cudaFree(bmm1_res_trans);
+    cudaFree(fstn_input);
+    cudaFree(relu1_output_fstn_cbr);
+    cudaFree(relu2_output_fstn_cbr);
     cudaFree(fstn_CBR3_output);
     cudaFree(fstn_maxp_output);
+    cudaFree(relu1_output_fstn_fbr2f);
+    cudaFree(relu2_output_fstn_fbr2f);
+    cudaFree(stnkd_out);
     cudaFree(fstn_input_trans);
     cudaFree(fstn_bmm1_res);
-    cudaFree(fstn_bmm1_res_trans); // B C N
+    cudaFree(fstn_bmm1_res_trans);
     cudaFree(cbr2_output);
     cudaFree(feat_bn3);
+    cudaFree(encoder_output);
+    cudaFree(relu1_output_part5_fbr2f);
+    cudaFree(relu2_output_part5_fbr2f);
     cudaFree(softmax_input);
+    cudaFree(output);
+
     return result;
 }
 
@@ -1178,81 +1198,65 @@ int main(int argc, char *argv[]) {
     std::vector<int> list_of_labels;
     read_h5_file(file_path, list_of_points, list_of_labels);
 
-    // 开始计时，使用chrono计时，不支持其它计时方式
-    auto start = std::chrono::high_resolution_clock::now();
-    int batchSize = 4;
-    int ic = 3;
-    int correct_num =0;
-
     //迁移参数
     read_stndP("feat.stn.", dParams.stn3dp);
     read_stndP("feat.fstn.", dParams.stnkdp);
     read_CB3P("feat.", dParams.featp);
     read_FB2FP("", dParams.nonep, 0);
 
-    // 开始计时，使用chrono计时，不支持其它计时方式
-    //std::cout << "total :" << list_of_labels.size() << std::endl;
+    // 将数据拷贝到device端
+    size_t total_size = 0;
+    float *device_all_points;
+    for (const auto &points : list_of_points)
+    {
+        total_size += points.size();
+    }
+    cudaMalloc((void **)&device_all_points, total_size * sizeof(float));//先分配一个足够大的内存
+    int ic = 3;
+    size_t batchSize = 4;
+    int cpy_offset = 0;
     for (size_t i = 0; i < list_of_points.size(); i+=batchSize) {
-
-        //std::cout << "ITERATION: " << i << ": ";
-
-        //当前循环BATCHSIZE
-        size_t curB = (batchSize < list_of_points.size() - i) ? batchSize : list_of_points.size() - i;
-        
-        //当前循环中NUMPOINTS最少的点
-        int np = list_of_points[i].size() / ic;
-        for (int j = 0; j < curB; j++) 
-        {
-            np = (list_of_points[i + j].size() / ic < np) ? list_of_points[i + j].size() / ic : np;
-        }
-        std::cout << "CUTOFF INPUT: " << i << "np is : " << np <<std::endl;;
-        std::vector<float> input(curB * np * ic);
-        std::vector<float> trans(curB * ic * ic);
-        std::vector<float> trans_feat(curB * 64 * 64);
-        std::vector<float> final_x(curB * 10);
+        size_t curB = std::min(batchSize, list_of_points.size() - i);
+        size_t np = list_of_points[i].size() / ic;
+        for (int j = 0; j < curB; j++) {np = std::min(np, list_of_points[i + j].size() / ic);}
+        int bSize = np * ic;
+        int bWidth = curB * bSize;
+        std::vector<float> input(bWidth);
         for (int b = 0; b < curB; ++b)
         {
-            for (int w = 0; w < np; ++w)
-            {
-                for (int c = 0; c < ic; ++c)
-                {
-                    input[b * np * ic + w * ic + c] = list_of_points[i + b][w * ic + c];
-                }
-            }
+            std::memcpy(&input[b * bSize],
+                        &list_of_points[i + b][0],
+                        bSize * sizeof(float));
         }
+        cudaMemcpy(device_all_points + cpy_offset, input.data(), bWidth * sizeof(float), cudaMemcpyHostToDevice);
+        cpy_offset += bWidth;
+    }
 
-        //输入输出
-        float *device_input;
+    // 开始计时，使用chrono计时，不支持其它计时方式
+    auto start = std::chrono::high_resolution_clock::now();
+    int correct_num =0;
+    int inf_offset = 0;
+    for (size_t i = 0; i < list_of_points.size(); i+=batchSize) {
+        size_t curB = std::min(batchSize, list_of_points.size() - i);
+        size_t np = list_of_points[i].size() / ic;
+        for (int j = 0; j < curB; j++) {np = std::min(np, list_of_points[i + j].size() / ic);}
         float *device_input_trans;
         cudaMalloc((void **)&device_input_trans, curB * np * ic * sizeof(float));
-        cudaMalloc((void **)&device_input, curB * np * ic * sizeof(float));
-        cudaMemcpy(device_input, input.data(), curB * np * ic * sizeof(float), cudaMemcpyHostToDevice);
-        GPU_transpose(device_input,device_input_trans,curB, np, ic);
+        GPU_transpose(device_all_points + inf_offset,device_input_trans,curB, np, ic);
+        inf_offset += curB * np * ic;
         std::vector<int> result(curB,0);
 
         //推理与结果
-        int transSize = curB * ic * ic;
-        int transFeatSize = curB * 64 * 64;
-        float *trans_lt_gpu;
-        float *trans_feat_lt_gpu;
-        float *netOut_gpu;
-        cudaMalloc((void **)&trans_lt_gpu, transSize * sizeof(float));
-        cudaMalloc((void **)&trans_feat_lt_gpu, transFeatSize * sizeof(float));
-        cudaMalloc((void **)&netOut_gpu, curB * 10 * sizeof(float));
-        result = Inference_GPU(ic,curB,np,device_input_trans,netOut_gpu,trans_lt_gpu,trans_feat_lt_gpu);
-        //result=Inference_CPU(ic,curB,np, input_trans,final_x,trans,trans_feat);
+        result = Inference_GPU(ic,curB,np,device_input_trans);
         for (int b = 0; b < curB; ++b)
         {
             correct_num += (result[b] == list_of_labels[i + b]);
         }
-        //std::cout << "END INFERENCE:: iter :" << i << " correct_num :" << correct_num << " iter_batchsize :" << curB << std::endl;
-        //std::cout << "total :" << list_of_labels.size() << std::endl;
-        //printVector<int> (result);
+        cudaFree(device_input_trans);
     }
-    //std::cout << "total :" << list_of_labels.size() << std::endl;
-    //std::cout << "correct_num :" << correct_num << std::endl;
 	float correct_rate = (float)correct_num/(float)list_of_labels.size();
     freeDP(dParams);
+    cudaFree(device_all_points);
 	// 向主机端同步以等待所有异步调用的GPU kernel执行完毕，这句必须要有
 	cudaDeviceSynchronize();
 

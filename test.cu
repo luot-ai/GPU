@@ -116,6 +116,69 @@ struct NET {
     float* relu2_output_part5_fbr2f;
     float* softmax_input;
 };
+int cal_net_size(int batchSize, int numPoints, int inChannels){
+    int totalSize = 0;
+    int bn = batchSize * numPoints;
+    int OC1 = 64;
+    int OC2 = 128;
+    int OC3 = 1024;
+    int FC_OC1 = 512;
+    int FC_OC2 = 256;
+    //int FC_OC3 = 9;
+    int encoderIC1 = inChannels;
+    int fstn_inChannel = 64;//encoderOC1
+    int fstn_OC1 = 64;
+    int fstn_OC2 = 128;
+    int fstn_OC3 = 1024;
+    int fstn_FC_OC1 = 512;
+    int fstn_FC_OC2 = 256;
+    //int fstn_FC_OC3 = fstn_inChannel * fstn_inChannel ;
+    int encoderOC2 = 128;
+    int encoderOC3 = 1024;
+    int bnEOC3 = batchSize * numPoints * encoderOC3;
+    int transSize = batchSize * inChannels * inChannels;
+    int transFeatSize = batchSize * fstn_inChannel * fstn_inChannel;
+    //stn3d
+    int stn_1 = bn*inChannels;
+    int stn_2 = bn*OC1;
+    int stn_3 = bn*OC2;
+    int stn_4 = bn*OC3;
+    int stn_5 = batchSize*OC3;
+    int stn_6 = batchSize*FC_OC1;
+    int stn_7 = batchSize*FC_OC2;
+    int stn_8 = transSize;
+    //part2
+    int part2_1= batchSize*numPoints*encoderIC1 ;
+    int part2_2= batchSize*encoderIC1*numPoints ;
+    int part2_3= batchSize*fstn_inChannel*numPoints ;
+    //stnkd
+    int fstn_1= bn * fstn_OC1 ;
+    int fstn_2= bn * fstn_OC2 ;
+    int fstn_3= bn * fstn_OC3 ;
+    int fstn_4= batchSize * fstn_OC3 ;
+    int fstn_5= batchSize * fstn_FC_OC1 ;
+    int fstn_6= batchSize * fstn_FC_OC2 ;
+    int fstn_7= transFeatSize ;
+    //part4
+    int part4_1= bn * fstn_inChannel ;
+    int part4_2= batchSize*numPoints*fstn_inChannel ;
+    int part4_3= batchSize*fstn_inChannel*numPoints ;
+    int part4_4= batchSize*encoderOC2*numPoints ;
+    int part4_5= bnEOC3 ;
+    int part4_6= batchSize * encoderOC3 ;
+    //classify
+    int cla_1= batchSize * 512 ;
+    int cla_2= batchSize * 256 ;
+    int cla_3= batchSize * 10;
+
+    totalSize = stn_1 + stn_2 + stn_3 + stn_4 + stn_5 + stn_6 + stn_7 + stn_8 +
+    part2_1 + part2_2 + part2_3 +
+    fstn_1 + fstn_2 + fstn_3 + fstn_4 + fstn_5 + fstn_6 + fstn_7 + 
+    part4_1 + part4_2 + part4_3 + part4_4 + part4_5 + part4_6 + 
+    cla_1 + cla_2 + cla_3;
+
+    return totalSize;
+}
 
 struct fcp {
     float* weight; // Conv weight
@@ -1030,7 +1093,7 @@ void GPU_FBR_2_F(int OC1,int OC2,int OC3,int batchSize,int inics,FB2FP &fb2f, fl
 
 void Inference_GPU (int inChannels,
             int batchSize,
-            int numPoints,float* input,int* label,
+            int numPoints,float* input,int* label,float* device_output,
             const std::vector<float>& C1={},
             const std::vector<float>& C2={},
             const std::vector<float>& C3={},
@@ -1057,8 +1120,6 @@ void Inference_GPU (int inChannels,
     int bnEOC3 = batchSize * numPoints * encoderOC3;
     int transSize = batchSize * inChannels * inChannels;
     int transFeatSize = batchSize * fstn_inChannel * fstn_inChannel;
-
-    int totalSize = 0;
     //stn3d
     int stn_1 = bn*inChannels;
     int stn_2 = bn*OC1;
@@ -1092,14 +1153,6 @@ void Inference_GPU (int inChannels,
     int cla_2= batchSize * 256 ;
     int cla_3= batchSize*10;
 
-    totalSize = stn_1 + stn_2 + stn_3 + stn_4 + stn_5 + stn_6 + stn_7 + stn_8 +
-    part2_1 + part2_2 + part2_3 +
-    fstn_1 + fstn_2 + fstn_3 + fstn_4 + fstn_5 + fstn_6 + fstn_7 + 
-    part4_1 + part4_2 + part4_3 + part4_4 + part4_5 + part4_6 + 
-    cla_1 + cla_2 + cla_3;
-
-    float* device_output;
-    cudaMalloc((void**)&device_output,totalSize*sizeof(float));
     NET net;
     int offset = 0;
     //stn3d 
@@ -1142,19 +1195,7 @@ void Inference_GPU (int inChannels,
     GPU_CBR_3(OC1,OC2,OC3, batchSize, numPoints,inChannels,dParams.stn3dp.cb3, net.input_trans, net.CBR3_output,net.relu1_output_stn_cbr,net.relu2_output_stn_cbr);   // conv-bn-relu * 3
     GPU_MaxPooling(OC3, batchSize, numPoints,net.CBR3_output, net.maxp_output); // Max pooling    
     GPU_FBR_2_F(FC_OC1,FC_OC2,FC_OC3,batchSize,OC3,dParams.stn3dp.fb2f,net.maxp_output,net.stn3d_out,net.relu1_output_stn_fbr2f,net.relu1_output_stn_fbr2f);// fc-bn-relu * 2 + fc
-    if (compare)
-    {
-        // compareVectors_GPU(C1,CBR3_output,bn*OC3);
-        // compareVectors_GPU(C2,maxp_output,batchSize*OC3);
-        // compareVectors_GPU(C3,stn3d_out,batchSize*FC_OC3);
-    }
     matrix_add_I(net.stn3d_out,3,batchSize);
-    if(compare)
-    {
-        // compareVectors_GPU(C4,stn3d_out,batchSize*FC_OC3);
-        // printVector(C3);
-        // printVector(C4);
-    }
 
 
     // std::cout << "PART2:TRANS->BMM->TRANS->CBR" << std::endl;
@@ -1189,41 +1230,45 @@ void Inference_GPU (int inChannels,
     GPU_FBR_2_F(512,256,10,batchSize,encoderOC3,dParams.nonep,net.encoder_output,net.softmax_input,net.relu1_output_part5_fbr2f,net.relu2_output_part5_fbr2f,0);// fc-bn-relu * 2 + fc
     LogSoftMax_GPU(net.softmax_input,label, 10 , batchSize);
 
-    
-    cudaFree(device_output);
 }
 
 int main(int argc, char *argv[]) {
     
-    // 读取模型参数
+    // 定义模型参数
+    int ic = 3;
+    size_t batchSize = 4;
+
+    // 读取权重：主机
     std::string dir = argv[1]; 
     read_params(dir);
 
-    // 读取训练集数据
+    // 读取输入：主机
     std::string file_path = "./data/test_point_clouds.h5";
     std::vector<std::vector<float>> list_of_points;
     std::vector<int> list_of_labels;
     read_h5_file(file_path, list_of_points, list_of_labels);
+    int all_num = list_of_points.size();
 
-    //迁移参数
+    //迁移权重到device端
     read_stndP("feat.stn.", dParams.stn3dp);
     read_stndP("feat.fstn.", dParams.stnkdp);
     read_CB3P("feat.", dParams.featp);
     read_FB2FP("", dParams.nonep, 0);
 
-    // 将数据拷贝到device端
+    //分配输入内存：device端
     size_t total_size = 0;
     float *device_all_points;
     for (const auto &points : list_of_points)
     {
         total_size += points.size();
     }
-    cudaMalloc((void **)&device_all_points, total_size * sizeof(float));//先分配一个足够大的内存
-    int ic = 3;
-    size_t batchSize = 4;
+    cudaMalloc((void **)&device_all_points, total_size * sizeof(float));
+
+    // 迁移输入到device端
+    int maxNp = 0;
     int cpy_offset = 0;
-    for (size_t i = 0; i < list_of_points.size(); i+=batchSize) {
-        size_t curB = std::min(batchSize, list_of_points.size() - i);
+    for (size_t i = 0; i < all_num; i+=batchSize) {
+        size_t curB = std::min(batchSize, all_num - i);
         size_t np = list_of_points[i].size() / ic;
         for (int j = 0; j < curB; j++) {np = std::min(np, list_of_points[i + j].size() / ic);}
         int bSize = np * ic;
@@ -1237,27 +1282,32 @@ int main(int argc, char *argv[]) {
         }
         cudaMemcpy(device_all_points + cpy_offset, input.data(), bWidth * sizeof(float), cudaMemcpyHostToDevice);
         cpy_offset += bWidth;
+        if (np > maxNp) {maxNp = np;}
     }
+
     // 开始计时，使用chrono计时，不支持其它计时方式
-    //cudaProfilerStart();
     auto start = std::chrono::high_resolution_clock::now();
     int correct_num =0;
     int inf_offset = 0;
+    
+    // 分配输出内存：device端
     int *device_labels;
-    cudaMalloc((void **)&device_labels, list_of_points.size() * sizeof(int));
-    for (size_t i = 0; i < list_of_points.size(); i+=batchSize) {
-        size_t curB = std::min(batchSize, list_of_points.size() - i);
+    float *device_output;
+    int max_output_size = cal_net_size(batchSize, maxNp, ic);//batchSize>curB maxNp>np
+    cudaMalloc((void **)&device_labels, all_num * sizeof(int));
+    cudaMalloc((void **)&device_output, max_output_size * sizeof(float));
+
+    // 开始推理
+    for (size_t i = 0; i < all_num; i+=batchSize) {
+        size_t curB = std::min(batchSize, all_num - i);
         size_t np = list_of_points[i].size() / ic;
         for (int j = 0; j < curB; j++) {np = std::min(np, list_of_points[i + j].size() / ic);}
-        // float *device_input_trans;
-        // cudaMalloc((void **)&device_input_trans, curB * np * ic * sizeof(float));
-        // GPU_transpose(device_all_points + inf_offset,device_input_trans,curB, np, ic);
-        //推理与结果
-        Inference_GPU(ic, curB, np, device_all_points + inf_offset, device_labels + i);
+        Inference_GPU(ic, curB, np, device_all_points + inf_offset, device_labels + i , device_output);
         inf_offset += curB * np * ic;
-        //cudaFree(device_input_trans);
+        cudaMemset(device_output, 0, cal_net_size(curB, np, ic) * sizeof(float));
     }
-    int all_num = list_of_points.size();
+
+    // 计算准确率
     std::vector<int> result(all_num,0);
     cudaMemcpy(result.data(), device_labels, all_num * sizeof(int), cudaMemcpyDeviceToHost);
     for (size_t i = 0; i < all_num; i++) {
@@ -1266,12 +1316,17 @@ int main(int argc, char *argv[]) {
         }
     }
 	float correct_rate = (float)correct_num/(float)list_of_labels.size();
+
+    // 释放内存
     //cudaProfilerStop();
-    freeDP(dParams);
-    cudaFree(device_labels);
-    cudaFree(device_all_points);
+    freeDP(dParams);//权重
+    cudaFree(device_labels);//label
+    cudaFree(device_all_points);//输入
+    cudaFree(device_output);//输出
+
 	// 向主机端同步以等待所有异步调用的GPU kernel执行完毕，这句必须要有
 	cudaDeviceSynchronize();
+
     // 结束计时
     auto end = std::chrono::high_resolution_clock::now();
     //cudaProfilerStop();

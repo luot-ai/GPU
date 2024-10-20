@@ -1,7 +1,10 @@
 {
     "files.associations": {
-        "\"*.cu\"": "\"c\"",
+        "config": "plaintext",
         "*.cu": "cuda-cpp",
+        "\"*.cu\"": "\"c\"",
+        "*.cpp": "cpp",
+        "*.json": "jsonc",
         "array": "c",
         "atomic": "c",
         "*.tcc": "c",
@@ -51,7 +54,8 @@
         "stdexcept": "c",
         "streambuf": "c",
         "cinttypes": "c",
-        "typeinfo": "c"
+        "typeinfo": "c",
+        "cfloat": "cpp"
     },
     "C_Cpp.errorSquiggles": "disabled"
 }

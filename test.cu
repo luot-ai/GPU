@@ -84,6 +84,7 @@ void read_params(std::string dir) {
 
 struct NET {
     //stn3d
+    float* input_trans;
     float* relu1_output_stn_cbr;
     float* relu2_output_stn_cbr;
     float* CBR3_output;
@@ -92,7 +93,6 @@ struct NET {
     float* relu2_output_stn_fbr2f;
     float* stn3d_out;
     //part2
-    float* input_trans;
     float* bmm1_res;
     float* bmm1_res_trans;
     float* fstn_input;
@@ -1060,18 +1060,18 @@ void Inference_GPU (int inChannels,
 
     int totalSize = 0;
     //stn3d
-    int stn_1 = bn*OC1;
-    int stn_2 = bn*OC2;
-    int stn_3 = bn * OC3 ;
-    int stn_4 = batchSize * OC3 ;
-    int stn_5 = batchSize*FC_OC1 ;
-    int stn_6 = batchSize*FC_OC2 ;
-    int stn_7 = transSize ;
+    int stn_1 = bn*inChannels;
+    int stn_2 = bn*OC1;
+    int stn_3 = bn*OC2;
+    int stn_4 = bn*OC3;
+    int stn_5 = batchSize*OC3;
+    int stn_6 = batchSize*FC_OC1;
+    int stn_7 = batchSize*FC_OC2;
+    int stn_8 = transSize;
     //part2
-    int part2_1= bn * inChannels ;
-    int part2_2= batchSize*numPoints*encoderIC1 ;
-    int part2_3= batchSize*encoderIC1*numPoints ;
-    int part2_4= batchSize*fstn_inChannel*numPoints ;
+    int part2_1= batchSize*numPoints*encoderIC1 ;
+    int part2_2= batchSize*encoderIC1*numPoints ;
+    int part2_3= batchSize*fstn_inChannel*numPoints ;
     //stnkd
     int fstn_1= bn * fstn_OC1 ;
     int fstn_2= bn * fstn_OC2 ;
@@ -1092,8 +1092,8 @@ void Inference_GPU (int inChannels,
     int cla_2= batchSize * 256 ;
     int cla_3= batchSize*10;
 
-    totalSize = stn_1 + stn_2 + stn_3 + stn_4 + stn_5 + stn_6 + stn_7 + 
-    part2_1 + part2_2 + part2_3 + part2_4 + 
+    totalSize = stn_1 + stn_2 + stn_3 + stn_4 + stn_5 + stn_6 + stn_7 + stn_8 +
+    part2_1 + part2_2 + part2_3 +
     fstn_1 + fstn_2 + fstn_3 + fstn_4 + fstn_5 + fstn_6 + fstn_7 + 
     part4_1 + part4_2 + part4_3 + part4_4 + part4_5 + part4_6 + 
     cla_1 + cla_2 + cla_3;
@@ -1103,18 +1103,18 @@ void Inference_GPU (int inChannels,
     NET net;
     int offset = 0;
     //stn3d 
-    net.relu1_output_stn_cbr = device_output+offset;offset += stn_1;
-    net.relu2_output_stn_cbr = device_output+offset;offset += stn_2;
-    net.CBR3_output = device_output+offset;offset += stn_3;
-    net.maxp_output = device_output+offset;offset += stn_4;
-    net.relu1_output_stn_fbr2f = device_output+offset;offset += stn_5;
-    net.relu2_output_stn_fbr2f = device_output+offset;offset += stn_6;
-    net.stn3d_out = device_output+offset;offset += stn_7;
+    net.input_trans = device_output+offset;offset += stn_1;
+    net.relu1_output_stn_cbr = device_output+offset;offset += stn_2;
+    net.relu2_output_stn_cbr = device_output+offset;offset += stn_3;
+    net.CBR3_output = device_output+offset;offset += stn_4;
+    net.maxp_output = device_output+offset;offset += stn_5;
+    net.relu1_output_stn_fbr2f = device_output+offset;offset += stn_6;
+    net.relu2_output_stn_fbr2f = device_output+offset;offset += stn_7;
+    net.stn3d_out = device_output+offset;offset += stn_8;
     //part2
-    net.input_trans = device_output+offset;offset += part2_1;
-    net.bmm1_res = device_output+offset;offset += part2_2;
-    net.bmm1_res_trans = device_output+offset;offset += part2_3;
-    net.fstn_input = device_output+offset;offset += part2_4;
+    net.bmm1_res = device_output+offset;offset += part2_1;
+    net.bmm1_res_trans = device_output+offset;offset += part2_2;
+    net.fstn_input = device_output+offset;offset += part2_3;
     //stnkd
     net.relu1_output_fstn_cbr = device_output+offset;offset += fstn_1;
     net.relu2_output_fstn_cbr = device_output+offset;offset += fstn_2;
@@ -1138,7 +1138,8 @@ void Inference_GPU (int inChannels,
 
 
     // std::cout << "PART1:STN3d" << std::endl;
-    GPU_CBR_3(OC1,OC2,OC3, batchSize, numPoints,inChannels,dParams.stn3dp.cb3, input, net.CBR3_output,net.relu1_output_stn_cbr,net.relu2_output_stn_cbr);   // conv-bn-relu * 3
+    GPU_transpose(input,net.input_trans,batchSize,numPoints,inChannels);
+    GPU_CBR_3(OC1,OC2,OC3, batchSize, numPoints,inChannels,dParams.stn3dp.cb3, net.input_trans, net.CBR3_output,net.relu1_output_stn_cbr,net.relu2_output_stn_cbr);   // conv-bn-relu * 3
     GPU_MaxPooling(OC3, batchSize, numPoints,net.CBR3_output, net.maxp_output); // Max pooling    
     GPU_FBR_2_F(FC_OC1,FC_OC2,FC_OC3,batchSize,OC3,dParams.stn3dp.fb2f,net.maxp_output,net.stn3d_out,net.relu1_output_stn_fbr2f,net.relu1_output_stn_fbr2f);// fc-bn-relu * 2 + fc
     if (compare)
@@ -1157,8 +1158,7 @@ void Inference_GPU (int inChannels,
 
 
     // std::cout << "PART2:TRANS->BMM->TRANS->CBR" << std::endl;
-    GPU_transpose(input,net.input_trans,batchSize,inChannels,numPoints);
-    GPU_Bmm(net.input_trans,net.stn3d_out,net.bmm1_res,numPoints,inChannels,inChannels,encoderIC1,batchSize);
+    GPU_Bmm(input,net.stn3d_out,net.bmm1_res,numPoints,inChannels,inChannels,encoderIC1,batchSize);
     GPU_transpose(net.bmm1_res,net.bmm1_res_trans,batchSize,numPoints,encoderIC1);
     GPU_CBR(batchSize,numPoints,encoderIC1,fstn_inChannel,dParams.featp.cb1,net.bmm1_res_trans,net.fstn_input);
 
@@ -1249,13 +1249,13 @@ int main(int argc, char *argv[]) {
         size_t curB = std::min(batchSize, list_of_points.size() - i);
         size_t np = list_of_points[i].size() / ic;
         for (int j = 0; j < curB; j++) {np = std::min(np, list_of_points[i + j].size() / ic);}
-        float *device_input_trans;
-        cudaMalloc((void **)&device_input_trans, curB * np * ic * sizeof(float));
-        GPU_transpose(device_all_points + inf_offset,device_input_trans,curB, np, ic);
-        inf_offset += curB * np * ic;
+        // float *device_input_trans;
+        // cudaMalloc((void **)&device_input_trans, curB * np * ic * sizeof(float));
+        // GPU_transpose(device_all_points + inf_offset,device_input_trans,curB, np, ic);
         //推理与结果
-        Inference_GPU(ic, curB, np, device_input_trans, device_labels + i);
-        cudaFree(device_input_trans);
+        Inference_GPU(ic, curB, np, device_all_points + inf_offset, device_labels + i);
+        inf_offset += curB * np * ic;
+        //cudaFree(device_input_trans);
     }
     int all_num = list_of_points.size();
     std::vector<int> result(all_num,0);
@@ -1266,6 +1266,7 @@ int main(int argc, char *argv[]) {
         }
     }
 	float correct_rate = (float)correct_num/(float)list_of_labels.size();
+    //cudaProfilerStop();
     freeDP(dParams);
     cudaFree(device_labels);
     cudaFree(device_all_points);

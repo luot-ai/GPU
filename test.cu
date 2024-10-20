@@ -1189,8 +1189,8 @@ void Inference_GPU (int inChannels,
     GPU_FBR_2_F(512,256,10,batchSize,encoderOC3,dParams.nonep,net.encoder_output,net.softmax_input,net.relu1_output_part5_fbr2f,net.relu2_output_part5_fbr2f,0);// fc-bn-relu * 2 + fc
     LogSoftMax_GPU(net.softmax_input,label, 10 , batchSize);
 
-
-    //cudaFree(device_output);
+    
+    cudaFree(device_output);
 }
 
 int main(int argc, char *argv[]) {

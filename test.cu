@@ -755,7 +755,7 @@ float* bnWeights,float* bnBias,float* bnRM,float* bnRV,float* output,float esp =
 }
 
 template<int TILEX,int TILEY>
-__global__ void CBWRAP_Kernel_np4tms(int outChannels,int batchSize,int numPoints,int inChannels,float* input, 
+__global__ void CBWRAP_Kernel_np8tms(int outChannels,int batchSize,int numPoints,int inChannels,float* input, 
 float* convWeights, float* convBias, 
 float* bnWeights,float* bnBias,float* bnRM,float* bnRV,float* output,float esp = 1e-5 )
 {
@@ -815,7 +815,7 @@ float* cudaBnWeights,float* cudaBnBias,float* cudaBnRM,float* cudaBnRV,float* ou
     if (numPoints % BLK_X == 0)
     {
         //printf("hey!!\n");
-        CBWRAP_Kernel_np4tms<BLK_X, BLK_Y><<<gridDim, blockDim>>>(outChannels, batchSize, numPoints, inChannels, input, cudaConvWeights, cudaConvBias,
+        CBWRAP_Kernel_np8tms<BLK_X, BLK_Y><<<gridDim, blockDim>>>(outChannels, batchSize, numPoints, inChannels, input, cudaConvWeights, cudaConvBias,
                                                                   cudaBnWeights, cudaBnBias, cudaBnRM, cudaBnRV, output);
     }
     else
@@ -845,18 +845,9 @@ float* bnWeights,float* bnBias,float* bnRM,float* bnRV,float* output,float esp =
     int np = tx + bx * blockDim.x;
     int oc = ty + by * blockDim.y;
     int b = blockIdx.z;
-    //printf("KERNEL: inchannel %d, outchannel %d, numPoints %d\n",inChannels,outChannels,numPoints);
-    // if(oc >= outChannels || np >= numPoints)
-    //     return ;
     
     __shared__ float ds_weights[TILEX][TILEY];
     __shared__ float ds_input[TILEX][TILEY];
-    // __shared__ float ds_bias[TILEY];
-    // __shared__ float ds_bnRM[TILEY];
-    // __shared__ float ds_bnRV[TILEY];
-    // __shared__ float ds_bnB[TILEY];
-    // __shared__ float ds_bnW[TILEY];
-    // __shared__ float ds_res[TILEY];
 
     //phases
     float mean = bnRM[oc];
@@ -885,13 +876,12 @@ float* bnWeights,float* bnBias,float* bnRM,float* bnRV,float* output,float esp =
         __syncthreads();
     }
     res = (res - mean) / sqrt(var + esp) * bnW + bnB;
-    if (res < 0)
-        res = 0;
+    res = res < 0 ? 0 : res;
     if(np < numPoints)
         output[b * numPoints * outChannels + oc * numPoints + np] = res;
 }
 template<int TILEX,int TILEY>
-__global__ void CBRWRAP_Kernel_np4tms(int outChannels,int batchSize,int numPoints,int inChannels,float* input, 
+__global__ void CBRWRAP_Kernel_np8tms(int outChannels,int batchSize,int numPoints,int inChannels,float* input, 
 float* convWeights, float* convBias, 
 float* bnWeights,float* bnBias,float* bnRM,float* bnRV,float* output,float esp = 1e-5 )
 {
@@ -902,18 +892,10 @@ float* bnWeights,float* bnBias,float* bnRM,float* bnRV,float* output,float esp =
     int np = tx + bx * blockDim.x;
     int oc = ty + by * blockDim.y;
     int b = blockIdx.z;
-    //printf("KERNEL: inchannel %d, outchannel %d, numPoints %d\n",inChannels,outChannels,numPoints);
-    // if(oc >= outChannels || np >= numPoints)
-    //     return ;
+
     
     __shared__ float ds_weights[TILEX][TILEY];
     __shared__ float ds_input[TILEX][TILEY];
-    // __shared__ float ds_bias[TILEY];
-    // __shared__ float ds_bnRM[TILEY];
-    // __shared__ float ds_bnRV[TILEY];
-    // __shared__ float ds_bnB[TILEY];
-    // __shared__ float ds_bnW[TILEY];
-    // __shared__ float ds_res[TILEY];
 
     //phases
     float mean = bnRM[oc];
@@ -935,8 +917,7 @@ float* bnWeights,float* bnBias,float* bnRM,float* bnRV,float* output,float esp =
         __syncthreads();
     }
     res = (res - mean) / sqrt(var + esp) * bnW + bnB;
-    if (res < 0)
-        res = 0;
+    res = max(0.0f, res);
     output[b * numPoints * outChannels + oc * numPoints + np] = res;
 }
 __global__ void CBRWRAP_Kernel_ic3(int TILEX,int TILEY,int outChannels,int batchSize,int numPoints,int inChannels,float* input, 
@@ -996,7 +977,7 @@ float* cudaBnWeights,float* cudaBnBias,float* cudaBnRM,float* cudaBnRV,float* ou
         if (numPoints % BLK_X == 0)
         {
             //printf("hey!!\n");
-            CBRWRAP_Kernel_np4tms<BLK_X, BLK_Y><<<gridDim, blockDim>>>( outChannels, batchSize, numPoints, inChannels, input, cudaConvWeights, cudaConvBias,
+            CBRWRAP_Kernel_np8tms<BLK_X, BLK_Y><<<gridDim, blockDim>>>( outChannels, batchSize, numPoints, inChannels, input, cudaConvWeights, cudaConvBias,
                                               cudaBnWeights, cudaBnBias, cudaBnRM, cudaBnRV, output);
         }
         else
@@ -1271,6 +1252,7 @@ int main(int argc, char *argv[]) {
         size_t curB = std::min(batchSize, all_num - i);
         size_t np = list_of_points[i].size() / ic;
         for (int j = 0; j < curB; j++) {np = std::min(np, list_of_points[i + j].size() / ic);}
+        np = (np / 8) * 8;
         int bSize = np * ic;
         int bWidth = curB * bSize;
         std::vector<float> input(bWidth);
@@ -1302,6 +1284,7 @@ int main(int argc, char *argv[]) {
         size_t curB = std::min(batchSize, all_num - i);
         size_t np = list_of_points[i].size() / ic;
         for (int j = 0; j < curB; j++) {np = std::min(np, list_of_points[i + j].size() / ic);}
+        np = (np / 8) * 8;
         Inference_GPU(ic, curB, np, device_all_points + inf_offset, device_labels + i , device_output);
         inf_offset += curB * np * ic;
         cudaMemset(device_output, 0, cal_net_size(curB, np, ic) * sizeof(float));

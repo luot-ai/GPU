@@ -897,6 +897,9 @@ float* bnWeights,float* bnBias,float* bnRM,float* bnRV,float* output,float esp =
     __shared__ float ds_weights[TILEX][TILEY];
     __shared__ float ds_input[TILEX][TILEY];
 
+    // __shared__ float4 ds_weights[TILEX][TILEY/4];
+    // __shared__ float4 ds_input[TILEX][TILEY/4];
+
     //phases
     float mean = bnRM[oc];
     float var = bnRV[oc];
@@ -905,16 +908,43 @@ float* bnWeights,float* bnBias,float* bnRM,float* bnRV,float* output,float esp =
     float res = convBias[oc];
     for (int i = 0; i < inChannels / TILEX; ++i)
     {
-        // loading input and weights
+        // -----------------float4-global-memory-
+        // if (tx % 4 == 0)
+        // {
+        //     ds_weights[ty][tx/4] = reinterpret_cast<float4*>(convWeights)[(oc * inChannels + i * TILEX + tx) / 4];
+        //     ds_input[ty][tx/4] = reinterpret_cast<float4*>(input)[(b * numPoints * inChannels + (i * TILEY + ty) * numPoints + np) / 4];
+        // }
+        // __syncthreads();
+        // for (int j = 0; j < TILEX/4; j++)
+        // {
+        //     float4 w = ds_weights[ty][j];
+        //     float4 Csub = make_float4(0.0f, 0.0f, 0.0f, 0.0f);
+        //     Csub.x = ds_input[tx][j].x * w.x;
+        //     Csub.y = ds_input[tx][j+1].x * w.y;
+        //     Csub.z = ds_input[tx][j+2].x * w.z;
+        //     Csub.w = ds_input[tx][j+3].x * w.w;
+        //     res+=Csub.x+Csub.y+Csub.z+Csub.w;
+        // }
+        // -----------------original-
         ds_weights[ty][tx] = convWeights[oc * inChannels + i * TILEX + tx];
         ds_input[tx][ty] = input[b * numPoints * inChannels + (i * TILEY + ty) * numPoints + np];
         __syncthreads();
-        // calculate:iterations
         for (int j = 0; j < TILEX; ++j)
         {
             res += ds_weights[ty][j] * ds_input[tx][j];
         }
-        __syncthreads();
+        // -----------------float4-shared-memory-
+        // for (int j = 0; j < TILEX; j+=4)
+        // {
+        //     float4 w = *(float4*)&ds_weights[ty][j];
+        //     float4 x = *(float4*)&ds_input[tx][j];
+        //     float4 y ;
+        //     y.x = w.x * x.x;
+        //     y.y = w.y * x.y;
+        //     y.z = w.z * x.z;
+        //     y.w = w.w * x.w;
+        //     res+=y.x+y.y+y.z+y.w;
+        // }
     }
     res = (res - mean) / sqrt(var + esp) * bnW + bnB;
     res = max(0.0f, res);

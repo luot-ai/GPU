@@ -3,3 +3,4 @@ data/*
 P2
 test
 test.o
+device_info.o

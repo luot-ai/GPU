@@ -807,8 +807,8 @@ float* cudaConvWeights, float* cudaConvBias,
 float* cudaBnWeights,float* cudaBnBias,float* cudaBnRM,float* cudaBnRV,float* output,float esp = 1e-5
 ){
     //std::cout << "------------LAYER:CBWRAP" << std::endl;
-    const int BLK_X = 8;
-    const int BLK_Y = 8;
+    const int BLK_X = 32;
+    const int BLK_Y = 32;
     dim3 blockDim(BLK_X, BLK_Y);
     dim3 gridDim((numPoints + BLK_X - 1) / BLK_X, (outChannels + BLK_Y - 1) / BLK_Y, batchSize); // X:宽度 Y：高度
 
@@ -908,24 +908,6 @@ float* bnWeights,float* bnBias,float* bnRM,float* bnRV,float* output,float esp =
     float res = convBias[oc];
     for (int i = 0; i < inChannels / TILEX; ++i)
     {
-        // -----------------float4-global-memory-
-        // if (tx % 4 == 0)
-        // {
-        //     ds_weights[ty][tx/4] = reinterpret_cast<float4*>(convWeights)[(oc * inChannels + i * TILEX + tx) / 4];
-        //     ds_input[ty][tx/4] = reinterpret_cast<float4*>(input)[(b * numPoints * inChannels + (i * TILEY + ty) * numPoints + np) / 4];
-        // }
-        // __syncthreads();
-        // for (int j = 0; j < TILEX/4; j++)
-        // {
-        //     float4 w = ds_weights[ty][j];
-        //     float4 Csub = make_float4(0.0f, 0.0f, 0.0f, 0.0f);
-        //     Csub.x = ds_input[tx][j].x * w.x;
-        //     Csub.y = ds_input[tx][j+1].x * w.y;
-        //     Csub.z = ds_input[tx][j+2].x * w.z;
-        //     Csub.w = ds_input[tx][j+3].x * w.w;
-        //     res+=Csub.x+Csub.y+Csub.z+Csub.w;
-        // }
-        // -----------------original-
         ds_weights[ty][tx] = convWeights[oc * inChannels + i * TILEX + tx];
         ds_input[tx][ty] = input[b * numPoints * inChannels + (i * TILEY + ty) * numPoints + np];
         __syncthreads();
@@ -933,18 +915,6 @@ float* bnWeights,float* bnBias,float* bnRM,float* bnRV,float* output,float esp =
         {
             res += ds_weights[ty][j] * ds_input[tx][j];
         }
-        // -----------------float4-shared-memory-
-        // for (int j = 0; j < TILEX; j+=4)
-        // {
-        //     float4 w = *(float4*)&ds_weights[ty][j];
-        //     float4 x = *(float4*)&ds_input[tx][j];
-        //     float4 y ;
-        //     y.x = w.x * x.x;
-        //     y.y = w.y * x.y;
-        //     y.z = w.z * x.z;
-        //     y.w = w.w * x.w;
-        //     res+=y.x+y.y+y.z+y.w;
-        // }
     }
     res = (res - mean) / sqrt(var + esp) * bnW + bnB;
     res = max(0.0f, res);
@@ -985,17 +955,11 @@ void CBRWRAP_GPU(int batchSize,int numPoints,int inChannels,int outChannels,int 
 float* cudaConvWeights, float* cudaConvBias, 
 float* cudaBnWeights,float* cudaBnBias,float* cudaBnRM,float* cudaBnRV,float* output,float esp = 1e-5
 ){
-    //std::cout << "------------LAYER:CBRWRAP" << std::endl;
-    // printf("inchannel %d,numPoints %d\n",inChannels,numPoints);
-
-    const int BLK_X = 8;
-    const int BLK_Y = 8;
+    const int BLK_X = 32;
+    const int BLK_Y = 32;
     dim3 blockDim(BLK_X,BLK_Y);
-    //dim3 gridDim((numPoints + BLK_X - 1) / BLK_X,(outChannels + BLK_Y - 1) / BLK_Y);//X:宽度 Y：高度
     dim3 gridDim((numPoints + BLK_X - 1) / BLK_X,(outChannels + BLK_Y - 1) / BLK_Y,batchSize);//X:宽度 Y：高度
 
-    //std::cout << "WIDTH: " << numPoints << ", IC: " << inChannels << ", OC: " << outChannels << std::endl;
-    //std::cout << "isize: " << input.size() << ", wsize: " << weights.size() << ", bsize: " << bias.size() << ", osize: " << output.size() << std::endl;
     if (inChannels == 3)
     {
         CBRWRAP_Kernel_ic3<<<gridDim, blockDim>>>(BLK_X, BLK_Y, outChannels, batchSize, numPoints, inChannels, input, cudaConvWeights, cudaConvBias,
@@ -1003,10 +967,8 @@ float* cudaBnWeights,float* cudaBnBias,float* cudaBnRM,float* cudaBnRV,float* ou
     }
     else
     {
-        //printf("KERNEL: inchannel %d, outchannel %d, numPoints %d\n",inChannels,outChannels,numPoints);
         if (numPoints % BLK_X == 0)
         {
-            //printf("hey!!\n");
             CBRWRAP_Kernel_np8tms<BLK_X, BLK_Y><<<gridDim, blockDim>>>( outChannels, batchSize, numPoints, inChannels, input, cudaConvWeights, cudaConvBias,
                                               cudaBnWeights, cudaBnBias, cudaBnRM, cudaBnRV, output);
         }
@@ -1016,10 +978,6 @@ float* cudaBnWeights,float* cudaBnBias,float* cudaBnRM,float* cudaBnRV,float* ou
                                               cudaBnWeights, cudaBnBias, cudaBnRM, cudaBnRV, output);
         }
     }
-    // // 检查内核启动是否成功
-    // CUDA_CHECK(cudaGetLastError());
-    // // 同步设备并检查执行错误
-    // CUDA_CHECK(cudaDeviceSynchronize());
 }
 void GPU_CBR(int batchSize, int numPoints, int inics, int OC,wbBnP& wbBnP, float* input, float* reluOutput)
 {
@@ -1282,7 +1240,7 @@ int main(int argc, char *argv[]) {
         size_t curB = std::min(batchSize, all_num - i);
         size_t np = list_of_points[i].size() / ic;
         for (int j = 0; j < curB; j++) {np = std::min(np, list_of_points[i + j].size() / ic);}
-        np = (np / 8) * 8;
+        np = (np / 128) * 128;
         int bSize = np * ic;
         int bWidth = curB * bSize;
         std::vector<float> input(bWidth);
@@ -1314,7 +1272,7 @@ int main(int argc, char *argv[]) {
         size_t curB = std::min(batchSize, all_num - i);
         size_t np = list_of_points[i].size() / ic;
         for (int j = 0; j < curB; j++) {np = std::min(np, list_of_points[i + j].size() / ic);}
-        np = (np / 8) * 8;
+        np = (np / 128) * 128;
         Inference_GPU(ic, curB, np, device_all_points + inf_offset, device_labels + i , device_output);
         inf_offset += curB * np * ic;
         cudaMemset(device_output, 0, cal_net_size(curB, np, ic) * sizeof(float));

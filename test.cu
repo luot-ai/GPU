@@ -4,6 +4,7 @@
 // nvprof --profile-from-start off ./test ./params/30epoch
 #include <random>
 #include <iostream>
+#include <strings.h>
 #include <vector>
 #include <cfloat>
 #include <cmath>
@@ -20,6 +21,11 @@
 
 
 #include <cuda_runtime.h>
+#define GEMMBLKMAX 128
+#define ALIGN_DOWN(x, align) ((x) / (align) * (align))
+#define DIV_UP(x, y) (((x) + (y) - 1) / (y))
+#define INDEX(row, col, width) ((row) * (width) + (col))
+
 
 
 /****************************************************************************************
@@ -823,12 +829,6 @@ float* cudaBnWeights,float* cudaBnBias,float* cudaBnRM,float* cudaBnRV,float* ou
         CBWRAP_Kernel<BLK_X, BLK_Y><<<gridDim, blockDim>>>(outChannels, batchSize, numPoints, inChannels, input, cudaConvWeights, cudaConvBias,
                                                            cudaBnWeights, cudaBnBias, cudaBnRM, cudaBnRV, output);
     }
-
-    // // 检查内核启动是否成功
-    // CUDA_CHECK(cudaGetLastError());
-
-    // // 同步设备并检查执行错误
-    // CUDA_CHECK(cudaDeviceSynchronize());
 }
 
 
@@ -878,7 +878,7 @@ float* bnWeights,float* bnBias,float* bnRM,float* bnRV,float* output,float esp =
     res = (res - mean) / sqrt(var + esp) * bnW + bnB;
     res = res < 0 ? 0 : res;
     if(np < numPoints)
-        output[b * numPoints * outChannels + oc * numPoints + np] = res;
+    output[b * numPoints * outChannels + oc * numPoints + np] = res;
 }
 template<int TILEX,int TILEY>
 __global__ void CBRWRAP_Kernel_np8tms(int outChannels,int batchSize,int numPoints,int inChannels,float* input, 
@@ -963,14 +963,14 @@ float* cudaBnWeights,float* cudaBnBias,float* cudaBnRM,float* cudaBnRV,float* ou
     if (inChannels == 3)
     {
         CBRWRAP_Kernel_ic3<<<gridDim, blockDim>>>(BLK_X, BLK_Y, outChannels, batchSize, numPoints, inChannels, input, cudaConvWeights, cudaConvBias,
-                                                cudaBnWeights, cudaBnBias, cudaBnRM, cudaBnRV, output);
+                                                  cudaBnWeights, cudaBnBias, cudaBnRM, cudaBnRV, output);
     }
     else
     {
         if (numPoints % BLK_X == 0)
         {
             CBRWRAP_Kernel_np8tms<BLK_X, BLK_Y><<<gridDim, blockDim>>>( outChannels, batchSize, numPoints, inChannels, input, cudaConvWeights, cudaConvBias,
-                                              cudaBnWeights, cudaBnBias, cudaBnRM, cudaBnRV, output);
+                                                  cudaBnWeights, cudaBnBias, cudaBnRM, cudaBnRV, output);
         }
         else
         {
@@ -1240,7 +1240,7 @@ int main(int argc, char *argv[]) {
         size_t curB = std::min(batchSize, all_num - i);
         size_t np = list_of_points[i].size() / ic;
         for (int j = 0; j < curB; j++) {np = std::min(np, list_of_points[i + j].size() / ic);}
-        np = (np / 128) * 128;
+        np = ALIGN_DOWN(np, GEMMBLKMAX);
         int bSize = np * ic;
         int bWidth = curB * bSize;
         std::vector<float> input(bWidth);
@@ -1272,7 +1272,7 @@ int main(int argc, char *argv[]) {
         size_t curB = std::min(batchSize, all_num - i);
         size_t np = list_of_points[i].size() / ic;
         for (int j = 0; j < curB; j++) {np = std::min(np, list_of_points[i + j].size() / ic);}
-        np = (np / 128) * 128;
+        np = ALIGN_DOWN(np, GEMMBLKMAX);
         Inference_GPU(ic, curB, np, device_all_points + inf_offset, device_labels + i , device_output);
         inf_offset += curB * np * ic;
         cudaMemset(device_output, 0, cal_net_size(curB, np, ic) * sizeof(float));

@@ -852,139 +852,17 @@ float* bnWeights,float* bnBias,float* bnRM,float* bnRV,float* output,float esp =
         }
     }
 }
-
-
-template<int TILEX,int TILEY>
-__global__ void CBWRAP_Kernel(int outChannels,int batchSize,int numPoints,int inChannels,float* input, 
-float* convWeights, float* convBias, 
-float* bnWeights,float* bnBias,float* bnRM,float* bnRV,float* output,float esp = 1e-5 )
-{
-    int tx = threadIdx.x;
-    int ty = threadIdx.y;
-    int bx = blockIdx.x;
-    int by = blockIdx.y;
-    int np = tx + bx * blockDim.x;
-    int oc = ty + by * blockDim.y;
-    int b = blockIdx.z;
-    //printf("KERNEL: inchannel %d, outchannel %d, numPoints %d\n",inChannels,outChannels,numPoints);
-    // if(oc >= outChannels || np >= numPoints)
-    //     return ;
-    
-    __shared__ float ds_weights[TILEX][TILEY];
-    __shared__ float ds_input[TILEX][TILEY];
-    // __shared__ float ds_bias[TILEY];
-    // __shared__ float ds_bnRM[TILEY];
-    // __shared__ float ds_bnRV[TILEY];
-    // __shared__ float ds_bnB[TILEY];
-    // __shared__ float ds_bnW[TILEY];
-    // __shared__ float ds_res[TILEY];
-
-    //phases
-    float mean = bnRM[oc];
-    float var = bnRV[oc];
-    float bnW = bnWeights[oc];
-    float bnB = bnBias[oc];
-    float res = convBias[oc];
-    for (int i = 0; i < inChannels / TILEX; ++i)
-    {
-        // loading input and weights
-        ds_weights[ty][tx] = convWeights[oc * inChannels + i * TILEX + tx];
-        if (np < numPoints)
-        {
-            ds_input[tx][ty] = input[b * numPoints * inChannels + (i * TILEY + ty) * numPoints + np];
-        }
-        else
-        {
-            ds_input[tx][ty] = 0;
-        }
-        __syncthreads();
-        // calculate:iterations
-        for (int j = 0; j < TILEX; ++j)
-        {
-            res += ds_weights[ty][j] * ds_input[tx][j];
-        }
-        __syncthreads();
-    }
-    res = (res - mean) / sqrt(var + esp) * bnW + bnB;
-    if(np < numPoints)
-        output[b * numPoints * outChannels + oc * numPoints + np] = res;
-}
-
-template<int TILEX,int TILEY>
-__global__ void CBWRAP_Kernel_np8tms(int outChannels,int batchSize,int numPoints,int inChannels,float* input, 
-float* convWeights, float* convBias, 
-float* bnWeights,float* bnBias,float* bnRM,float* bnRV,float* output,float esp = 1e-5 )
-{
-    int tx = threadIdx.x;
-    int ty = threadIdx.y;
-    int bx = blockIdx.x;
-    int by = blockIdx.y;
-    int np = tx + bx * blockDim.x;
-    int oc = ty + by * blockDim.y;
-    int b = blockIdx.z;
-    //printf("KERNEL: inchannel %d, outchannel %d, numPoints %d\n",inChannels,outChannels,numPoints);
-    // if(oc >= outChannels || np >= numPoints)
-    //     return ;
-    
-    __shared__ float ds_weights[TILEX][TILEY];
-    __shared__ float ds_input[TILEX][TILEY];
-    // __shared__ float ds_bias[TILEY];
-    // __shared__ float ds_bnRM[TILEY];
-    // __shared__ float ds_bnRV[TILEY];
-    // __shared__ float ds_bnB[TILEY];
-    // __shared__ float ds_bnW[TILEY];
-    // __shared__ float ds_res[TILEY];
-
-    //phases
-    float mean = bnRM[oc];
-    float var = bnRV[oc];
-    float bnW = bnWeights[oc];
-    float bnB = bnBias[oc];
-    float res = convBias[oc];
-    for (int i = 0; i < inChannels / TILEX; ++i)
-    {
-        // loading input and weights
-        ds_weights[ty][tx] = convWeights[oc * inChannels + i * TILEX + tx];
-        ds_input[tx][ty] = input[b * numPoints * inChannels + (i * TILEY + ty) * numPoints + np];
-        __syncthreads();
-        // calculate:iterations
-        for (int j = 0; j < TILEX; ++j)
-        {
-            res += ds_weights[ty][j] * ds_input[tx][j];
-        }
-        __syncthreads();
-    }
-    res = (res - mean) / sqrt(var + esp) * bnW + bnB;
-    output[b * numPoints * outChannels + oc * numPoints + np] = res;
-}
-
 void CBWRAP_GPU(int batchSize,int numPoints,int inChannels,int outChannels,int kSize,float* input, 
 float* cudaConvWeights, float* cudaConvBias, 
 float* cudaBnWeights,float* cudaBnBias,float* cudaBnRM,float* cudaBnRV,float* output,float esp = 1e-5
 ){
     //std::cout << "------------LAYER:CBWRAP" << std::endl;
-    const int BLK_X = 32;
-    const int BLK_Y = 32;
-    dim3 blockDim(BLK_X, BLK_Y);
-    dim3 gridDim((numPoints + BLK_X - 1) / BLK_X, (outChannels + BLK_Y - 1) / BLK_Y, batchSize); // X:宽度 Y：高度
-
-    if (numPoints % BLK_X == 0)
-    {
-        dim3 grid128(DIV_UP(numPoints, 128),DIV_UP(outChannels, 128),batchSize);
-        CB_1024x128N_kernel<<<grid128, 256>>>(outChannels, batchSize, numPoints, inChannels, input, cudaConvWeights, cudaConvBias,
-                                              cudaBnWeights, cudaBnBias, cudaBnRM, cudaBnRV, output);
-
-        // CBWRAP_Kernel_np8tms<BLK_X, BLK_Y><<<gridDim, blockDim>>>(outChannels, batchSize, numPoints, inChannels, input, cudaConvWeights, cudaConvBias,
-        //                                                           cudaBnWeights, cudaBnBias, cudaBnRM, cudaBnRV, output);
-    }
-    else
-    {
-        CBWRAP_Kernel<BLK_X, BLK_Y><<<gridDim, blockDim>>>(outChannels, batchSize, numPoints, inChannels, input, cudaConvWeights, cudaConvBias,
-                                                           cudaBnWeights, cudaBnBias, cudaBnRM, cudaBnRV, output);
-    }
+    dim3 grid128(DIV_UP(numPoints, 128), DIV_UP(outChannels, 128), batchSize);
+    CB_1024x128N_kernel<<<grid128, 256>>>(outChannels, batchSize, numPoints, inChannels, input, cudaConvWeights, cudaConvBias,
+                                          cudaBnWeights, cudaBnBias, cudaBnRM, cudaBnRV, output);
 }
 
-
+//ARCH CBR
 __global__ void CBR_128x128N_kernel(int M,int batchSize,int N,int K,float* input, 
 float* convWeights, float* convBias, 
 float* bnWeights,float* bnBias,float* bnRM,float* bnRV,float* output,float esp = 1e-5 )
@@ -1293,53 +1171,6 @@ float* bnWeights,float* bnBias,float* bnRM,float* bnRV,float* output,float esp =
 }
 
 template<int TILEX,int TILEY>
-__global__ void CBRWRAP_Kernel(int outChannels,int batchSize,int numPoints,int inChannels,float* input, 
-float* convWeights, float* convBias, 
-float* bnWeights,float* bnBias,float* bnRM,float* bnRV,float* output,float esp = 1e-5 )
-{
-    int tx = threadIdx.x;
-    int ty = threadIdx.y;
-    int bx = blockIdx.x;
-    int by = blockIdx.y;
-    int np = tx + bx * blockDim.x;
-    int oc = ty + by * blockDim.y;
-    int b = blockIdx.z;
-    
-    __shared__ float ds_weights[TILEX][TILEY];
-    __shared__ float ds_input[TILEX][TILEY];
-
-    //phases
-    float mean = bnRM[oc];
-    float var = bnRV[oc];
-    float bnW = bnWeights[oc];
-    float bnB = bnBias[oc];
-    float res = convBias[oc];
-    for (int i = 0; i < inChannels / TILEX; ++i)
-    {
-        // loading input and weights
-        ds_weights[ty][tx] = convWeights[oc * inChannels + i * TILEX + tx];
-        if (np < numPoints)
-        {
-            ds_input[tx][ty] = input[b * numPoints * inChannels + (i * TILEY + ty) * numPoints + np];
-        }
-        else
-        {
-            ds_input[tx][ty] = 0;
-        }
-        __syncthreads();
-        // calculate:iterations
-        for (int j = 0; j < TILEX; ++j)
-        {
-            res += ds_weights[ty][j] * ds_input[tx][j];
-        }
-        __syncthreads();
-    }
-    res = (res - mean) / sqrt(var + esp) * bnW + bnB;
-    res = res < 0 ? 0 : res;
-    if(np < numPoints)
-    output[b * numPoints * outChannels + oc * numPoints + np] = res;
-}
-template<int TILEX,int TILEY>
 __global__ void CBRWRAP_Kernel_np8tms(int outChannels,int batchSize,int numPoints,int inChannels,float* input, 
 float* convWeights, float* convBias, 
 float* bnWeights,float* bnBias,float* bnRM,float* bnRV,float* output,float esp = 1e-5 )
@@ -1436,16 +1267,8 @@ float* cudaBnWeights,float* cudaBnBias,float* cudaBnRM,float* cudaBnRV,float* ou
     }
     else
     {
-        if (numPoints % BLK_X == 0)
-        {
-            CBRWRAP_Kernel_np8tms<BLK_X, BLK_Y><<<gridDim, blockDim>>>( outChannels, batchSize, numPoints, inChannels, input, cudaConvWeights, cudaConvBias,
-                                                  cudaBnWeights, cudaBnBias, cudaBnRM, cudaBnRV, output);
-        }
-        else
-        {
-            CBRWRAP_Kernel<BLK_X, BLK_Y><<<gridDim, blockDim>>>( outChannels, batchSize, numPoints, inChannels, input, cudaConvWeights, cudaConvBias,
-                                              cudaBnWeights, cudaBnBias, cudaBnRM, cudaBnRV, output);
-        }
+        CBRWRAP_Kernel_np8tms<BLK_X, BLK_Y><<<gridDim, blockDim>>>(outChannels, batchSize, numPoints, inChannels, input, cudaConvWeights, cudaConvBias,
+                                                                   cudaBnWeights, cudaBnBias, cudaBnRM, cudaBnRV, output);
     }
 }
 void GPU_CBR(int batchSize, int numPoints, int inics, int OC,wbBnP& wbBnP, float* input, float* reluOutput)

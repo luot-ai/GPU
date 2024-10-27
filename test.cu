@@ -729,9 +729,44 @@ float* bnWeights,float* bnBias,float* bnRM,float* bnRV,float* output,float esp =
     int twx = (twIdx / 2) % 8; // TODO: z型分布
     int twy = (twIdx / 16) * 2 + (twIdx % 2);
 
+    //batchnorm
+    __shared__ float mean_shared[128];//warp0 warp1
+    __shared__ float var_shared[128];//warp2 warp3
+    __shared__ float bnW_shared[128];//warp4 warp5
+    __shared__ float bnB_shared[128];//warp6 warp7
+    __shared__ float cvB_shared[128];//warp0 warp1 warp2 warp3
+
+    int bnSIdx = wx*64+twIdx;
+    int bnGIdx = by * BM + bnSIdx;
+    if(tx < 128)
+    {
+        cvB_shared[tx] = convBias[by * BM + tx];
+    }
+    if(wy == 0)
+    {
+        mean_shared[bnSIdx]= bnRM[bnGIdx];
+        mean_shared[bnSIdx+32]= bnRM[bnGIdx+32];
+    }
+    else if (wy == 1)
+    {
+        var_shared[bnSIdx]= bnRV[bnGIdx];
+        var_shared[bnSIdx+32]= bnRV[bnGIdx+32];
+    }
+    else if (wy == 2)
+    {
+        bnW_shared[bnSIdx]= bnWeights[bnGIdx];
+        bnW_shared[bnSIdx+32]= bnWeights[bnGIdx+32];
+    }
+    else if (wy == 3)
+    {
+        bnB_shared[bnSIdx]= bnBias[bnGIdx];
+        bnB_shared[bnSIdx+32]= bnBias[bnGIdx+32];
+    }
+
     //shared memory & registers
-    __shared__ float W_shared[1024];//1024*4B = 4KB
-    __shared__ float I_shared[1024];//1024*4B = 4KB
+    __shared__ float W_shared[1024];//128*8=1024*4B = 4KB
+    __shared__ float I_shared[1024];//128*8=1024*4B = 4KB
+
     float W_reg[8]={0};
     float I_reg[8]={0};
     float O_reg[8][8] = {0};
@@ -807,13 +842,13 @@ float* bnWeights,float* bnBias,float* bnRM,float* bnRV,float* output,float esp =
     {
         for (int j = 0; j < 4; ++j)
         {
-            int sIdx = i * 4 + j;
-            int gIdx = O_grow + i*16+j;
-            cvB[sIdx] = convBias[gIdx];
-            mean[sIdx] = bnRM[gIdx];
-            var[sIdx] = bnRV[gIdx];
-            bnW[sIdx] = bnWeights[gIdx];
-            bnB[sIdx] = bnBias[gIdx];
+            int rIdx = i * 4 + j;
+            int sIdx = wy * 32 + twy * 4 + i * 16 + j;
+            cvB[rIdx] = cvB_shared[sIdx];
+            mean[rIdx] = mean_shared[sIdx];
+            var[rIdx] = var_shared[sIdx];
+            bnW[rIdx] = bnW_shared[sIdx];
+            bnB[rIdx] = bnB_shared[sIdx];
         }
     }
     #pragma unroll
@@ -852,6 +887,7 @@ float* bnWeights,float* bnBias,float* bnRM,float* bnRV,float* output,float esp =
         }
     }
 }
+
 void CBWRAP_GPU(int batchSize,int numPoints,int inChannels,int outChannels,int kSize,float* input, 
 float* cudaConvWeights, float* cudaConvBias, 
 float* cudaBnWeights,float* cudaBnBias,float* cudaBnRM,float* cudaBnRV,float* output,float esp = 1e-5
@@ -1019,9 +1055,44 @@ float* bnWeights,float* bnBias,float* bnRM,float* bnRV,float* output,float esp =
     int twx = (twIdx / 2) % 8; // TODO: z型分布
     int twy = (twIdx / 16) * 2 + (twIdx % 2);
 
+    //batchnorm
+    __shared__ float mean_shared[128];//warp0 warp1
+    __shared__ float var_shared[128];//warp2 warp3
+    __shared__ float bnW_shared[128];//warp4 warp5
+    __shared__ float bnB_shared[128];//warp6 warp7
+    __shared__ float cvB_shared[128];//warp0 warp1 warp2 warp3
+
+    int bnSIdx = wx*64+twIdx;
+    int bnGIdx = by * BM + bnSIdx;
+    if(tx < 128)
+    {
+        cvB_shared[tx] = convBias[by * BM + tx];
+    }
+    if(wy == 0)
+    {
+        mean_shared[bnSIdx]= bnRM[bnGIdx];
+        mean_shared[bnSIdx+32]= bnRM[bnGIdx+32];
+    }
+    else if (wy == 1)
+    {
+        var_shared[bnSIdx]= bnRV[bnGIdx];
+        var_shared[bnSIdx+32]= bnRV[bnGIdx+32];
+    }
+    else if (wy == 2)
+    {
+        bnW_shared[bnSIdx]= bnWeights[bnGIdx];
+        bnW_shared[bnSIdx+32]= bnWeights[bnGIdx+32];
+    }
+    else if (wy == 3)
+    {
+        bnB_shared[bnSIdx]= bnBias[bnGIdx];
+        bnB_shared[bnSIdx+32]= bnBias[bnGIdx+32];
+    }
+
     //shared memory & registers
-    __shared__ float W_shared[1024];//1024*4B = 4KB
-    __shared__ float I_shared[1024];//1024*4B = 4KB
+    __shared__ float W_shared[1024];//128*8=1024*4B = 4KB
+    __shared__ float I_shared[1024];//128*8=1024*4B = 4KB
+
     float W_reg[8]={0};
     float I_reg[8]={0};
     float O_reg[8][8] = {0};
@@ -1097,13 +1168,13 @@ float* bnWeights,float* bnBias,float* bnRM,float* bnRV,float* output,float esp =
     {
         for (int j = 0; j < 4; ++j)
         {
-            int sIdx = i * 4 + j;
-            int gIdx = O_grow + i*16+j;
-            cvB[sIdx] = convBias[gIdx];
-            mean[sIdx] = bnRM[gIdx];
-            var[sIdx] = bnRV[gIdx];
-            bnW[sIdx] = bnWeights[gIdx];
-            bnB[sIdx] = bnBias[gIdx];
+            int rIdx = i * 4 + j;
+            int sIdx = wy * 32 + twy * 4 + i * 16 + j;
+            cvB[rIdx] = cvB_shared[sIdx];
+            mean[rIdx] = mean_shared[sIdx];
+            var[rIdx] = var_shared[sIdx];
+            bnW[rIdx] = bnW_shared[sIdx];
+            bnB[rIdx] = bnB_shared[sIdx];
         }
     }
     #pragma unroll
@@ -1172,9 +1243,44 @@ float* bnWeights,float* bnBias,float* bnRM,float* bnRV,float* output,float esp =
     int twx = (twIdx / 2) % 8; // TODO: z型分布
     int twy = (twIdx / 16) * 2 + (twIdx % 2);
 
+    //batchnorm
+    __shared__ float mean_shared[128];//warp0 warp1
+    __shared__ float var_shared[128];//warp2 warp3
+    __shared__ float bnW_shared[128];//warp4 warp5
+    __shared__ float bnB_shared[128];//warp6 warp7
+    __shared__ float cvB_shared[128];//warp0 warp1 warp2 warp3
+
+    int bnSIdx = wx*64+twIdx;
+    int bnGIdx = by * BM + bnSIdx;
+    if(tx < 128)
+    {
+        cvB_shared[tx] = convBias[by * BM + tx];
+    }
+    if(wy == 0)
+    {
+        mean_shared[bnSIdx]= bnRM[bnGIdx];
+        mean_shared[bnSIdx+32]= bnRM[bnGIdx+32];
+    }
+    else if (wy == 1)
+    {
+        var_shared[bnSIdx]= bnRV[bnGIdx];
+        var_shared[bnSIdx+32]= bnRV[bnGIdx+32];
+    }
+    else if (wy == 2)
+    {
+        bnW_shared[bnSIdx]= bnWeights[bnGIdx];
+        bnW_shared[bnSIdx+32]= bnWeights[bnGIdx+32];
+    }
+    else if (wy == 3)
+    {
+        bnB_shared[bnSIdx]= bnBias[bnGIdx];
+        bnB_shared[bnSIdx+32]= bnBias[bnGIdx+32];
+    }
+
     //shared memory & registers
-    __shared__ float W_shared[1024];//1024*4B = 4KB
-    __shared__ float I_shared[1024];//1024*4B = 4KB
+    __shared__ float W_shared[1024];//128*8=1024*4B = 4KB
+    __shared__ float I_shared[1024];//128*8=1024*4B = 4KB
+
     float W_reg[8]={0};
     float I_reg[8]={0};
     float O_reg[8][8] = {0};
@@ -1250,13 +1356,13 @@ float* bnWeights,float* bnBias,float* bnRM,float* bnRV,float* output,float esp =
     {
         for (int j = 0; j < 4; ++j)
         {
-            int sIdx = i * 4 + j;
-            int gIdx = O_grow + i*16+j;
-            cvB[sIdx] = convBias[gIdx];
-            mean[sIdx] = bnRM[gIdx];
-            var[sIdx] = bnRV[gIdx];
-            bnW[sIdx] = bnWeights[gIdx];
-            bnB[sIdx] = bnBias[gIdx];
+            int rIdx = i * 4 + j;
+            int sIdx = wy * 32 + twy * 4 + i * 16 + j;
+            cvB[rIdx] = cvB_shared[sIdx];
+            mean[rIdx] = mean_shared[sIdx];
+            var[rIdx] = var_shared[sIdx];
+            bnW[rIdx] = bnW_shared[sIdx];
+            bnB[rIdx] = bnB_shared[sIdx];
         }
     }
     #pragma unroll

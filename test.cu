@@ -994,7 +994,6 @@ float* bnWeights,float* bnBias,float* bnRM,float* bnRV,float* output,float esp =
     }
 }
 
-
 __global__ void CBR_128x128N_kernel(int M,int batchSize,int N,int K,float* input, 
 float* convWeights, float* convBias, 
 float* bnWeights,float* bnBias,float* bnRM,float* bnRV,float* output,float esp = 1e-5 )
@@ -1301,46 +1300,6 @@ float* bnWeights,float* bnBias,float* bnRM,float* bnRV,float* output,float esp =
     }
 }
 
-template<int TILEX,int TILEY>
-__global__ void CBRWRAP_Kernel_np8tms(int outChannels,int batchSize,int numPoints,int inChannels,float* input, 
-float* convWeights, float* convBias, 
-float* bnWeights,float* bnBias,float* bnRM,float* bnRV,float* output,float esp = 1e-5 )
-{
-    int tx = threadIdx.x;
-    int ty = threadIdx.y;
-    int bx = blockIdx.x;
-    int by = blockIdx.y;
-    int np = tx + bx * blockDim.x;
-    int oc = ty + by * blockDim.y;
-    int b = blockIdx.z;
-
-    
-    __shared__ float ds_weights[TILEX][TILEY];
-    __shared__ float ds_input[TILEX][TILEY];
-
-    // __shared__ float4 ds_weights[TILEX][TILEY/4];
-    // __shared__ float4 ds_input[TILEX][TILEY/4];
-
-    //phases
-    float mean = bnRM[oc];
-    float var = bnRV[oc];
-    float bnW = bnWeights[oc];
-    float bnB = bnBias[oc];
-    float res = convBias[oc];
-    for (int i = 0; i < inChannels / TILEX; ++i)
-    {
-        ds_weights[ty][tx] = convWeights[oc * inChannels + i * TILEX + tx];
-        ds_input[tx][ty] = input[b * numPoints * inChannels + (i * TILEY + ty) * numPoints + np];
-        __syncthreads();
-        for (int j = 0; j < TILEX; ++j)
-        {
-            res += ds_weights[ty][j] * ds_input[tx][j];
-        }
-    }
-    res = (res - mean) / sqrt(var + esp) * bnW + bnB;
-    res = max(0.0f, res);
-    output[b * numPoints * outChannels + oc * numPoints + np] = res;
-}
 __global__ void CBRWRAP_Kernel_ic3(int TILEX,int TILEY,int outChannels,int batchSize,int numPoints,int inChannels,float* input, 
 float* convWeights, float* convBias, 
 float* bnWeights,float* bnBias,float* bnRM,float* bnRV,float* output,float esp = 1e-5 )
@@ -1379,12 +1338,12 @@ float* cudaBnWeights,float* cudaBnBias,float* cudaBnRM,float* cudaBnRV,float* ou
     const int BLK_X = 32;
     const int BLK_Y = 32;
     dim3 blockDim(BLK_X,BLK_Y);
-    dim3 gridDim((numPoints + BLK_X - 1) / BLK_X,(outChannels + BLK_Y - 1) / BLK_Y,batchSize);//X:宽度 Y：高度
+    dim3 grid32(DIV_UP(numPoints, 32),DIV_UP(outChannels, 32),batchSize);//X:宽度 Y：高度
     dim3 grid128(DIV_UP(numPoints, 128),DIV_UP(outChannels, 128),batchSize);
     dim3 grid64(DIV_UP(numPoints, 64),DIV_UP(outChannels, 64),batchSize);
     if (inChannels == 3)
     {
-        CBRWRAP_Kernel_ic3<<<gridDim, blockDim>>>(BLK_X, BLK_Y, outChannels, batchSize, numPoints, inChannels, input, cudaConvWeights, cudaConvBias,
+        CBRWRAP_Kernel_ic3<<<grid32, blockDim>>>(BLK_X, BLK_Y, outChannels, batchSize, numPoints, inChannels, input, cudaConvWeights, cudaConvBias,
                                                   cudaBnWeights, cudaBnBias, cudaBnRM, cudaBnRV, output);
     }
     else if (outChannels == 1024 && inChannels == 128)
@@ -1401,8 +1360,6 @@ float* cudaBnWeights,float* cudaBnBias,float* cudaBnRM,float* cudaBnRV,float* ou
     {
         CBR_64x128N_kernel<<<grid64, 256>>>(outChannels, batchSize, numPoints, inChannels, input, cudaConvWeights, cudaConvBias,
                                                   cudaBnWeights, cudaBnBias, cudaBnRM, cudaBnRV, output);
-        // CBRWRAP_Kernel_np8tms<BLK_X, BLK_Y><<<gridDim, blockDim>>>(outChannels, batchSize, numPoints, inChannels, input, cudaConvWeights, cudaConvBias,
-        //                                                            cudaBnWeights, cudaBnBias, cudaBnRM, cudaBnRV, output);
     }
 }
 void GPU_CBR(int batchSize, int numPoints, int inics, int OC,wbBnP& wbBnP, float* input, float* reluOutput)

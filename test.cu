@@ -849,6 +849,8 @@ float* bnWeights,float* bnBias,float* bnRM,float* bnRV,float* output,float esp =
     //shared memory & registers
     __shared__ float W_shared[1024];//128*8=1024*4B = 4KB
     __shared__ float I_shared[1024];//128*8=1024*4B = 4KB
+    float W_ldg_reg[4];
+    float I_ldg_reg[4];
 
     float W_reg[8]={0};
     float I_reg[8]={0};
@@ -860,6 +862,10 @@ float* bnWeights,float* bnBias,float* bnRM,float* bnRV,float* output,float esp =
     int I_gcol = bx * BN + tx % 32;
     int W_LoadG = INDEX(W_grow, W_gcol, K);
     int I_LoadG = INDEX(I_grow, I_gcol, N)+bI;
+
+    const char *W_ldg_ptr = (const char *)(convWeights+W_LoadG);
+    const char *I_ldg_ptr = (const char *)(input + I_LoadG);
+
     // OUTERMOST PHASES: K/BK times
     for (int phase = 0; phase < K / BK; phase++)
     {
@@ -870,19 +876,43 @@ float* bnWeights,float* bnBias,float* bnRM,float* bnRV,float* output,float esp =
         int I_scol = tx % 32; 
         int W_StoreS = INDEX(W_srow,W_scol,BM);
         int I_StoreS = INDEX(I_srow,I_scol,BN);
+
+    uint32_t W_sts_addr = smem_u32addr(W_shared + W_StoreS);
+    uint32_t I_sts_addr = smem_u32addr(I_shared + I_StoreS);
+
         #pragma unroll
-        for (int ldg = 0; ldg < 4; ldg++)
-        {
-            W_shared[W_StoreS+ldg]=convWeights[W_LoadG+ldg*K];
+        for (int i = 0; i < 4; ++i) {
+            ldg32_nc_0(W_ldg_reg[i],
+                       W_ldg_ptr + i * K * sizeof(float),
+                       true);
+        }
+        sts128(W_ldg_reg[0], W_ldg_reg[1], W_ldg_reg[2], W_ldg_reg[3],
+               W_sts_addr);
+        #pragma unroll
+        for (int i = 0; i < 4; ++i) {
+            ldg32_nc_0(I_ldg_reg[i],
+                       I_ldg_ptr + i * 32 * sizeof(float),
+                       true);
         }
         #pragma unroll
-        for (int ldg = 0; ldg < 4; ldg++)
-        {
-            I_shared[I_StoreS+ldg*32]=input[I_LoadG+ldg*32];
+        for (int i = 0; i < 4; ++i) {
+            sts32(I_ldg_reg[i], I_sts_addr + i * 32 * sizeof(float));
         }
+        // #pragma unroll
+        // for (int ldg = 0; ldg < 4; ldg++)
+        // {
+        //     W_shared[W_StoreS+ldg]=W_ldg_reg[ldg];
+        // }
+        // #pragma unroll
+        // for (int ldg = 0; ldg < 4; ldg++)
+        // {
+        //     I_shared[I_StoreS+ldg*32]=I_ldg_reg[ldg];
+        // }
         __syncthreads();
         W_LoadG += BK;
         I_LoadG += BK * N;
+        W_ldg_ptr+= BK*sizeof(float);
+        I_ldg_ptr+=BK*N*sizeof(float);
         // ITERATIONS : BK times
         for (int iter = 0; iter< BK ;iter++)
         {
@@ -1377,10 +1407,8 @@ float* bnWeights,float* bnBias,float* bnRM,float* bnRV,float* output,float esp =
     int W_LoadG = INDEX(W_grow, W_gcol, K);
     int I_LoadG = INDEX(I_grow, I_gcol, N)+bI;
 
-    // const char *A_ldg_ptr = (const char *)(
-    //     A + (blockIdx.y * 128 + threadIdx.x / 8 * 4) * k + threadIdx.x % 8);
-    // const char *B_ldg_ptr = (const char *)(
-    //     B + (threadIdx.x / 32) * n + blockIdx.x * 128 + threadIdx.x % 32);
+    const char *W_ldg_ptr = (const char *)(convWeights+W_LoadG);
+    const char *I_ldg_ptr = (const char *)(input + I_LoadG);
 
     // OUTERMOST PHASES: K/BK times
     for (int phase = 0; phase < K / BK; phase++)
@@ -1393,27 +1421,42 @@ float* bnWeights,float* bnBias,float* bnRM,float* bnRV,float* output,float esp =
         int W_StoreS = INDEX(W_srow,W_scol,BM);
         int I_StoreS = INDEX(I_srow,I_scol,BN);
 
+    uint32_t W_sts_addr = smem_u32addr(W_shared + W_StoreS);
+    uint32_t I_sts_addr = smem_u32addr(I_shared + I_StoreS);
+
         #pragma unroll
         for (int i = 0; i < 4; ++i) {
-            W_ldg_reg[i]=convWeights[W_LoadG+i*K];
+            ldg32_nc_0(W_ldg_reg[i],
+                       W_ldg_ptr + i * K * sizeof(float),
+                       true);
+        }
+        sts128(W_ldg_reg[0], W_ldg_reg[1], W_ldg_reg[2], W_ldg_reg[3],
+               W_sts_addr);
+        #pragma unroll
+        for (int i = 0; i < 4; ++i) {
+            ldg32_nc_0(I_ldg_reg[i],
+                       I_ldg_ptr + i * 32 * sizeof(float),
+                       true);
         }
         #pragma unroll
         for (int i = 0; i < 4; ++i) {
-            I_ldg_reg[i]=input[I_LoadG+i*32];
+            sts32(I_ldg_reg[i], I_sts_addr + i * 32 * sizeof(float));
         }
-        #pragma unroll
-        for (int ldg = 0; ldg < 4; ldg++)
-        {
-            W_shared[W_StoreS+ldg]=W_ldg_reg[ldg];
-        }
-        #pragma unroll
-        for (int ldg = 0; ldg < 4; ldg++)
-        {
-            I_shared[I_StoreS+ldg*32]=I_ldg_reg[ldg];
-        }
+        // #pragma unroll
+        // for (int ldg = 0; ldg < 4; ldg++)
+        // {
+        //     W_shared[W_StoreS+ldg]=W_ldg_reg[ldg];
+        // }
+        // #pragma unroll
+        // for (int ldg = 0; ldg < 4; ldg++)
+        // {
+        //     I_shared[I_StoreS+ldg*32]=I_ldg_reg[ldg];
+        // }
         __syncthreads();
         W_LoadG += BK;
         I_LoadG += BK * N;
+        W_ldg_ptr+= BK*sizeof(float);
+        I_ldg_ptr+=BK*N*sizeof(float);
         // ITERATIONS : BK times
         for (int iter = 0; iter< BK ;iter++)
         {

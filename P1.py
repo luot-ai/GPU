@@ -58,7 +58,7 @@ from tqdm import tqdm
 
 # import provider
 num_class = 10
-total_epoch = 150
+total_epoch = 115
 script_dir = os.path.dirname(__file__)  # 获取脚本所在的目录
 
 class STN3d(nn.Module):
@@ -157,14 +157,11 @@ class PointNetEncoder(nn.Module):
     def forward(self, x):
         B, D, N = x.size()
         trans = self.stn(x)
-
         x = x.transpose(2, 1)
         if D > 3:
             feature = x[:, :, 3:]
             x = x[:, :, :3]
-
         x = torch.bmm(x, trans)
-        
         if D > 3:
             x = torch.cat([x, feature], dim=2)
         x = x.transpose(2, 1)
@@ -249,6 +246,7 @@ class PointCloudDataset(Dataset):
             for k in hf.keys():
                 self.list_of_points.append(hf[k]["points"][:].astype(np.float32))
                 self.list_of_labels.append(hf[k].attrs["label"])
+        self.fix_length_statistics_with_median()
 
     def __len__(self):
         return len(self.list_of_points)
@@ -257,6 +255,20 @@ class PointCloudDataset(Dataset):
         points = self.list_of_points[idx]
         label = self.list_of_labels[idx]
         return points, label
+
+    def fix_length_statistics_with_median(self):
+        lengths = [points.shape[0] for points in self.list_of_points]
+        fix_length = int( np.median(lengths) )
+        
+        new_list_of_points = []
+        for points in self.list_of_points:
+            if(points.shape[0] >= fix_length):
+                new_list_of_points.append(points[:fix_length, :])
+            else:
+                new_list_of_points.append(np.concatenate((points, np.zeros((fix_length - points.shape[0], 3), dtype=np.float32)), axis=0))
+        self.list_of_points = new_list_of_points
+
+
 
 def inplace_relu(m):
     classname = m.__class__.__name__
@@ -278,25 +290,25 @@ def inplace_relu(m):
 #         pred_choice = pred.data.max(1)[1]
 
 #         correct = pred_choice.eq(target.long().data).cpu().sum()
-#         mean_correct.append(correct.item() / float(points.size()[0]))
+#         mean_correct.append(correct.item())
 
-#     instance_acc = np.mean(mean_correct)
+#     instance_acc = np.sum(mean_correct) / len(loader.dataset)
 
 #     return instance_acc
 
-def pad_collate_fn(batch):
-    # 找到批次中最小的数组大小
-    min_size = min([item[0].shape[0] for item in batch])
+# def pad_collate_fn(batch):
+#     # 找到批次中最小的数组大小
+#     min_size = min([item[0].shape[0] for item in batch])
     
-    # 截断数组
-    padded_batch = []
-    for points, target in batch:
-        # 截断数组
-        points = points[:min_size, :]
-        padded_batch.append((points, target))
+#     # 截断数组
+#     padded_batch = []
+#     for points, target in batch:
+#         # 截断数组
+#         points = points[:min_size, :]
+#         padded_batch.append((points, target))
     
-    # 使用默认的 collate_fn 处理填充后的批次
-    return torch.utils.data.dataloader.default_collate(padded_batch)
+#     # 使用默认的 collate_fn 处理填充后的批次
+#     return torch.utils.data.dataloader.default_collate(padded_batch)
 
 # provider
 def shift_point_cloud(batch_data, shift_range=0.1):
@@ -356,11 +368,11 @@ def main():
     # test_dataset = PointCloudDataset(root=data_path, split='test')
 
     # 创建 DataLoader 实例
-    train_dataloader = DataLoader(train_dataset, batch_size=32, shuffle=True, num_workers=10, drop_last=True, collate_fn=pad_collate_fn)
-    # test_dataloader = DataLoader(test_dataset, batch_size=32, shuffle=False,collate_fn=pad_collate_fn)
+    # train_dataloader = DataLoader(train_dataset, batch_size=32, shuffle=True, num_workers=10, drop_last=True, collate_fn=pad_collate_fn) #batch_size内固定长度截取
+    train_dataloader = DataLoader(train_dataset, batch_size=32, shuffle=True, num_workers=10, drop_last=True) #全局固定长度填充/截取
+    # test_dataloader = DataLoader(test_dataset, batch_size=1, shuffle=False, num_workers=10, drop_last=False)
 
     print("finish DATA LOADING")
-
 
     '''MODEL LOADING'''
 
@@ -389,7 +401,7 @@ def main():
         mean_correct = []
         classifier = classifier.train()
 
-        # for batch_id, (points, target) in tqdm(enumerate(train_dataloader, 0), total=len(train_dataloader), smoothing=0.9):
+        # for batch_id, (points, target) in tqdm(enumerate(train_dataloader, 0), total=len(train_dataloader), smoothing=0.9): #显示进度条
         for batch_id, (points, target) in enumerate(train_dataloader, 0):
             optimizer.zero_grad()
 
@@ -431,8 +443,7 @@ def main():
         #     print('Best Instance Accuracy: %f' % (best_instance_acc))
 
     print("finish TRANING")
-    param_dir = os.path.join(script_dir,'params',str(total_epoch)+'epoch')
-    save_model_params_and_buffers_to_txt(classifier, param_dir)
+    save_model_params_and_buffers_to_txt(classifier, script_dir)
 
 if __name__ == '__main__':
     main()

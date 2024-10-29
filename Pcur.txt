@@ -1,34 +1,36 @@
-==79407== NVPROF is profiling process 79407, command: ./test ./params/30epoch
-18.8826:0.7120==79407== Profiling application: ./test ./params/30epoch
-==79407== Profiling result:
+GPU is idle, running the program...
+Running with nvprof
+==80409== NVPROF is profiling process 80409, command: ./test ./params/30epoch
+==80409== 2.7007:0.7080Profiling application: ./test ./params/30epoch
+==80409== Profiling result:
             Type  Time(%)      Time     Calls       Avg       Min       Max  Name
- GPU activities:   40.11%  7.47354s       500  14.947ms  1.2094ms  27.331ms  CBR_1024x128N_kernel(int, int, int, int, float*, float*, float*, float*, float*, float*, float*, float*, float)
-                   20.84%  3.88302s       250  15.532ms  1.3657ms  27.351ms  CB_1024x128N_kernel(int, int, int, int, float*, float*, float*, float*, float*, float*, float*, float*, float)
-                   11.71%  2.18162s       250  8.7265ms  664.64us  13.607ms  [CUDA memset]
-                   10.44%  1.94525s       750  2.5937ms  227.94us  12.512ms  Maxpooling_Kernel(float*, float*, int)
-                    6.56%  1.22238s       750  1.6298ms  135.07us  12.186ms  CBR_128x128N_kernel(int, int, int, int, float*, float*, float*, float*, float*, float*, float*, float*, float)
-                    4.30%  801.12ms      1500  534.08us  53.056us  11.738ms  FBRWRAP_Kernel(int, int, int, int, int, float*, float*, float*, float*, float*, float*, float*, float*, float)
-                    2.09%  389.86ms       500  779.73us  12.064us  12.278ms  BMM_Kernel(float*, float*, float*, int, int, int, int, int)
-                    1.40%  261.52ms      1000  261.52us  3.6480us  12.036ms  transpose_Kernel(float*, float*, int, int, int)
-                    1.04%  192.97ms       500  385.95us  29.089us  12.011ms  CBRWRAP_Kernel_ic3(int, int, int, int, int, int, float*, float*, float*, float*, float*, float*, float*, float*, float)
-                    0.92%  171.26ms       250  685.06us  75.808us  12.010ms  CBR_64x128N_kernel(int, int, int, int, float*, float*, float*, float*, float*, float*, float*, float*, float)
-                    0.45%  83.799ms       750  111.73us  21.376us  11.798ms  linear_Kernel(int, float*, float*, float*, float*, int, int)
-                    0.13%  23.488ms       346  67.884us  1.2790us  1.5436ms  [CUDA memcpy HtoD]
-                    0.01%  1.2601ms       250  5.0400us  4.7990us  5.6640us  LogSoftMax_Kernel(float*, int*, int, int)
-                    0.00%  840.07us       500  1.6800us  1.5670us  15.008us  matrix_add_I_kernel(float*, int, int)
-                    0.00%  2.7520us         1  2.7520us  2.7520us  2.7520us  [CUDA memcpy DtoH]
-      API calls:   80.90%  16.4636s      7500  2.1951ms  3.9450us  27.080ms  cudaLaunchKernel
-                   16.73%  3.40573s       347  9.8148ms  36.465us  2.39801s  cudaMemcpy
-                    2.32%  472.16ms        99  4.7693ms  2.3100us  466.56ms  cudaMalloc
-                    0.02%  4.6674ms       250  18.669us  5.1480us  74.986us  cudaMemset
-                    0.02%  4.4487ms        99  44.936us  2.0240us  2.0725ms  cudaFree
-                    0.00%  494.35us       114  4.3360us     203ns  204.87us  cuDeviceGetAttribute
-                    0.00%  260.10us         1  260.10us  260.10us  260.10us  cuLibraryLoadData
-                    0.00%  27.747us         1  27.747us  27.747us  27.747us  cuDeviceGetName
-                    0.00%  12.514us         1  12.514us  12.514us  12.514us  cudaDeviceSynchronize
-                    0.00%  6.4100us         1  6.4100us  6.4100us  6.4100us  cuDeviceGetPCIBusId
-                    0.00%  2.2680us         3     756ns     287ns  1.6890us  cuDeviceGetCount
-                    0.00%  1.0290us         2     514ns     246ns     783ns  cuDeviceGet
-                    0.00%     915ns         1     915ns     915ns     915ns  cuDeviceTotalMem
-                    0.00%     443ns         1     443ns     443ns     443ns  cuModuleGetLoadingMode
-                    0.00%     327ns         1     327ns     327ns     327ns  cuDeviceGetUuid
+ GPU activities:   39.61%  1.07241s       500  2.1448ms  1.1879ms  3.6806ms  CBR_1024x128N_kernel(int, int, int, int, float*, float*, float*, float*, float*, float*, float*, float*, float)
+                   20.83%  564.09ms       250  2.2564ms  1.3325ms  3.6840ms  CB_1024x128N_kernel(int, int, int, int, float*, float*, float*, float*, float*, float*, float*, float*, float)
+                   10.44%  282.64ms       250  1.1306ms  657.70us  1.8790ms  [CUDA memset]
+                   10.30%  278.77ms       750  371.69us  228.29us  597.06us  Maxpooling_Kernel(float*, float*, int)
+                    6.42%  173.88ms       750  231.84us  122.40us  386.76us  CBR_128x128N_kernel(int, int, int, int, float*, float*, float*, float*, float*, float*, float*, float*, float)
+                    4.73%  128.15ms      1500  85.433us  53.089us  126.47us  FBRWRAP_Kernel(int, int, int, int, int, float*, float*, float*, float*, float*, float*, float*, float*, float)
+                    2.52%  68.251ms       500  136.50us  11.776us  414.34us  BMM_Kernel(float*, float*, float*, int, int, int, int, int)
+                    1.33%  35.950ms      1000  35.949us  3.4240us  109.67us  transpose_Kernel(float*, float*, int, int, int)
+                    1.07%  28.974ms       250  115.90us  73.985us  174.91us  CBR_64x128N_kernel(int, int, int, int, float*, float*, float*, float*, float*, float*, float*, float*, float)
+                    0.97%  26.371ms       500  52.741us  28.832us  95.937us  CBRWRAP_Kernel_ic3(int, int, int, int, int, int, float*, float*, float*, float*, float*, float*, float*, float*, float)
+                    0.94%  25.331ms       750  33.774us  21.632us  62.529us  linear_Kernel(int, float*, float*, float*, float*, int, int)
+                    0.76%  20.541ms       346  59.365us  1.2800us  574.02us  [CUDA memcpy HtoD]
+                    0.05%  1.2684ms       250  5.0730us  4.8640us  5.4400us  LogSoftMax_Kernel(float*, int*, int, int)
+                    0.03%  838.39us       500  1.6760us  1.5360us  2.2080us  matrix_add_I_kernel(float*, int, int)
+                    0.00%  2.1440us         1  2.1440us  2.1440us  2.1440us  [CUDA memcpy DtoH]
+      API calls:   81.55%  2.34814s      7500  313.08us  3.9400us  17.994ms  cudaLaunchKernel
+                   12.47%  359.18ms       347  1.0351ms  6.4220us  336.97ms  cudaMemcpy
+                    5.66%  163.03ms        99  1.6468ms  2.3120us  158.78ms  cudaMalloc
+                    0.18%  5.1373ms        99  51.892us  1.9970us  2.1585ms  cudaFree
+                    0.11%  3.0586ms       250  12.234us  5.0200us  91.767us  cudaMemset
+                    0.02%  505.91us       114  4.4370us     206ns  205.31us  cuDeviceGetAttribute
+                    0.01%  246.17us         1  246.17us  246.17us  246.17us  cuLibraryLoadData
+                    0.00%  26.679us         1  26.679us  26.679us  26.679us  cuDeviceGetName
+                    0.00%  23.209us         1  23.209us  23.209us  23.209us  cudaDeviceSynchronize
+                    0.00%  7.5490us         1  7.5490us  7.5490us  7.5490us  cuDeviceGetPCIBusId
+                    0.00%  2.9950us         3     998ns     285ns  2.4000us  cuDeviceGetCount
+                    0.00%  1.0800us         2     540ns     248ns     832ns  cuDeviceGet
+                    0.00%     672ns         1     672ns     672ns     672ns  cuDeviceTotalMem
+                    0.00%     468ns         1     468ns     468ns     468ns  cuModuleGetLoadingMode
+                    0.00%     322ns         1     322ns     322ns     322ns  cuDeviceGetUuid

@@ -26,7 +26,90 @@
 #define DIV_UP(x, y) (((x) + (y) - 1) / (y))
 #define INDEX(row, col, width) ((row) * (width) + (col))
 
+__device__ __forceinline__
+uint32_t smem_u32addr(const void *smem_ptr) {
+    uint32_t addr;
+    asm ("{.reg .u64 u64addr;\n"
+         " cvta.to.shared.u64 u64addr, %1;\n"
+         " cvt.u32.u64 %0, u64addr;}\n"
+         : "=r"(addr)
+         : "l"(smem_ptr)
+    );
 
+    return addr;
+}
+
+__device__ __forceinline__
+void ldg32_nc(float &reg, const void *ptr, bool guard) {
+    asm volatile (
+        "{.reg .pred p;\n"
+        " setp.ne.b32 p, %2, 0;\n"
+#if __CUDACC_VER_MAJOR__ >= 11 && __CUDACC_VER_MINOR__ >= 4 && \
+    __CUDA_ARCH__ >= 750
+        " @p ld.global.nc.L2::128B.f32 %0, [%1];}\n"
+#else
+        " @p ld.global.nc.f32 %0, [%1];}\n"
+#endif
+        : "=f"(reg)
+        : "l"(ptr), "r"((int)guard)
+    );
+}
+
+__device__ __forceinline__
+void ldg32_nc_0(float &reg, const void *ptr, bool guard) {
+    asm volatile (
+        "{.reg .pred p;\n"
+        " setp.ne.b32 p, %2, 0;\n"
+        " @!p mov.b32 %0, 0;\n"
+#if __CUDACC_VER_MAJOR__ >= 11 && __CUDACC_VER_MINOR__ >= 4 && \
+    __CUDA_ARCH__ >= 750
+        " @p ld.global.nc.L2::128B.f32 %0, [%1];}\n"
+#else
+        " @p ld.global.nc.f32 %0, [%1];}\n"
+#endif
+        : "=f"(reg)
+        : "l"(ptr), "r"((int)guard)
+    );
+}
+
+__device__ __forceinline__
+void stg32(const float &reg, void *ptr, bool guard) {
+    asm volatile (
+        "{.reg .pred p;\n"
+        " setp.ne.b32 p, %2, 0;\n"
+        " @p st.global.f32 [%0], %1;}\n"
+        : : "l"(ptr), "f"(reg), "r"((int)guard)
+    );
+}
+
+__device__ __forceinline__
+void lds128(float &reg0, float &reg1,
+            float &reg2, float &reg3,
+            const uint32_t &addr) {
+    asm volatile (
+        "ld.shared.v4.f32 {%0, %1, %2, %3}, [%4];\n"
+        : "=f"(reg0), "=f"(reg1), "=f"(reg2), "=f"(reg3)
+        : "r"(addr)
+    );
+}
+
+__device__ __forceinline__
+void sts32(const float &reg, const uint32_t &addr) {
+    asm volatile (
+        "st.shared.f32 [%0], %1;\n"
+        : : "r"(addr), "f"(reg)
+    );
+}
+
+__device__ __forceinline__
+void sts128(const float &reg0, const float &reg1,
+            const float &reg2, const float &reg3,
+            const uint32_t &addr) {
+    asm volatile (
+        "st.shared.v4.f32 [%0], {%1, %2, %3, %4};\n"
+        : : "r"(addr), "f"(reg0), "f"(reg1), "f"(reg2), "f"(reg3)
+    );
+}
 
 /****************************************************************************************
  * 读取模型参数
@@ -1280,6 +1363,8 @@ float* bnWeights,float* bnBias,float* bnRM,float* bnRV,float* output,float esp =
     //shared memory & registers
     __shared__ float W_shared[1024];//128*8=1024*4B = 4KB
     __shared__ float I_shared[1024];//128*8=1024*4B = 4KB
+    float W_ldg_reg[4];
+    float I_ldg_reg[4];
 
     float W_reg[8]={0};
     float I_reg[8]={0};
@@ -1291,6 +1376,12 @@ float* bnWeights,float* bnBias,float* bnRM,float* bnRV,float* output,float esp =
     int I_gcol = bx * BN + tx % 32;
     int W_LoadG = INDEX(W_grow, W_gcol, K);
     int I_LoadG = INDEX(I_grow, I_gcol, N)+bI;
+
+    // const char *A_ldg_ptr = (const char *)(
+    //     A + (blockIdx.y * 128 + threadIdx.x / 8 * 4) * k + threadIdx.x % 8);
+    // const char *B_ldg_ptr = (const char *)(
+    //     B + (threadIdx.x / 32) * n + blockIdx.x * 128 + threadIdx.x % 32);
+
     // OUTERMOST PHASES: K/BK times
     for (int phase = 0; phase < K / BK; phase++)
     {
@@ -1301,15 +1392,24 @@ float* bnWeights,float* bnBias,float* bnRM,float* bnRV,float* output,float esp =
         int I_scol = tx % 32; 
         int W_StoreS = INDEX(W_srow,W_scol,BM);
         int I_StoreS = INDEX(I_srow,I_scol,BN);
+
         #pragma unroll
-        for (int ldg = 0; ldg < 4; ldg++)
-        {
-            W_shared[W_StoreS+ldg]=convWeights[W_LoadG+ldg*K];
+        for (int i = 0; i < 4; ++i) {
+            W_ldg_reg[i]=convWeights[W_LoadG+i*K];
+        }
+        #pragma unroll
+        for (int i = 0; i < 4; ++i) {
+            I_ldg_reg[i]=input[I_LoadG+i*32];
         }
         #pragma unroll
         for (int ldg = 0; ldg < 4; ldg++)
         {
-            I_shared[I_StoreS+ldg*32]=input[I_LoadG+ldg*32];
+            W_shared[W_StoreS+ldg]=W_ldg_reg[ldg];
+        }
+        #pragma unroll
+        for (int ldg = 0; ldg < 4; ldg++)
+        {
+            I_shared[I_StoreS+ldg*32]=I_ldg_reg[ldg];
         }
         __syncthreads();
         W_LoadG += BK;
@@ -1694,7 +1794,7 @@ int main(int argc, char *argv[]) {
     
     // 定义模型参数
     int ic = 3;
-    size_t batchSize = 32;
+    size_t batchSize = 4;
 
     // 读取权重：主机
     std::string dir = argv[1]; 

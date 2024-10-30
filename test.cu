@@ -1837,7 +1837,7 @@ int main(int argc, char *argv[]) {
     
     // 定义模型参数
     int ic = 3;
-    size_t batchSize = 4;
+    size_t batchSize = 32;
 
     // 读取权重：主机
     std::string dir = argv[1]; 

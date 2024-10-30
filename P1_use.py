@@ -58,7 +58,7 @@ from tqdm import tqdm
 
 # import provider
 num_class = 10
-total_epoch = 60
+total_epoch = 30
 script_dir = os.path.dirname(__file__)  # 获取脚本所在的目录
 
 class STN3d(nn.Module):
@@ -442,7 +442,8 @@ def main():
         #     print('Best Instance Accuracy: %f' % (best_instance_acc))
 
     print("finish TRANING")
-    save_model_params_and_buffers_to_txt(classifier, script_dir)
+    param_dir = os.path.join(script_dir,'params',str(total_epoch)+'epoch')
+    save_model_params_and_buffers_to_txt(classifier, param_dir)
 
 if __name__ == '__main__':
     main()

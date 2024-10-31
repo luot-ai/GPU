@@ -1422,6 +1422,7 @@ float* bnWeights,float* bnBias,float* bnRM,float* bnRV,float* output,float esp =
     for (int phase = 0; phase < (K / BK - 1); phase++)
     {
         // ITERATIONS : BK times
+        #pragma unroll
         for (int iter = 0; iter < BK ;iter++)
         {
             // next phase: ldreg->share
@@ -1476,6 +1477,37 @@ float* bnWeights,float* bnBias,float* bnRM,float* bnRV,float* output,float esp =
             }
         }
     }
+    // LAST PHASE
+    #pragma unroll
+    for (int iter = 0 ; iter < BK ; iter++)
+    {
+        // next iter: share->registers
+        if (iter < (BK -1))
+        {
+            int nI = (iter + 1) % 2;
+            int nrowS = (iter + 1) % BK;
+            int offW = nrowS * (BM + 4);
+            int offI = nrowS * BN;
+            lds128(W_reg[nI][0], W_reg[nI][1], W_reg[nI][2], W_reg[nI][3], W_lds_addr + offW * sizeof(float));
+            lds128(W_reg[nI][4], W_reg[nI][5], W_reg[nI][6], W_reg[nI][7], W_lds_addr + (offW + 16) * sizeof(float));
+            lds128(I_reg[nI][0], I_reg[nI][1], I_reg[nI][2], I_reg[nI][3], I_lds_addr + offI * sizeof(float));
+            lds128(I_reg[nI][4], I_reg[nI][5], I_reg[nI][6], I_reg[nI][7], I_lds_addr + (offI + 32) * sizeof(float));
+        }
+        // calculate
+        {
+            int cI = iter % 2;
+#pragma unroll
+            for (int i = 0; i < Tsize; ++i)
+            {
+#pragma unroll
+                for (int j = 0; j < Tsize; ++j)
+                {
+                    O_reg[i][j] += W_reg[cI][i] * I_reg[cI][j];
+                }
+            }
+        }
+    }
+
     int O_grow = by * BM + wy * 32 + twy * 4;
     int O_gcol = bx * BN + wx * 64 + twx * 4;
     int O_StoreG = INDEX(O_grow, O_gcol, N)+bO;

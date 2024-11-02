@@ -111,6 +111,52 @@ void sts128(const float &reg0, const float &reg1,
     );
 }
 
+struct StgFrag {
+    float data[4][4];
+
+    __device__ __forceinline__
+    StgFrag(const float (&C_frag)[8][8], int tile_x, int tile_y) {
+        #pragma unroll
+        for (int i = 0; i < 4; ++i) {
+            #pragma unroll
+            for (int j = 0; j < 4; ++j) {
+                data[i][j] = C_frag[tile_y * 4 + i][tile_x * 4 + j];
+            }
+        }
+    }
+};
+
+__device__ __noinline__
+void C_tile_wb(StgFrag C_frag,
+               float *C_stg_ptr,
+               const float *C_lds_ptr,
+               uint32_t C_sts_addr,
+               uint32_t m,
+               uint32_t n,
+               uint32_t m_idx,
+               uint32_t n_idx) {
+    __syncthreads();
+
+    #pragma unroll
+    for (int i = 0; i < 4; ++i) {
+        sts128(C_frag.data[i][0],
+               C_frag.data[i][1],
+               C_frag.data[i][2],
+               C_frag.data[i][3],
+               C_sts_addr + i * 8 * sizeof(float4));
+    }
+
+    __syncthreads();
+
+    uint32_t m_guard = m < m_idx ? 0 : m - m_idx;
+
+    #pragma unroll
+    for (int i = 0; i < 16; ++i) {
+        stg32(C_lds_ptr[i * 32],
+              C_stg_ptr + i * n,
+              i < m_guard && n_idx < n);
+    }
+}
 /****************************************************************************************
  * 读取模型参数
  ****************************************************************************************/
@@ -1508,9 +1554,9 @@ float* bnWeights,float* bnBias,float* bnRM,float* bnRV,float* output,float esp =
         }
     }
 
-    int O_grow = by * BM + wy * 32 + twy * 4;
-    int O_gcol = bx * BN + wx * 64 + twx * 4;
-    int O_StoreG = INDEX(O_grow, O_gcol, N)+bO;
+     int O_grow = by * BM + wy * 32 + twy * 4;
+    // int O_gcol = bx * BN + wx * 64 + twx * 4;
+    //int O_StoreG = INDEX(O_grow, O_gcol, N)+bO;
     //convBias and batchnorm and relu
     float mean[8] = {0};
     float var[8] = {0};
@@ -1559,17 +1605,56 @@ float* bnWeights,float* bnBias,float* bnRM,float* bnRV,float* output,float esp =
         }
     }
     //store to C
-    #pragma unroll
-    for (int i = 0; i<4;i++)
-    {
-        for (int j = 0 ; j<4 ;j++)
-        {
-            output[O_StoreG+ i*N+j]=O_reg[i][j];
-            output[O_StoreG+ i*N+j+32]= O_reg[i][j+4];
-            output[O_StoreG+ (i+16)*N+j]=O_reg[i+4][j];
-            output[O_StoreG+ (i+16)*N+(j+32)]=O_reg[i+4][j+4];
+    // #pragma unroll
+    // for (int i = 0; i<4;i++)
+    // {
+    //     for (int j = 0 ; j<4 ;j++)
+    //     {
+    //         output[O_StoreG+ i*N+j]=O_reg[i][j];
+    //         output[O_StoreG+ i*N+j+32]= O_reg[i][j+4];
+    //         output[O_StoreG+ (i+16)*N+j]=O_reg[i+4][j];
+    //         output[O_StoreG+ (i+16)*N+(j+32)]=O_reg[i+4][j+4];
+    //     }
+    // }
+
+
+    // int warpIdx = tx / 32; // 4x8 threads per Warp
+    // int twIdx = tx % 32;
+    // int wx = warpIdx % 2;      // th -> 8x8  warp-> 32x64
+    // int wy = warpIdx / 2;      // 4x2 warps per Block
+    // int twx = (twIdx / 2) % 8; // TODO: z型分布
+    // int twy = (twIdx / 16) * 2 + (twIdx % 2);
+
+
+    // C_tile write back, reuse A&B tile shared memory buffer
+    uint32_t C_sts_addr = smem_u32addr((float4 *)(smem + warpIdx * 2048) +
+                                       twy * 4 * 8 + twx);
+    const float *C_lds_ptr = (float *)(smem + warpIdx * 2048) + twIdx;
+
+    uint32_t m_idx = blockIdx.y * 128 + warpIdx / 2 * 32;
+    uint32_t n_idx = blockIdx.x * 128 + warpIdx % 2 * 64 + twIdx;
+
+    float *C_stg_ptr = output + m_idx * N + n_idx+bO;
+
+    
+        #pragma unroll
+        for (int i = 0; i < 2; ++i) {
+            #pragma unroll
+            for (int j = 0; j < 2; ++j) {
+                StgFrag stg_frag(O_reg, j, i);
+
+                C_tile_wb(stg_frag,
+                          C_stg_ptr + i * 16 * N + j * 32,
+                          C_lds_ptr,
+                          C_sts_addr,
+                          M,
+                          N,
+                          m_idx + i * 16,
+                          n_idx + j * 32);
+            }
         }
-    }
+    
+
 }
 
 __global__ void CBRWRAP_Kernel_ic3(int TILEX,int TILEY,int outChannels,int batchSize,int numPoints,int inChannels,float* input, 
@@ -1930,7 +2015,7 @@ int main(int argc, char *argv[]) {
         np = ALIGN_DOWN(np, GEMMBLKMAX);
         Inference_GPU(ic, curB, np, device_all_points + inf_offset, device_labels + i , device_output);
         inf_offset += curB * np * ic;
-        cudaMemset(device_output, 0, cal_net_size(curB, np, ic) * sizeof(float));
+        //cudaMemset(device_output, 0, cal_net_size(curB, np, ic) * sizeof(float));
     }
 
     // 计算准确率

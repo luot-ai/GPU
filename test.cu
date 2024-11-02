@@ -551,45 +551,77 @@ void matrix_add_I(float *input, int n,int batchSize)
     // cudaDeviceSynchronize();
 }
 
-__global__ void Maxpooling_Kernel(float* input,float* output,int numPoints)
+// __global__ void Maxpooling_Kernel(float* input, float* output, int numPoints) {
+//     int tx = threadIdx.x;          // 线程ID
+//     int channel = blockIdx.x;      // 通道ID
+
+//     float localMax = -FLT_MAX;     // 初始化局部最大值
+//     int cnum = channel * numPoints; // 当前通道的起始索引
+
+//     // 计算当前线程的局部最大值
+//     for (int i = tx; i < numPoints; i += blockDim.x) {
+//         float val = input[cnum + i];
+//         if (val > localMax) {
+//             localMax = val;
+//         }
+//     }
+
+//     // 使用shfl_down_sync进行归约
+//     // 循环，逐步归约到线程0
+//     for (int offset = 32 / 2; offset > 0; offset >>= 1) {
+//         localMax = max(localMax, __shfl_down_sync(0xFFFFFFFF, localMax, offset));
+//     }
+
+//     // 线程0写入最终的最大值
+//     if (tx % warpSize == 0) {
+//         output[channel] = localMax;
+//     }
+// }
+
+__global__ void Maxpooling_Kernel(float* input,float* output,int numPoints,int perWarp,int perTh)
 {
-    __shared__ float sharedMax[1024];
+    __shared__ float sharedMax[32];
     
     int tx = threadIdx.x;
     int channel = blockIdx.x;
+    int warpIdx = tx / 32;
 
     float localMax = -FLT_MAX;
-    int cnum = channel * numPoints;
-    for (int i = tx; i < numPoints; i += blockDim.x) {
-        float val = input[cnum + i];
-        if (val > localMax) {
-            localMax = val;
-        }
+    int startIdx = channel * numPoints + warpIdx * perWarp + tx;
+    for (int i = 0; i < perTh; i ++) {
+        int index = startIdx + i*32;
+        localMax = max(localMax,input[index]);
     }
-    sharedMax[tx] = localMax;
+
+    for (int offset = 32 / 2; offset > 0; offset >>= 1) {
+        localMax = max(localMax, __shfl_down_sync(0xFFFFFFFF, localMax, offset));
+    }
+    if (tx % 32 == 0) {
+        sharedMax[warpIdx] = localMax;
+    }
     __syncthreads();
-
-    // 归约：逐步计算块内的最大值
-    for (int stride = blockDim.x / 2; stride > 0; stride >>= 1) {
-        if (tx < stride) {
-            if (sharedMax[tx + stride] > sharedMax[tx]) {
-                sharedMax[tx] = sharedMax[tx + stride];
-            }
+    if (warpIdx == 0)
+    {
+        localMax = sharedMax[tx];
+        for (int offset = 32 / 2; offset > 0; offset >>= 1) {
+            localMax = max(localMax, __shfl_down_sync(0xFFFFFFFF, localMax, offset));
         }
-        __syncthreads();
+        if (tx == 0)
+        {
+            output[channel] = localMax;
+        }
     }
 
-    // 线程0写入最终的最大值
-    if (tx == 0) {
-        output[channel] = sharedMax[0];
-    }
 }
 void GPU_MaxPooling(int ics, int batchSize, int numPoints,float* input, float* output)
 {
     //std::cout << "----START MAXPOOLING" << std::endl;
     dim3 gridDim(ics*batchSize);
     dim3 blockDim(1024);
-    Maxpooling_Kernel<<<gridDim, blockDim>>>(input, output,numPoints);
+    int warpNum = 32;
+    int perWarp = numPoints/warpNum;//4N
+    int perTh = perWarp/32;
+    Maxpooling_Kernel<<<gridDim, blockDim>>>(input, output,numPoints,perWarp,perTh);
     // // 检查内核启动是否成功
     // CUDA_CHECK(cudaGetLastError());
 

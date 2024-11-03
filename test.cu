@@ -298,7 +298,7 @@ int cal_net_size(int batchSize, int numPoints, int inChannels){
     int part4_1= bn * fstn_inChannel ;
     int part4_2= batchSize*numPoints*fstn_inChannel ;
     int part4_3= batchSize*fstn_inChannel*numPoints ;
-    int part4_4= batchSize*encoderOC2*numPoints ;
+    int part4_4= batchSize*encoderOC2*numPoints /64;
     int part4_5= bnEOC3 ;
     int part4_6= batchSize * encoderOC3 ;
     //classify
@@ -1086,67 +1086,92 @@ float* bnWeights,float* bnBias,float* bnRM,float* bnRV,float* output,float esp =
             res2 += cvB[i];
             res3 += cvB[i+4];
             res4 += cvB[i+4];
+            
             res1 = __fdividef((res1 - mean[i]),sqrt(var[i] + esp)) * bnW[i] + bnB[i];
             res2 = __fdividef((res2 - mean[i]),sqrt(var[i] + esp)) * bnW[i] + bnB[i];
             res3 = __fdividef((res3 - mean[i+4]),sqrt(var[i+4] + esp))* bnW[i+4] + bnB[i+4];
             res4 = __fdividef((res4 - mean[i+4]),sqrt(var[i+4] + esp)) * bnW[i+4] + bnB[i+4];
-            O_reg[i][j] = res1;
+            O_reg[i][j] =  res1;
             O_reg[i][j+4] = res2;
             O_reg[i+4][j] = res3;
             O_reg[i+4][j+4] = res4;
         }
     }
-    //store to C
-    // #pragma unroll
-    // for (int i = 0; i<4;i++)
+    #pragma unroll
+    for (int i = 0;i <8 ;i++)
+    {
+        float maxT = O_reg[i][0];
+        for (int j =1 ;j<8;j++)
+        {
+            if (O_reg[i][j]>maxT)
+            {
+                maxT = O_reg[i][j];
+            }
+        }
+    O_reg[i][0]= maxT;
+    }
+    
+    //warp内最大值规约 th 0 1 16 17 ，各8行
+    #pragma unroll
+    for (int offset = 8; offset > 1; offset >>= 1) {
+        for (int i = 0;i < 8 ;i++)
+        {
+            O_reg[i][0] = max(O_reg[i][0], __shfl_down_sync(0xFFFFFFFF, O_reg[i][0], offset));
+        }
+    }
+    if (twx == 0)
+    {
+        //printf("tx is %d\n",tx);
+        int O_gcol = bx * 2 + wx ;
+        #pragma unroll
+        for (int i = 0;i<2;i++)
+        {
+            for (int j =0 ;j <4;j++)
+            {
+                int O_grow = by * BM + wy * 32 + twy * 4 + i * 16 + j;
+                int O_StoreG = INDEX(O_grow, O_gcol, N/64) + bO/64;
+                output[O_StoreG] = O_reg[i*4+j][0];
+            }
+        }
+        
+    }
+
+    // if (twx == 0)
     // {
-    //     for (int j = 0 ; j<4 ;j++)
-    //     {
-    //         output[O_StoreG+ i*N+j]=O_reg[i][j];
-    //         output[O_StoreG+ i*N+j+32]= O_reg[i][j+4];
-    //         output[O_StoreG+ (i+16)*N+j]=O_reg[i+4][j];
-    //         output[O_StoreG+ (i+16)*N+(j+32)]=O_reg[i+4][j+4];
-    //     }
+    //     int O_StoreS_0 = wx * 32 + twy * 4;  
+    //     int O_StoreS_1 = O_StoreS_0 + 16;  
+    //     uint32_t O_sts_addr_0 = smem_u32addr(W_shared + O_StoreS_0);
+    //     uint32_t O_sts_addr_1 = smem_u32addr(W_shared + O_StoreS_1);
     // }
 
 
-    // int warpIdx = tx / 32; // 4x8 threads per Warp
-    // int twIdx = tx % 32;
-    // int wx = warpIdx % 2;      // th -> 8x8  warp-> 32x64
-    // int wy = warpIdx / 2;      // 4x2 warps per Block
-    // int twx = (twIdx / 2) % 8; // TODO: z型分布
-    // int twy = (twIdx / 16) * 2 + (twIdx % 2);
-
-
     // C_tile write back, reuse A&B tile shared memory buffer
-    uint32_t C_sts_addr = smem_u32addr((float4 *)(smem + warpIdx * 2048) +
-                                       twy * 4 * 8 + twx);
-    const float *C_lds_ptr = (float *)(smem + warpIdx * 2048) + twIdx;
+    // uint32_t C_sts_addr = smem_u32addr((float4 *)(smem + warpIdx * 2048) +
+    //                                    twy * 4 * 8 + twx);//每个warp 32*64 =2048；每个twy 
+    // const float *C_lds_ptr = (float *)(smem + warpIdx * 2048) + twIdx;
 
-    uint32_t m_idx = blockIdx.y * 128 + warpIdx / 2 * 32;
-    uint32_t n_idx = blockIdx.x * 128 + warpIdx % 2 * 64 + twIdx;
+    // uint32_t m_idx = blockIdx.y * 128 + warpIdx / 2 * 32;
+    // uint32_t n_idx = blockIdx.x * 128 + warpIdx % 2 * 64 + twIdx;
 
-    float *C_stg_ptr = output + m_idx * N + n_idx+bO;
+    // float *C_stg_ptr = output + m_idx * N + n_idx+bO;
 
     
-        #pragma unroll
-        for (int i = 0; i < 2; ++i) {
-            #pragma unroll
-            for (int j = 0; j < 2; ++j) {
-                StgFrag stg_frag(O_reg, j, i);
+        // #pragma unroll
+        // for (int i = 0; i < 2; ++i) {
+        //     #pragma unroll
+        //     for (int j = 0; j < 2; ++j) {
+        //         StgFrag stg_frag(O_reg, j, i);//4*4 matrix
 
-                C_tile_wb(stg_frag,
-                          C_stg_ptr + i * 16 * N + j * 32,
-                          C_lds_ptr,
-                          C_sts_addr,
-                          M,
-                          N,
-                          m_idx + i * 16,
-                          n_idx + j * 32);
-            }
-        }
-    
-
+        //         C_tile_wb(stg_frag,
+        //                   C_stg_ptr + i * 16 * N + j * 32,
+        //                   C_lds_ptr,
+        //                   C_sts_addr,
+        //                   M,
+        //                   N,
+        //                   m_idx + i * 16,
+        //                   n_idx + j * 32);
+        //     }
+        // }
 }
 
 
@@ -2074,7 +2099,7 @@ void Inference_GPU (int inChannels,
     int part4_1= bn * fstn_inChannel ;
     int part4_2= batchSize*numPoints*fstn_inChannel ;
     int part4_3= batchSize*fstn_inChannel*numPoints ;
-    int part4_4= batchSize*encoderOC2*numPoints ;
+    int part4_4= batchSize*encoderOC2*numPoints /64;
     int part4_5= bnEOC3 ;
     int part4_6= batchSize * encoderOC3 ;
     //classify
@@ -2152,7 +2177,7 @@ void Inference_GPU (int inChannels,
     dParams.featp.cb3.weight, dParams.featp.cb3.bias,
     dParams.featp.cb3.bn_weight, dParams.featp.cb3.bn_bias, 
     dParams.featp.cb3.bn_mean, dParams.featp.cb3.bn_var,net.feat_bn3);
-    GPU_MaxPooling(encoderOC3, batchSize, numPoints,net.feat_bn3, net.encoder_output); // Max pooling
+    GPU_MaxPooling(encoderOC3, batchSize, numPoints/64,net.feat_bn3, net.encoder_output); // Max pooling
     
 
     // std::cout << "PART5:CLASSIFY" << std::endl;

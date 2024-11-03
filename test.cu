@@ -551,33 +551,6 @@ void matrix_add_I(float *input, int n,int batchSize)
     // cudaDeviceSynchronize();
 }
 
-// __global__ void Maxpooling_Kernel(float* input, float* output, int numPoints) {
-//     int tx = threadIdx.x;          // 线程ID
-//     int channel = blockIdx.x;      // 通道ID
-
-//     float localMax = -FLT_MAX;     // 初始化局部最大值
-//     int cnum = channel * numPoints; // 当前通道的起始索引
-
-//     // 计算当前线程的局部最大值
-//     for (int i = tx; i < numPoints; i += blockDim.x) {
-//         float val = input[cnum + i];
-//         if (val > localMax) {
-//             localMax = val;
-//         }
-//     }
-
-//     // 使用shfl_down_sync进行归约
-//     // 循环，逐步归约到线程0
-//     for (int offset = 32 / 2; offset > 0; offset >>= 1) {
-//         localMax = max(localMax, __shfl_down_sync(0xFFFFFFFF, localMax, offset));
-//     }
-
-//     // 线程0写入最终的最大值
-//     if (tx % warpSize == 0) {
-//         output[channel] = localMax;
-//     }
-// }
-
 __global__ void Maxpooling_Kernel(float* input,float* output,int numPoints,int perWarp,int perTh)
 {
     __shared__ float sharedMax[32];
@@ -1786,12 +1759,53 @@ float* bnWeights,float* bnBias,float* bnRM,float* bnRV,float* output,float esp =
             res3 = max(0.0f, res3);
             res4 = __fdividef((res4 - mean[i+4]),sqrt(var[i+4] + esp)) * bnW[i+4] + bnB[i+4];
             res4 = max(0.0f, res4);
-            O_reg[i][j] = res1;
-            O_reg[i][j+4] = res2;
-            O_reg[i+4][j] = res3;
-            O_reg[i+4][j+4] = res4;
+            O_reg[i][j] =  max(res1,res2);
+            //O_reg[i][j+4] = res2;
+            O_reg[i+4][j] = max(res3,res4);
+            //O_reg[i+4][j+4] = res4;
         }
     }
+    #pragma unroll
+    for (int i = 0;i <8 ;i++)
+    {
+        Oreg[i][0]= max(max(max(Oreg[i][6],Oreg[i][7]),max(Oreg[i][4],Oreg[i][5])),max(max(Oreg[i][3],Oreg[i][2]),max(Oreg[i][1],Oreg[i][0])));
+    }
+    //规约
+    #pragma unroll
+    for (int offset = 32 / 2; offset > 0; offset >>= 1) {
+        for (int i = 0;i < 8 ;j++)
+        {
+            Oreg[i][0] = max(Oreg[i][0], __shfl_down_sync(0xFFFFFFFF, Oreg[i][0], offset));
+        }
+    }
+
+
+    float localMax = -FLT_MAX;
+    int startIdx = channel * numPoints + warpIdx * perWarp + tx;
+    for (int i = 0; i < perTh; i ++) {
+        int index = startIdx + i*32;
+        localMax = max(localMax,input[index]);
+    }
+
+    for (int offset = 32 / 2; offset > 0; offset >>= 1) {
+        localMax = max(localMax, __shfl_down_sync(0xFFFFFFFF, localMax, offset));
+    }
+    if (tx % 32 == 0) {
+        sharedMax[warpIdx] = localMax;
+    }
+    __syncthreads();
+    if (warpIdx == 0)
+    {
+        localMax = sharedMax[tx];
+        for (int offset = 32 / 2; offset > 0; offset >>= 1) {
+            localMax = max(localMax, __shfl_down_sync(0xFFFFFFFF, localMax, offset));
+        }
+        if (tx == 0)
+        {
+            output[channel] = localMax;
+        }
+    }
+
     //store to C
     // #pragma unroll
     // for (int i = 0; i<4;i++)
@@ -1816,7 +1830,7 @@ float* bnWeights,float* bnBias,float* bnRM,float* bnRV,float* output,float esp =
 
     // C_tile write back, reuse A&B tile shared memory buffer
     uint32_t C_sts_addr = smem_u32addr((float4 *)(smem + warpIdx * 2048) +
-                                       twy * 4 * 8 + twx);
+                                       twy * 4 * 8 + twx);//每个warp 32*64 =2048；每个twy 
     const float *C_lds_ptr = (float *)(smem + warpIdx * 2048) + twIdx;
 
     uint32_t m_idx = blockIdx.y * 128 + warpIdx / 2 * 32;
@@ -1829,7 +1843,7 @@ float* bnWeights,float* bnBias,float* bnRM,float* bnRV,float* output,float esp =
         for (int i = 0; i < 2; ++i) {
             #pragma unroll
             for (int j = 0; j < 2; ++j) {
-                StgFrag stg_frag(O_reg, j, i);
+                StgFrag stg_frag(O_reg, j, i);//4*4 matrix
 
                 C_tile_wb(stg_frag,
                           C_stg_ptr + i * 16 * N + j * 32,

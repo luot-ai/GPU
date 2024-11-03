@@ -1864,13 +1864,6 @@ float* bnWeights,float* bnBias,float* bnRM,float* bnRV,float* output,float esp =
         
     }
 
-    // if (twx == 0)
-    // {
-    //     int O_StoreS_0 = wx * 32 + twy * 4;  
-    //     int O_StoreS_1 = O_StoreS_0 + 16;  
-    //     uint32_t O_sts_addr_0 = smem_u32addr(W_shared + O_StoreS_0);
-    //     uint32_t O_sts_addr_1 = smem_u32addr(W_shared + O_StoreS_1);
-    // }
 
 
     // C_tile write back, reuse A&B tile shared memory buffer
@@ -1978,6 +1971,63 @@ void GPU_CBR_3 (int OC1,int OC2,int OC3,int batchSize,int numPoints,int inics,CB
 
 
 // ARCH FBR
+
+__global__ void FBRWRAP_Kernel_gemv(int M,int batchSize,int N,float* input, 
+float* fcWeights, float* fcBias, 
+float* bnWeights,float* bnBias,float* bnRM,float* bnRV,float* output,float esp = 1e-5 )
+{
+    // Block index
+    int bx = blockIdx.x;
+    int batch = blockIdx.y;
+
+    // Thread index
+    int tx = threadIdx.x;//0~31
+    int ty = threadIdx.y;//0~3
+
+    const int warp_size=32;
+    int laneId= tx % warp_size;
+    int current_row = 4 * bx + ty;
+
+    if(current_row < M){
+
+        int oc = current_row;
+        float mean = bnRM[oc];
+        float var = bnRV[oc];
+        float bnW = bnWeights[oc];
+        float bnB = bnBias[oc];
+        float res = 0.0f;
+
+        int kIteration = (N/warp_size)/4;
+        if(kIteration==0) kIteration=1;
+        // fcWeights = &fcWeights[current_row*N];
+        // input= &input[batch*N];
+        #pragma unroll
+        for(int i=0; i< kIteration; i++){
+            int current_col_vec = (i*warp_size + laneId);
+            float4 current_val= reinterpret_cast<float4 *>(fcWeights)[current_col_vec+current_row*N/4];
+            float4 current_x = reinterpret_cast<float4 *>(input)[current_col_vec+batch*N/4];
+            res += current_val.x*current_x.x;
+            res += current_val.y*current_x.y;
+            res += current_val.z*current_x.z;
+            res += current_val.w*current_x.w;
+        }
+
+        res += __shfl_down_sync(0xffffffff, res, 16); // 0-16, 1-17, 2-18, etc.
+        res += __shfl_down_sync(0xffffffff, res, 8);// 0-8, 1-9, 2-10, etc.
+        res += __shfl_down_sync(0xffffffff, res, 4);// 0-4, 1-5, 2-6, etc.
+        res += __shfl_down_sync(0xffffffff, res, 2);// 0-2, 1-3, 4-6, 5-7, etc.
+        res += __shfl_down_sync(0xffffffff, res, 1);// 0-1, 2-3, 4-5, etc.
+
+        
+        res+=fcBias[oc];
+        res = __fdividef((res - mean),sqrt(var + esp)) * bnW + bnB;
+        res = res > 0 ? res : 0;
+        int index = oc + batch * M;
+        if(laneId==0) output[index] = res;
+    }
+}
+
+
 __global__ void FBRWRAP_Kernel(int TILEX,int TILEY,int outFeatures,int batchSize,int inFeatures,float* input, 
 float* fcWeights, float* fcBias, 
 float* bnWeights,float* bnBias,float* bnRM,float* bnRV,float* output,float esp = 1e-5 )
@@ -2015,12 +2065,22 @@ float* cudaBnWeights,float* cudaBnBias,float* cudaBnRM,float* cudaBnRV,float* ou
 ){
     //std::cout << "------------LAYER:FBRWRAP" << std::endl;
     // printf("inchannel %d,numPoints %d\n",inChannels,numPoints);
-    const int BLK_X = 32;
-    const int BLK_Y = 32;
-    dim3 blockDim(BLK_X,BLK_Y);
-    dim3 gridDim((outFeatures + BLK_X - 1) / BLK_X,(batchSize + BLK_Y - 1) / BLK_Y);//X:宽度 Y：高度
-    FBRWRAP_Kernel<<<gridDim,blockDim>>>(BLK_X,BLK_Y,outFeatures,batchSize,inFeatures,input,cudaFcWeights,cudaFcBias,cudaBnWeights,cudaBnBias,cudaBnRM,cudaBnRV,
+    // if (inFeatures > 512)
+    // {
+    // const int BLK_X = 32;
+    // const int BLK_Y = 32;
+    // dim3 blockDim(BLK_X,BLK_Y);
+    // dim3 gridDim((outFeatures + BLK_X - 1) / BLK_X,(batchSize + BLK_Y - 1) / BLK_Y);//X:宽度 Y：高度
+    // FBRWRAP_Kernel<<<gridDim,blockDim>>>(BLK_X,BLK_Y,outFeatures,batchSize,inFeatures,input,cudaFcWeights,cudaFcBias,cudaBnWeights,cudaBnBias,cudaBnRM,cudaBnRV,
+    // output);
+    // }
+    // else
+    {
+dim3 blockDim(32,4);
+dim3 gridDim((outFeatures + 4 - 1) / 4,batchSize);//X:宽度 Y：高度
+FBRWRAP_Kernel_gemv<<<gridDim,blockDim>>>(outFeatures,batchSize,inFeatures,input,cudaFcWeights,cudaFcBias,cudaBnWeights,cudaBnBias,cudaBnRM,cudaBnRV,
     output);
+    }
 
     // // 检查内核启动是否成功
     // CUDA_CHECK(cudaGetLastError());

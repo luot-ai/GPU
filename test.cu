@@ -277,7 +277,7 @@ int cal_net_size(int batchSize, int numPoints, int inChannels){
     int stn_1 = bn*inChannels;
     int stn_2 = bn*OC1;
     int stn_3 = bn*OC2;
-    int stn_4 = bn*OC3;
+    int stn_4 = bn*OC3/64;
     int stn_5 = batchSize*OC3;
     int stn_6 = batchSize*FC_OC1;
     int stn_7 = batchSize*FC_OC2;
@@ -289,7 +289,7 @@ int cal_net_size(int batchSize, int numPoints, int inChannels){
     //stnkd
     int fstn_1= bn * fstn_OC1 ;
     int fstn_2= bn * fstn_OC2 ;
-    int fstn_3= bn * fstn_OC3 ;
+    int fstn_3= bn * fstn_OC3 / 64;
     int fstn_4= batchSize * fstn_OC3 ;
     int fstn_5= batchSize * fstn_FC_OC1 ;
     int fstn_6= batchSize * fstn_FC_OC2 ;
@@ -551,6 +551,34 @@ void matrix_add_I(float *input, int n,int batchSize)
     // cudaDeviceSynchronize();
 }
 
+__global__ void Maxpooling_Kernel0(float* input,float* output,int numPoints)
+{
+    __shared__ float sharedMax[1024];
+    
+    int tx = threadIdx.x;
+    int channel = blockIdx.x;
+
+    int cnum = channel * numPoints;
+    float localMax = input[cnum + tx];
+    sharedMax[tx]=localMax;
+    __syncthreads();
+
+    // 归约：逐步计算块内的最大值
+    for (int stride = numPoints/ 2; stride > 0; stride >>= 1) {
+        if (tx < stride) {
+            if (sharedMax[tx + stride] > sharedMax[tx]) {
+                sharedMax[tx] = sharedMax[tx + stride];
+            }
+        }
+        __syncthreads();
+    }
+
+    // 线程0写入最终的最大值
+    if (tx == 0) {
+        output[channel] = sharedMax[0];
+    }
+}
+
 __global__ void Maxpooling_Kernel(float* input,float* output,int numPoints,int perWarp,int perTh)
 {
     __shared__ float sharedMax[32];
@@ -590,11 +618,18 @@ void GPU_MaxPooling(int ics, int batchSize, int numPoints,float* input, float* o
 {
     //std::cout << "----START MAXPOOLING" << std::endl;
     dim3 gridDim(ics*batchSize);
+    if(numPoints>1024)
+    {
     dim3 blockDim(1024);
     int warpNum = 32;
-    int perWarp = numPoints/warpNum;//4N
+    int perWarp = numPoints/warpNum;//2N/32
     int perTh = perWarp/32;
     Maxpooling_Kernel<<<gridDim, blockDim>>>(input, output,numPoints,perWarp,perTh);
+    }
+    else
+    {
+        Maxpooling_Kernel0<<<gridDim, numPoints>>>(input, output,numPoints);
+    }
     // // 检查内核启动是否成功
     // CUDA_CHECK(cudaGetLastError());
 
@@ -1759,20 +1794,29 @@ float* bnWeights,float* bnBias,float* bnRM,float* bnRV,float* output,float esp =
             res3 = max(0.0f, res3);
             res4 = __fdividef((res4 - mean[i+4]),sqrt(var[i+4] + esp)) * bnW[i+4] + bnB[i+4];
             res4 = max(0.0f, res4);
-            O_reg[i][j] =  max(res1,res2);
-            //O_reg[i][j+4] = res2;
-            O_reg[i+4][j] = max(res3,res4);
-            //O_reg[i+4][j+4] = res4;
+            O_reg[i][j] =  res1;
+            O_reg[i][j+4] = res2;
+            O_reg[i+4][j] = res3;
+            O_reg[i+4][j+4] = res4;
         }
     }
     #pragma unroll
     for (int i = 0;i <8 ;i++)
     {
-        O_reg[i][0]= max(max(max(O_reg[i][6],O_reg[i][7]),max(O_reg[i][4],O_reg[i][5])),max(max(O_reg[i][3],O_reg[i][2]),max(O_reg[i][1],O_reg[i][0])));
+        float maxT = O_reg[i][0];
+        for (int j =1 ;j<8;j++)
+        {
+            if (O_reg[i][j]>maxT)
+            {
+                maxT = O_reg[i][j];
+            }
+        }
+    O_reg[i][0]= maxT;
     }
+    
     //warp内最大值规约 th 0 1 16 17 ，各8行
     #pragma unroll
-    for (int offset = 8; offset > 0; offset >>= 1) {
+    for (int offset = 8; offset > 1; offset >>= 1) {
         for (int i = 0;i < 8 ;i++)
         {
             O_reg[i][0] = max(O_reg[i][0], __shfl_down_sync(0xFFFFFFFF, O_reg[i][0], offset));
@@ -1780,6 +1824,7 @@ float* bnWeights,float* bnBias,float* bnRM,float* bnRV,float* output,float esp =
     }
     if (twx == 0)
     {
+        //printf("tx is %d\n",tx);
         int O_gcol = bx * 2 + wx ;
         #pragma unroll
         for (int i = 0;i<2;i++)
@@ -1830,8 +1875,6 @@ float* bnWeights,float* bnBias,float* bnRM,float* bnRV,float* output,float esp =
         //                   n_idx + j * 32);
         //     }
         // }
-    
-
 }
 
 __global__ void CBRWRAP_Kernel_ic3(int TILEX,int TILEY,int outChannels,int batchSize,int numPoints,int inChannels,float* input, 
@@ -2010,7 +2053,7 @@ void Inference_GPU (int inChannels,
     int stn_1 = bn*inChannels;
     int stn_2 = bn*OC1;
     int stn_3 = bn*OC2;
-    int stn_4 = bn*OC3;
+    int stn_4 = bn*OC3/64;
     int stn_5 = batchSize*OC3;
     int stn_6 = batchSize*FC_OC1;
     int stn_7 = batchSize*FC_OC2;
@@ -2022,7 +2065,7 @@ void Inference_GPU (int inChannels,
     //stnkd
     int fstn_1= bn * fstn_OC1 ;
     int fstn_2= bn * fstn_OC2 ;
-    int fstn_3= bn * fstn_OC3 ;
+    int fstn_3= bn * fstn_OC3 /64;
     int fstn_4= batchSize * fstn_OC3 ;
     int fstn_5= batchSize * fstn_FC_OC1 ;
     int fstn_6= batchSize * fstn_FC_OC2 ;

@@ -1768,23 +1768,29 @@ float* bnWeights,float* bnBias,float* bnRM,float* bnRV,float* output,float esp =
     #pragma unroll
     for (int i = 0;i <8 ;i++)
     {
-        Oreg[i][0]= max(max(max(Oreg[i][6],Oreg[i][7]),max(Oreg[i][4],Oreg[i][5])),max(max(Oreg[i][3],Oreg[i][2]),max(Oreg[i][1],Oreg[i][0])));
+        O_reg[i][0]= max(max(max(O_reg[i][6],O_reg[i][7]),max(O_reg[i][4],O_reg[i][5])),max(max(O_reg[i][3],O_reg[i][2]),max(O_reg[i][1],O_reg[i][0])));
     }
     //warp内最大值规约 th 0 1 16 17 ，各8行
     #pragma unroll
     for (int offset = 8; offset > 0; offset >>= 1) {
         for (int i = 0;i < 8 ;i++)
         {
-            Oreg[i][0] = max(Oreg[i][0], __shfl_down_sync(0xFFFFFFFF, Oreg[i][0], offset));
+            O_reg[i][0] = max(O_reg[i][0], __shfl_down_sync(0xFFFFFFFF, O_reg[i][0], offset));
         }
     }
     if (twx == 0)
     {
-        int O_grow = by * BM + wy * 32 + twy * 4;
         int O_gcol = bx * 2 + wx ;
-        int O_StoreG = INDEX(O_grow, O_gcol, N/64) + bO/64;
         #pragma unroll
-        for
+        for (int i = 0;i<2;i++)
+        {
+            for (int j =0 ;j <4;j++)
+            {
+                int O_grow = by * BM + wy * 32 + twy * 4 + i * 16 + j;
+                int O_StoreG = INDEX(O_grow, O_gcol, N/64) + bO/64;
+                output[O_StoreG] = O_reg[i*4+j][0];
+            }
+        }
         
     }
 
@@ -1795,63 +1801,35 @@ float* bnWeights,float* bnBias,float* bnRM,float* bnRV,float* output,float esp =
     //     uint32_t O_sts_addr_0 = smem_u32addr(W_shared + O_StoreS_0);
     //     uint32_t O_sts_addr_1 = smem_u32addr(W_shared + O_StoreS_1);
     // }
-    //block 每行 两个warp
-
-    int W_StoreS = INDEX(W_srow, W_scol, BM + 4);
-    int I_StoreS = INDEX(I_srow, I_scol, BN);
-    uint32_t W_sts_addr = smem_u32addr(W_shared + W_StoreS);
-    uint32_t I_sts_addr = smem_u32addr(I_shared + I_StoreS);
-
-
-    //store to C
-    // #pragma unroll
-    // for (int i = 0; i<4;i++)
-    // {
-    //     for (int j = 0 ; j<4 ;j++)
-    //     {
-    //         output[O_StoreG+ i*N+j]=O_reg[i][j];
-    //         output[O_StoreG+ i*N+j+32]= O_reg[i][j+4];
-    //         output[O_StoreG+ (i+16)*N+j]=O_reg[i+4][j];
-    //         output[O_StoreG+ (i+16)*N+(j+32)]=O_reg[i+4][j+4];
-    //     }
-    // }
-
-
-    // int warpIdx = tx / 32; // 4x8 threads per Warp
-    // int twIdx = tx % 32;
-    // int wx = warpIdx % 2;      // th -> 8x8  warp-> 32x64
-    // int wy = warpIdx / 2;      // 4x2 warps per Block
-    // int twx = (twIdx / 2) % 8; // TODO: z型分布
-    // int twy = (twIdx / 16) * 2 + (twIdx % 2);
 
 
     // C_tile write back, reuse A&B tile shared memory buffer
-    uint32_t C_sts_addr = smem_u32addr((float4 *)(smem + warpIdx * 2048) +
-                                       twy * 4 * 8 + twx);//每个warp 32*64 =2048；每个twy 
-    const float *C_lds_ptr = (float *)(smem + warpIdx * 2048) + twIdx;
+    // uint32_t C_sts_addr = smem_u32addr((float4 *)(smem + warpIdx * 2048) +
+    //                                    twy * 4 * 8 + twx);//每个warp 32*64 =2048；每个twy 
+    // const float *C_lds_ptr = (float *)(smem + warpIdx * 2048) + twIdx;
 
-    uint32_t m_idx = blockIdx.y * 128 + warpIdx / 2 * 32;
-    uint32_t n_idx = blockIdx.x * 128 + warpIdx % 2 * 64 + twIdx;
+    // uint32_t m_idx = blockIdx.y * 128 + warpIdx / 2 * 32;
+    // uint32_t n_idx = blockIdx.x * 128 + warpIdx % 2 * 64 + twIdx;
 
-    float *C_stg_ptr = output + m_idx * N + n_idx+bO;
+    // float *C_stg_ptr = output + m_idx * N + n_idx+bO;
 
     
-        #pragma unroll
-        for (int i = 0; i < 2; ++i) {
-            #pragma unroll
-            for (int j = 0; j < 2; ++j) {
-                StgFrag stg_frag(O_reg, j, i);//4*4 matrix
+        // #pragma unroll
+        // for (int i = 0; i < 2; ++i) {
+        //     #pragma unroll
+        //     for (int j = 0; j < 2; ++j) {
+        //         StgFrag stg_frag(O_reg, j, i);//4*4 matrix
 
-                C_tile_wb(stg_frag,
-                          C_stg_ptr + i * 16 * N + j * 32,
-                          C_lds_ptr,
-                          C_sts_addr,
-                          M,
-                          N,
-                          m_idx + i * 16,
-                          n_idx + j * 32);
-            }
-        }
+        //         C_tile_wb(stg_frag,
+        //                   C_stg_ptr + i * 16 * N + j * 32,
+        //                   C_lds_ptr,
+        //                   C_sts_addr,
+        //                   M,
+        //                   N,
+        //                   m_idx + i * 16,
+        //                   n_idx + j * 32);
+        //     }
+        // }
     
 
 }
@@ -2101,7 +2079,7 @@ void Inference_GPU (int inChannels,
     // std::cout << "PART1:STN3d" << std::endl;
     GPU_transpose(input,net.input_trans,batchSize,numPoints,inChannels);
     GPU_CBR_3(OC1,OC2,OC3, batchSize, numPoints,inChannels,dParams.stn3dp.cb3, net.input_trans, net.CBR3_output,net.relu1_output_stn_cbr,net.relu2_output_stn_cbr);   // conv-bn-relu * 3
-    GPU_MaxPooling(OC3, batchSize, numPoints,net.CBR3_output, net.maxp_output); // Max pooling    
+    GPU_MaxPooling(OC3, batchSize, numPoints/64,net.CBR3_output, net.maxp_output); // Max pooling    
     GPU_FBR_2_F(FC_OC1,FC_OC2,FC_OC3,batchSize,OC3,dParams.stn3dp.fb2f,net.maxp_output,net.stn3d_out,net.relu1_output_stn_fbr2f,net.relu1_output_stn_fbr2f);// fc-bn-relu * 2 + fc
     matrix_add_I(net.stn3d_out,3,batchSize);
 
@@ -2114,7 +2092,7 @@ void Inference_GPU (int inChannels,
 
     // std::cout << "PART3:STNkd"<< std::endl;
     GPU_CBR_3(fstn_OC1,fstn_OC2,fstn_OC3, batchSize, numPoints,fstn_inChannel,dParams.stnkdp.cb3, net.fstn_input, net.fstn_CBR3_output,net.relu1_output_fstn_cbr,net.relu2_output_fstn_cbr);   // conv-bn-relu * 3
-    GPU_MaxPooling(fstn_OC3, batchSize, numPoints,net.fstn_CBR3_output, net.fstn_maxp_output); // Max pooling
+    GPU_MaxPooling(fstn_OC3, batchSize, numPoints/64,net.fstn_CBR3_output, net.fstn_maxp_output); // Max pooling
     GPU_FBR_2_F(fstn_FC_OC1,fstn_FC_OC2,fstn_FC_OC3,batchSize,fstn_OC3,dParams.stnkdp.fb2f,net.fstn_maxp_output,net.stnkd_out,net.relu1_output_fstn_fbr2f,net.relu2_output_fstn_fbr2f);// fc-bn-relu * 2 + fc
     matrix_add_I(net.stnkd_out,64,batchSize);
 

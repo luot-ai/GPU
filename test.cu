@@ -1770,41 +1770,38 @@ float* bnWeights,float* bnBias,float* bnRM,float* bnRV,float* output,float esp =
     {
         Oreg[i][0]= max(max(max(Oreg[i][6],Oreg[i][7]),max(Oreg[i][4],Oreg[i][5])),max(max(Oreg[i][3],Oreg[i][2]),max(Oreg[i][1],Oreg[i][0])));
     }
-    //规约
+    //warp内最大值规约 th 0 1 16 17 ，各8行
     #pragma unroll
-    for (int offset = 32 / 2; offset > 0; offset >>= 1) {
-        for (int i = 0;i < 8 ;j++)
+    for (int offset = 8; offset > 0; offset >>= 1) {
+        for (int i = 0;i < 8 ;i++)
         {
             Oreg[i][0] = max(Oreg[i][0], __shfl_down_sync(0xFFFFFFFF, Oreg[i][0], offset));
         }
     }
-
-
-    float localMax = -FLT_MAX;
-    int startIdx = channel * numPoints + warpIdx * perWarp + tx;
-    for (int i = 0; i < perTh; i ++) {
-        int index = startIdx + i*32;
-        localMax = max(localMax,input[index]);
-    }
-
-    for (int offset = 32 / 2; offset > 0; offset >>= 1) {
-        localMax = max(localMax, __shfl_down_sync(0xFFFFFFFF, localMax, offset));
-    }
-    if (tx % 32 == 0) {
-        sharedMax[warpIdx] = localMax;
-    }
-    __syncthreads();
-    if (warpIdx == 0)
+    if (twx == 0)
     {
-        localMax = sharedMax[tx];
-        for (int offset = 32 / 2; offset > 0; offset >>= 1) {
-            localMax = max(localMax, __shfl_down_sync(0xFFFFFFFF, localMax, offset));
-        }
-        if (tx == 0)
-        {
-            output[channel] = localMax;
-        }
+        int O_grow = by * BM + wy * 32 + twy * 4;
+        int O_gcol = bx * 2 + wx ;
+        int O_StoreG = INDEX(O_grow, O_gcol, N/64) + bO/64;
+        #pragma unroll
+        for
+        
     }
+
+    // if (twx == 0)
+    // {
+    //     int O_StoreS_0 = wx * 32 + twy * 4;  
+    //     int O_StoreS_1 = O_StoreS_0 + 16;  
+    //     uint32_t O_sts_addr_0 = smem_u32addr(W_shared + O_StoreS_0);
+    //     uint32_t O_sts_addr_1 = smem_u32addr(W_shared + O_StoreS_1);
+    // }
+    //block 每行 两个warp
+
+    int W_StoreS = INDEX(W_srow, W_scol, BM + 4);
+    int I_StoreS = INDEX(I_srow, I_scol, BN);
+    uint32_t W_sts_addr = smem_u32addr(W_shared + W_StoreS);
+    uint32_t I_sts_addr = smem_u32addr(I_shared + I_StoreS);
+
 
     //store to C
     // #pragma unroll

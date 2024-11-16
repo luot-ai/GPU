@@ -4,3 +4,5 @@ P2
 test
 test.o
 device_info.o
+id_rsa
+id_rsa.pub

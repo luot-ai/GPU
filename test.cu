@@ -1472,6 +1472,7 @@ float* bnWeights,float* bnBias,float* bnRM,float* bnRV,float* output,float esp =
         {
             int nI = (iter + 1) % 2;
             int nrowS = (iter + 1) % BK;
+            
             int offW = nrowS * (BM + 4);
             int offI = nrowS * BN;
             lds128(W_reg[nI][0], W_reg[nI][1], W_reg[nI][2], W_reg[nI][3], W_lds_addr + offW * sizeof(float));

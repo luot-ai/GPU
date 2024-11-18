@@ -246,6 +246,7 @@ class PointCloudDataset(Dataset):
             for k in hf.keys():
                 self.list_of_points.append(hf[k]["points"][:].astype(np.float32))
                 self.list_of_labels.append(hf[k].attrs["label"])
+        self.fix_length_statistics_with_median()
 
     def __len__(self):
         return len(self.list_of_points)

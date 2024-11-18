@@ -1,6 +1,6 @@
 # Define the compiler and flags
 NVCC = nvcc
-CXXFLAGS = -O3 -std=c++14 -I/usr/include/hdf5/serial
+CXXFLAGS = -O3 -std=c++14
 GENCODE_FLAGS = \
     -gencode arch=compute_50,code=sm_50 \
     -gencode arch=compute_52,code=sm_52 \
@@ -9,7 +9,7 @@ GENCODE_FLAGS = \
     -gencode arch=compute_61,code=sm_61 \
     -gencode arch=compute_62,code=sm_62 \
     -gencode arch=compute_70,code=sm_70
-LIBS = -L/usr/lib/x86_64-linux-gnu -lhdf5_serial -lhdf5_serial_cpp
+LIBS = -lhdf5 -lhdf5_cpp
 
 # Target executable
 TARGET = test

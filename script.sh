@@ -38,7 +38,7 @@ while true; do
                 ;;
             2)
                 echo "Running with nvprof"
-                nvprof ./test ./params/30epoch
+                nvprof ./test ./params/60epoch
                 ;;
             3)
                 echo "Running with nvprof --profile-from-start off"

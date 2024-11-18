@@ -58,7 +58,7 @@ from tqdm import tqdm
 
 # import provider
 num_class = 10
-total_epoch = 30
+total_epoch = 12
 script_dir = os.path.dirname(__file__)  # 获取脚本所在的目录
 
 class STN3d(nn.Module):
@@ -246,6 +246,7 @@ class PointCloudDataset(Dataset):
             for k in hf.keys():
                 self.list_of_points.append(hf[k]["points"][:].astype(np.float32))
                 self.list_of_labels.append(hf[k].attrs["label"])
+        self.fix_length_statistics_with_median()
 
     def __len__(self):
         return len(self.list_of_points)
@@ -295,19 +296,19 @@ def inplace_relu(m):
 
 #     return instance_acc
 
-def pad_collate_fn(batch):
-    # 找到批次中最小的数组大小
-    min_size = min([item[0].shape[0] for item in batch])
+# def pad_collate_fn(batch):
+#     # 找到批次中最小的数组大小
+#     min_size = min([item[0].shape[0] for item in batch])
     
-    # 截断数组
-    padded_batch = []
-    for points, target in batch:
-        # 截断数组
-        points = points[:min_size, :]
-        padded_batch.append((points, target))
+#     # 截断数组
+#     padded_batch = []
+#     for points, target in batch:
+#         # 截断数组
+#         points = points[:min_size, :]
+#         padded_batch.append((points, target))
     
-    # 使用默认的 collate_fn 处理填充后的批次
-    return torch.utils.data.dataloader.default_collate(padded_batch)
+#     # 使用默认的 collate_fn 处理填充后的批次
+#     return torch.utils.data.dataloader.default_collate(padded_batch)
 
 # provider
 def shift_point_cloud(batch_data, shift_range=0.1):
@@ -367,8 +368,8 @@ def main():
     # test_dataset = PointCloudDataset(root=data_path, split='test')
 
     # 创建 DataLoader 实例
-    train_dataloader = DataLoader(train_dataset, batch_size=32, shuffle=True, num_workers=10, drop_last=True, collate_fn=pad_collate_fn) #batch_size内固定长度截取
-    # train_dataloader = DataLoader(train_dataset, batch_size=32, shuffle=True, num_workers=10, drop_last=True) #全局固定长度填充/截取
+    #train_dataloader = DataLoader(train_dataset, batch_size=32, shuffle=True, num_workers=10, drop_last=True, collate_fn=pad_collate_fn) #batch_size内固定长度截取
+    train_dataloader = DataLoader(train_dataset, batch_size=32, shuffle=True, num_workers=10, drop_last=True) #全局固定长度填充/截取
     # test_dataloader = DataLoader(test_dataset, batch_size=1, shuffle=False, num_workers=10, drop_last=False)
 
     print("finish DATA LOADING")

@@ -1,1 +1,0 @@
-export GIT_SSH_COMMAND="ssh -i ./id_rsa -F /dev/null"

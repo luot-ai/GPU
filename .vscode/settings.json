@@ -55,7 +55,15 @@
         "streambuf": "c",
         "cinttypes": "c",
         "typeinfo": "c",
-        "cfloat": "cpp"
+        "cfloat": "cpp",
+        "bitset": "cpp",
+        "condition_variable": "cpp",
+        "list": "cpp",
+        "regex": "cpp",
+        "set": "cpp",
+        "mutex": "cpp",
+        "thread": "cpp",
+        "cfenv": "cpp"
     },
     "C_Cpp.errorSquiggles": "disabled"
 }

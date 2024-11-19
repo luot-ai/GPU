@@ -3,7 +3,7 @@
 // nvprof ./test ./params/30epoch
 // nvprof --profile-from-start off ./test ./params/30epoch
 #include <random>
-#include <iostream>
+#include <iostream> 
 #include <strings.h>
 #include <vector>
 #include <cfloat>
@@ -17,14 +17,16 @@
 #include <cstring>
 #include <hdf5/serial/H5Cpp.h>
 #include <cuda_profiler_api.h>
-
-
-
 #include <cuda_runtime.h>
+
+
 #define GEMMBLKMAX 128
 #define ALIGN_DOWN(x, align) ((x) / (align) * (align))
 #define DIV_UP(x, y) (((x) + (y) - 1) / (y))
 #define INDEX(row, col, width) ((row) * (width) + (col))
+#define NPOINT 128
+#define SAMPLE 0
+#define USECONVMAX (SAMPLE == 0 ? 1 : (NPOINT >= 128 ? 1 : 0))
 
 __device__ __forceinline__
 uint32_t smem_u32addr(const void *smem_ptr) {
@@ -252,24 +254,28 @@ struct NET {
     float* softmax_input;
 };
 int cal_net_size(int batchSize, int numPoints, int inChannels){
+    int ch = 1024;
+    int ch_half = 512;
+    int ch_quarter = 256;
+
     int totalSize = 0;
     int bn = batchSize * numPoints;
     int OC1 = 64;
     int OC2 = 128;
-    int OC3 = 1024;
-    int FC_OC1 = 512;
-    int FC_OC2 = 256;
+    int OC3 = ch;
+    int FC_OC1 = ch_half;
+    int FC_OC2 = ch_quarter;
     //int FC_OC3 = 9;
     int encoderIC1 = inChannels;
     int fstn_inChannel = 64;//encoderOC1
     int fstn_OC1 = 64;
     int fstn_OC2 = 128;
-    int fstn_OC3 = 1024;
-    int fstn_FC_OC1 = 512;
-    int fstn_FC_OC2 = 256;
+    int fstn_OC3 = ch;
+    int fstn_FC_OC1 = ch_half;
+    int fstn_FC_OC2 = ch_quarter;
     //int fstn_FC_OC3 = fstn_inChannel * fstn_inChannel ;
     int encoderOC2 = 128;
-    int encoderOC3 = 1024;
+    int encoderOC3 = ch;
     int bnEOC3 = batchSize * numPoints * encoderOC3;
     int transSize = batchSize * inChannels * inChannels;
     int transFeatSize = batchSize * fstn_inChannel * fstn_inChannel;
@@ -277,7 +283,8 @@ int cal_net_size(int batchSize, int numPoints, int inChannels){
     int stn_1 = bn*inChannels;
     int stn_2 = bn*OC1;
     int stn_3 = bn*OC2;
-    int stn_4 = bn*OC3/64;
+    int stn_4 = bn*OC3;
+    if (USECONVMAX == 1) { stn_4 = stn_4 / 64 ;}
     int stn_5 = batchSize*OC3;
     int stn_6 = batchSize*FC_OC1;
     int stn_7 = batchSize*FC_OC2;
@@ -289,7 +296,8 @@ int cal_net_size(int batchSize, int numPoints, int inChannels){
     //stnkd
     int fstn_1= bn * fstn_OC1 ;
     int fstn_2= bn * fstn_OC2 ;
-    int fstn_3= bn * fstn_OC3 / 64;
+    int fstn_3= bn * fstn_OC3 ;
+    if (USECONVMAX == 1) { fstn_3 = fstn_3 / 64 ;}
     int fstn_4= batchSize * fstn_OC3 ;
     int fstn_5= batchSize * fstn_FC_OC1 ;
     int fstn_6= batchSize * fstn_FC_OC2 ;
@@ -298,12 +306,13 @@ int cal_net_size(int batchSize, int numPoints, int inChannels){
     int part4_1= bn * fstn_inChannel ;
     int part4_2= batchSize*numPoints*fstn_inChannel ;
     int part4_3= batchSize*fstn_inChannel*numPoints ;
-    int part4_4= batchSize*encoderOC2*numPoints /64;
+    int part4_4= batchSize*encoderOC2*numPoints ;
+    if (USECONVMAX == 1) { part4_4 = part4_4 / 64 ;}
     int part4_5= bnEOC3 ;
     int part4_6= batchSize * encoderOC3 ;
     //classify
-    int cla_1= batchSize * 512 ;
-    int cla_2= batchSize * 256 ;
+    int cla_1= batchSize * ch_half ;
+    int cla_2= batchSize * ch_quarter ;
     int cla_3= batchSize * 10;
 
     totalSize = stn_1 + stn_2 + stn_3 + stn_4 + stn_5 + stn_6 + stn_7 + stn_8 +
@@ -533,7 +542,6 @@ void LogSoftMax_GPU(float* input,int* label,int L,int BatchSize = 32)
     // CUDA_CHECK(cudaDeviceSynchronize());
 }
 
-
 __global__ void matrix_add_I_kernel(float *input, int n,int batchSize)
 {
     int curN = blockIdx.x;
@@ -578,7 +586,6 @@ __global__ void Maxpooling_Kernel0(float* input,float* output,int numPoints)
         output[channel] = sharedMax[0];
     }
 }
-
 __global__ void Maxpooling_Kernel(float* input,float* output,int numPoints,int perWarp,int perTh)
 {
     __shared__ float sharedMax[32];
@@ -636,6 +643,7 @@ void GPU_MaxPooling(int ics, int batchSize, int numPoints,float* input, float* o
     // // 同步设备并检查执行错误
     // CUDA_CHECK(cudaDeviceSynchronize());
 }
+
 __global__ void BMM_Kernel(float* input_A,float* input_B,float* output,int M_A,int K_A,int K_B,int N_B,int BatchSize)
 {
     int tx = threadIdx.x;
@@ -1198,7 +1206,6 @@ float* bnWeights,float* bnBias,float* bnRM,float* bnRV,float* output,float esp =
         //     }
         // }
 }
-
 __global__ void CB_64x128N_kernel(int M,int batchSize,int N,int K,float* input, 
 float* convWeights, float* convBias, 
 float* bnWeights,float* bnBias,float* bnRM,float* bnRV,float* output,float esp = 1e-5 )
@@ -1328,19 +1335,23 @@ float* bnWeights,float* bnBias,float* bnRM,float* bnRV,float* output,float esp =
         }
     }
 }
-
-
 void CBWRAP_GPU(int batchSize,int numPoints,int inChannels,int outChannels,int kSize,float* input, 
 float* cudaConvWeights, float* cudaConvBias, 
 float* cudaBnWeights,float* cudaBnBias,float* cudaBnRM,float* cudaBnRV,float* output,float esp = 1e-5
 ){
     //std::cout << "------------LAYER:CBWRAP" << std::endl;
-    dim3 grid128(DIV_UP(numPoints, 128), DIV_UP(outChannels, 128), batchSize);
-    //dim3 grid64(DIV_UP(numPoints, 64), DIV_UP(outChannels, 64), batchSize);
-    CB_1024x128N_kernel<<<grid128, 256>>>(outChannels, batchSize, numPoints, inChannels, input, cudaConvWeights, cudaConvBias,
-                                          cudaBnWeights, cudaBnBias, cudaBnRM, cudaBnRV, output);
-    // CB_64x128N_kernel<<<grid64, 256>>>(outChannels, batchSize, numPoints, inChannels, input, cudaConvWeights, cudaConvBias,
-    //                                       cudaBnWeights, cudaBnBias, cudaBnRM, cudaBnRV, output);
+    if (USECONVMAX)
+    {
+        dim3 grid128(DIV_UP(numPoints, 128), DIV_UP(outChannels, 128), batchSize);
+        CB_1024x128N_kernel<<<grid128, 256>>>(outChannels, batchSize, numPoints, inChannels, input, cudaConvWeights, cudaConvBias,
+                                              cudaBnWeights, cudaBnBias, cudaBnRM, cudaBnRV, output);
+    }
+    else
+    {
+        dim3 grid64(DIV_UP(numPoints, 64), DIV_UP(outChannels, 64), batchSize);
+        CB_64x128N_kernel<<<grid64, 256>>>(outChannels, batchSize, numPoints, inChannels, input, cudaConvWeights, cudaConvBias,
+                                              cudaBnWeights, cudaBnBias, cudaBnRM, cudaBnRV, output);
+    }
 }
 
 //ARCH CBR
@@ -1474,7 +1485,6 @@ float* bnWeights,float* bnBias,float* bnRM,float* bnRV,float* output,float esp =
         }
     }
 }
-
 __global__ void CBR_128x128N_kernel(int M,int batchSize,int N,int K,float* input, 
 float* convWeights, float* convBias, 
 float* bnWeights,float* bnBias,float* bnRM,float* bnRV,float* output,float esp = 1e-5 )
@@ -1755,7 +1765,6 @@ float* bnWeights,float* bnBias,float* bnRM,float* bnRV,float* output,float esp =
     
 
 }
-
 __global__ void CBR_1024x128N_kernel(int M,int batchSize,int N,int K,float* input, 
 float* convWeights, float* convBias, 
 float* bnWeights,float* bnBias,float* bnRM,float* bnRV,float* output,float esp = 1e-5 )
@@ -2100,7 +2109,7 @@ float* cudaBnWeights,float* cudaBnBias,float* cudaBnRM,float* cudaBnRV,float* ou
         CBRWRAP_Kernel_ic3<<<grid32, blockDim>>>(BLK_X, BLK_Y, outChannels, batchSize, numPoints, inChannels, input, cudaConvWeights, cudaConvBias,
                                                   cudaBnWeights, cudaBnBias, cudaBnRM, cudaBnRV, output);
     }
-    else if (outChannels == 1024 && inChannels == 128)
+    else if (outChannels == 1024 && inChannels == 128  && USECONVMAX == 1)
     {
         CBR_1024x128N_kernel<<<grid128, 256>>>(outChannels, batchSize, numPoints, inChannels, input, cudaConvWeights, cudaConvBias,
                                                   cudaBnWeights, cudaBnBias, cudaBnRM, cudaBnRV, output);
@@ -2130,7 +2139,6 @@ void GPU_CBR_3 (int OC1,int OC2,int OC3,int batchSize,int numPoints,int inics,CB
 
 
 // ARCH FBR
-
 __global__ void FBRWRAP_Kernel_gemv(int M,int batchSize,int N,float* input, 
 float* fcWeights, float* fcBias, 
 float* bnWeights,float* bnBias,float* bnRM,float* bnRV,float* output,float esp = 1e-5 )
@@ -2185,8 +2193,6 @@ float* bnWeights,float* bnBias,float* bnRM,float* bnRV,float* output,float esp =
         if(laneId==0) output[index] = res;
     }
 }
-
-
 __global__ void FBRWRAP_Kernel(int TILEX,int TILEY,int outFeatures,int batchSize,int inFeatures,float* input, 
 float* fcWeights, float* fcBias, 
 float* bnWeights,float* bnBias,float* bnRM,float* bnRV,float* output,float esp = 1e-5 )
@@ -2273,23 +2279,26 @@ void Inference_GPU (int inChannels,
             const std::vector<float>& C4={},
             bool compare=false) {
     // std::cout << "**********************START INFERENCE************************" << std::endl;
+    int ch = 1024;
+    int ch_half = 512;
+    int ch_quarter = 256;
     int bn = batchSize * numPoints;
     int OC1 = 64;
     int OC2 = 128;
-    int OC3 = 1024;
-    int FC_OC1 = 512;
-    int FC_OC2 = 256;
+    int OC3 = ch;
+    int FC_OC1 = ch_half;
+    int FC_OC2 = ch_quarter;
     int FC_OC3 = 9;
     int encoderIC1 = inChannels;
     int fstn_inChannel = 64;//encoderOC1
     int fstn_OC1 = 64;
     int fstn_OC2 = 128;
-    int fstn_OC3 = 1024;
-    int fstn_FC_OC1 = 512;
-    int fstn_FC_OC2 = 256;
+    int fstn_OC3 = ch;
+    int fstn_FC_OC1 = ch_half;
+    int fstn_FC_OC2 = ch_quarter;
     int fstn_FC_OC3 = fstn_inChannel * fstn_inChannel ;
     int encoderOC2 = 128;
-    int encoderOC3 = 1024;
+    int encoderOC3 = ch;
     int bnEOC3 = batchSize * numPoints * encoderOC3;
     int transSize = batchSize * inChannels * inChannels;
     int transFeatSize = batchSize * fstn_inChannel * fstn_inChannel;
@@ -2297,7 +2306,8 @@ void Inference_GPU (int inChannels,
     int stn_1 = bn*inChannels;
     int stn_2 = bn*OC1;
     int stn_3 = bn*OC2;
-    int stn_4 = bn*OC3/64;
+    int stn_4 = bn*OC3;
+    if (USECONVMAX == 1) { stn_4 = stn_4 / 64 ;}
     int stn_5 = batchSize*OC3;
     int stn_6 = batchSize*FC_OC1;
     int stn_7 = batchSize*FC_OC2;
@@ -2309,7 +2319,8 @@ void Inference_GPU (int inChannels,
     //stnkd
     int fstn_1= bn * fstn_OC1 ;
     int fstn_2= bn * fstn_OC2 ;
-    int fstn_3= bn * fstn_OC3 /64;
+    int fstn_3= bn * fstn_OC3 ;
+    if (USECONVMAX == 1) { fstn_3 = fstn_3 / 64 ;}
     int fstn_4= batchSize * fstn_OC3 ;
     int fstn_5= batchSize * fstn_FC_OC1 ;
     int fstn_6= batchSize * fstn_FC_OC2 ;
@@ -2318,12 +2329,13 @@ void Inference_GPU (int inChannels,
     int part4_1= bn * fstn_inChannel ;
     int part4_2= batchSize*numPoints*fstn_inChannel ;
     int part4_3= batchSize*fstn_inChannel*numPoints ;
-    int part4_4= batchSize*encoderOC2*numPoints /64;
+    int part4_4= batchSize*encoderOC2*numPoints ;
+    if (USECONVMAX == 1) { part4_4 = part4_4 / 64 ;}
     int part4_5= bnEOC3 ;
     int part4_6= batchSize * encoderOC3 ;
     //classify
-    int cla_1= batchSize * 512 ;
-    int cla_2= batchSize * 256 ;
+    int cla_1= batchSize * ch_half ;
+    int cla_2= batchSize * ch_quarter ;
     int cla_3= batchSize*10;
 
     NET net;
@@ -2364,9 +2376,10 @@ void Inference_GPU (int inChannels,
 
 
     // std::cout << "PART1:STN3d" << std::endl;
+    int maxnp = USECONVMAX? numPoints / 64 : numPoints;
     GPU_transpose(input,net.input_trans,batchSize,numPoints,inChannels);
     GPU_CBR_3(OC1,OC2,OC3, batchSize, numPoints,inChannels,dParams.stn3dp.cb3, net.input_trans, net.CBR3_output,net.relu1_output_stn_cbr,net.relu2_output_stn_cbr);   // conv-bn-relu * 3
-    GPU_MaxPooling(OC3, batchSize, numPoints/64,net.CBR3_output, net.maxp_output); // Max pooling    
+    GPU_MaxPooling(OC3, batchSize, maxnp,net.CBR3_output, net.maxp_output); // Max pooling    
     GPU_FBR_2_F(FC_OC1,FC_OC2,FC_OC3,batchSize,OC3,dParams.stn3dp.fb2f,net.maxp_output,net.stn3d_out,net.relu1_output_stn_fbr2f,net.relu1_output_stn_fbr2f);// fc-bn-relu * 2 + fc
     matrix_add_I(net.stn3d_out,3,batchSize);
 
@@ -2379,7 +2392,7 @@ void Inference_GPU (int inChannels,
 
     // std::cout << "PART3:STNkd"<< std::endl;
     GPU_CBR_3(fstn_OC1,fstn_OC2,fstn_OC3, batchSize, numPoints,fstn_inChannel,dParams.stnkdp.cb3, net.fstn_input, net.fstn_CBR3_output,net.relu1_output_fstn_cbr,net.relu2_output_fstn_cbr);   // conv-bn-relu * 3
-    GPU_MaxPooling(fstn_OC3, batchSize, numPoints/64,net.fstn_CBR3_output, net.fstn_maxp_output); // Max pooling
+    GPU_MaxPooling(fstn_OC3, batchSize, maxnp,net.fstn_CBR3_output, net.fstn_maxp_output); // Max pooling
     GPU_FBR_2_F(fstn_FC_OC1,fstn_FC_OC2,fstn_FC_OC3,batchSize,fstn_OC3,dParams.stnkdp.fb2f,net.fstn_maxp_output,net.stnkd_out,net.relu1_output_fstn_fbr2f,net.relu2_output_fstn_fbr2f);// fc-bn-relu * 2 + fc
     matrix_add_I(net.stnkd_out,64,batchSize);
 
@@ -2396,7 +2409,7 @@ void Inference_GPU (int inChannels,
     dParams.featp.cb3.weight, dParams.featp.cb3.bias,
     dParams.featp.cb3.bn_weight, dParams.featp.cb3.bn_bias, 
     dParams.featp.cb3.bn_mean, dParams.featp.cb3.bn_var,net.feat_bn3);
-    GPU_MaxPooling(encoderOC3, batchSize, numPoints/64,net.feat_bn3, net.encoder_output); // Max pooling
+    GPU_MaxPooling(encoderOC3, batchSize, maxnp,net.feat_bn3, net.encoder_output); // Max pooling
     
 
     // std::cout << "PART5:CLASSIFY" << std::endl;
@@ -2410,6 +2423,8 @@ int main(int argc, char *argv[]) {
     // 定义模型参数
     int ic = 3;
     size_t batchSize = 32;
+    int use_sample = SAMPLE;
+    int npoint = NPOINT;
 
     // 读取权重：主机
     std::string dir = argv[1]; 
@@ -2446,26 +2461,44 @@ int main(int argc, char *argv[]) {
         size_t np = list_of_points[i].size() / ic;
         for (int j = 0; j < curB; j++) {np = std::min(np, list_of_points[i + j].size() / ic);}
         np = ALIGN_DOWN(np, GEMMBLKMAX);
+        int leastnp = np;
+        if(use_sample==1) np = npoint;
         int bSize = np * ic;
         int bWidth = curB * bSize;
         std::vector<float> input(bWidth);
-    // // 使用随机数生成器
-    // std::random_device rd;
-    // std::mt19937 gen(rd());
-    // std::uniform_int_distribution<> dis(0, np - 1); // 随机选择点的索引
-    // for (int b = 0; b < curB; ++b) {
-    //     for (int j = 0; j < np; ++j) {
-    //         int rand_index = dis(gen); // 随机生成一个索引
-    //         std::memcpy(&input[b * bSize + j * ic], 
-    //                     &list_of_points[i + b][rand_index * ic], 
-    //                     ic * sizeof(float));  // 拷贝每个点的特征
-    //     }
-    // }
-        for (int b = 0; b < curB; ++b)
+
+        //使用随机数生成器
+        std::random_device rd;
+        std::mt19937 gen(rd());
+        std::uniform_int_distribution<> dis(0, np - 1); // 随机选择点的索引
+        if(use_sample==1)
         {
-            std::memcpy(&input[b * bSize],
-                        &list_of_points[i + b][0],
-                        bSize * sizeof(float));
+            for (int b = 0; b < curB; ++b) {
+                int step = leastnp / np;  // 计算采样的步长
+                for (int j = 0; j < np; ++j) {
+                    int uniform_index = j * step;  // 按固定步长采样点索引
+                    std::memcpy(&input[b * bSize + j * ic], 
+                                &list_of_points[i + b][uniform_index * ic], 
+                                ic * sizeof(float));  // 拷贝每个点的特征
+                }
+            }
+            // for (int b = 0; b < curB; ++b) {
+            //     for (int j = 0; j < np; ++j) {
+            //         int rand_index = dis(gen); // 随机生成一个索引
+            //         std::memcpy(&input[b * bSize + j * ic], 
+            //                     &list_of_points[i + b][rand_index * ic], 
+            //                     ic * sizeof(float));  // 拷贝每个点的特征
+            //     }
+            // }
+        }
+        else
+        {
+            for (int b = 0; b < curB; ++b)
+            {
+                std::memcpy(&input[b * bSize],
+                            &list_of_points[i + b][0],
+                            bSize * sizeof(float));
+            }
         }
         cudaMemcpy(device_all_points + cpy_offset, input.data(), bWidth * sizeof(float), cudaMemcpyHostToDevice);
         cpy_offset += bWidth;
@@ -2490,6 +2523,7 @@ int main(int argc, char *argv[]) {
         size_t np = list_of_points[i].size() / ic;
         for (int j = 0; j < curB; j++) {np = std::min(np, list_of_points[i + j].size() / ic);}
         np = ALIGN_DOWN(np, GEMMBLKMAX);
+        if (use_sample == 1) np = npoint;
         Inference_GPU(ic, curB, np, device_all_points + inf_offset, device_labels + i , device_output);
         inf_offset += curB * np * ic;
         //cudaMemset(device_output, 0, cal_net_size(curB, np, ic) * sizeof(float));

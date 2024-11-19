@@ -1,2 +1,4 @@
+ssh-keygen -t rsa -b 4096 -C "1035768203@qq.com" -f ~/.ssh/1119/id_rsa
+cat ~/.ssh/1119/id_rsa.pub
 eval "$(ssh-agent -s)"
-ssh-add /home/course/.ssh/id_rsa_github
+ssh-add ~/.ssh/1119/id_rsa

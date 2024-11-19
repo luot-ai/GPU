@@ -57,8 +57,16 @@ import h5py
 from tqdm import tqdm
 
 # import provider
+npoint = 128
 num_class = 10
-total_epoch = 30
+total_epoch = 25
+
+useWay = 0 # 1uniform 0random
+way = 'uniform' 
+chway = 'chless'
+cn = 1024
+cn_half = 512
+cn_quarter = 256
 script_dir = os.path.dirname(__file__)  # 获取脚本所在的目录
 
 class STN3d(nn.Module):
@@ -66,17 +74,17 @@ class STN3d(nn.Module):
         super(STN3d, self).__init__()
         self.conv1 = torch.nn.Conv1d(channel, 64, 1)
         self.conv2 = torch.nn.Conv1d(64, 128, 1)
-        self.conv3 = torch.nn.Conv1d(128, 1024, 1)
-        self.fc1 = nn.Linear(1024, 512)
-        self.fc2 = nn.Linear(512, 256)
-        self.fc3 = nn.Linear(256, 9)
+        self.conv3 = torch.nn.Conv1d(128, cn, 1)
+        self.fc1 = nn.Linear(cn, cn_half)
+        self.fc2 = nn.Linear(cn_half, cn_quarter)
+        self.fc3 = nn.Linear(cn_quarter, 9)
         self.relu = nn.ReLU()
 
         self.bn1 = nn.BatchNorm1d(64)
         self.bn2 = nn.BatchNorm1d(128)
-        self.bn3 = nn.BatchNorm1d(1024)
-        self.bn4 = nn.BatchNorm1d(512)
-        self.bn5 = nn.BatchNorm1d(256)
+        self.bn3 = nn.BatchNorm1d(cn)
+        self.bn4 = nn.BatchNorm1d(cn_half)
+        self.bn5 = nn.BatchNorm1d(cn_quarter)
 
     def forward(self, x):
         batchsize = x.size()[0]
@@ -84,7 +92,7 @@ class STN3d(nn.Module):
         x = F.relu(self.bn2(self.conv2(x)))
         x = F.relu(self.bn3(self.conv3(x)))
         x = torch.max(x, 2, keepdim=True)[0]
-        x = x.view(-1, 1024)
+        x = x.view(-1, cn)
 
         x = F.relu(self.bn4(self.fc1(x)))
         x = F.relu(self.bn5(self.fc2(x)))
@@ -104,17 +112,17 @@ class STNkd(nn.Module):
         super(STNkd, self).__init__()
         self.conv1 = torch.nn.Conv1d(k, 64, 1)
         self.conv2 = torch.nn.Conv1d(64, 128, 1)
-        self.conv3 = torch.nn.Conv1d(128, 1024, 1)
-        self.fc1 = nn.Linear(1024, 512)
-        self.fc2 = nn.Linear(512, 256)
-        self.fc3 = nn.Linear(256, k * k)
+        self.conv3 = torch.nn.Conv1d(128, cn, 1)
+        self.fc1 = nn.Linear(cn, cn_half)
+        self.fc2 = nn.Linear(cn_half, cn_quarter)
+        self.fc3 = nn.Linear(cn_quarter, k * k)
         self.relu = nn.ReLU()
 
         self.bn1 = nn.BatchNorm1d(64)
         self.bn2 = nn.BatchNorm1d(128)
-        self.bn3 = nn.BatchNorm1d(1024)
-        self.bn4 = nn.BatchNorm1d(512)
-        self.bn5 = nn.BatchNorm1d(256)
+        self.bn3 = nn.BatchNorm1d(cn)
+        self.bn4 = nn.BatchNorm1d(cn_half)
+        self.bn5 = nn.BatchNorm1d(cn_quarter)
 
         self.k = k
 
@@ -124,7 +132,7 @@ class STNkd(nn.Module):
         x = F.relu(self.bn2(self.conv2(x)))
         x = F.relu(self.bn3(self.conv3(x)))
         x = torch.max(x, 2, keepdim=True)[0]
-        x = x.view(-1, 1024)
+        x = x.view(-1, cn)
 
         x = F.relu(self.bn4(self.fc1(x)))
         x = F.relu(self.bn5(self.fc2(x)))
@@ -145,10 +153,10 @@ class PointNetEncoder(nn.Module):
         self.stn = STN3d(channel)
         self.conv1 = torch.nn.Conv1d(channel, 64, 1)
         self.conv2 = torch.nn.Conv1d(64, 128, 1)
-        self.conv3 = torch.nn.Conv1d(128, 1024, 1)
+        self.conv3 = torch.nn.Conv1d(128, cn, 1)
         self.bn1 = nn.BatchNorm1d(64)
         self.bn2 = nn.BatchNorm1d(128)
-        self.bn3 = nn.BatchNorm1d(1024)
+        self.bn3 = nn.BatchNorm1d(cn)
         self.global_feat = global_feat
         self.feature_transform = feature_transform
         if self.feature_transform:
@@ -179,11 +187,11 @@ class PointNetEncoder(nn.Module):
         x = F.relu(self.bn2(self.conv2(x)))
         x = self.bn3(self.conv3(x))
         x = torch.max(x, 2, keepdim=True)[0]
-        x = x.view(-1, 1024)
+        x = x.view(-1, cn)
         if self.global_feat:
             return x, trans, trans_feat
         else:
-            x = x.view(-1, 1024, 1).repeat(1, 1, N)
+            x = x.view(-1, cn, 1).repeat(1, 1, N)
             return torch.cat([x, pointfeat], 1), trans, trans_feat
 
 
@@ -205,12 +213,12 @@ class get_model(nn.Module):
         else:
             channel = 3
         self.feat = PointNetEncoder(global_feat=True, feature_transform=True, channel=channel)
-        self.fc1 = nn.Linear(1024, 512)
-        self.fc2 = nn.Linear(512, 256)
-        self.fc3 = nn.Linear(256, k)
+        self.fc1 = nn.Linear(cn, cn_half)
+        self.fc2 = nn.Linear(cn_half, cn_quarter)
+        self.fc3 = nn.Linear(cn_quarter, k)
         self.dropout = nn.Dropout(p=0.4)
-        self.bn1 = nn.BatchNorm1d(512)
-        self.bn2 = nn.BatchNorm1d(256)
+        self.bn1 = nn.BatchNorm1d(cn_half)
+        self.bn2 = nn.BatchNorm1d(cn_quarter)
         self.relu = nn.ReLU()
 
     def forward(self, x):
@@ -232,6 +240,41 @@ class get_loss(torch.nn.Module):
 
         total_loss = loss + mat_diff_loss * self.mat_diff_loss_scale
         return total_loss
+def uniform_sample(points, num_sample):
+    # 假设每个点云是 Nx3 的矩阵 (N为点的个数，3为坐标)
+    num_points = points.shape[0]
+    
+    if num_points <= num_sample:
+        return points
+    
+    # 计算采样间隔
+    step = num_points // num_sample
+    sampled_points = points[::step, :]  # 每隔step选择一个点
+    return sampled_points
+    # num_points = points.shape[0]
+    # if num_points <= num_sample:
+    #     return points
+    # indices = np.arange(num_points)
+    # repeated_indices = np.tile(indices, (num_sample // num_points) + 1)[:num_sample]
+    # sampled_points = points[repeated_indices, :]
+    # return sampled_points
+def random_point_sample(xyz, npoint):
+    """
+    随机采样点云数据中的点。
+
+    Args:
+        xyz: 点云数据，形状为 [N, 3]。
+        npoint: 目标采样点数。
+
+    Returns:
+        sampled_points: 随机采样的点云数据，形状为 [npoint, 3]。
+    """
+    # 随机选择 npoint 个索引
+    N = xyz.shape[0]
+    indices = np.random.choice(N, size=npoint, replace=False)  # 不放回采样
+    sampled_points = xyz[indices]  # 根据索引获取采样点
+
+    return sampled_points
 def farthest_point_sample_single(xyz, npoint):
     """
     Input:
@@ -284,12 +327,20 @@ class PointCloudDataset(Dataset):
         self.root = root
         self.split = split
 
-        # with h5py.File(f"{split}_point_clouds.h5","r") as hf:
-        with h5py.File(f"{self.root}/{self.split}_point_clouds.h5","r") as hf:
-            for k in hf.keys():
-                self.list_of_points.append(hf[k]["points"][:].astype(np.float32))
-                self.list_of_labels.append(hf[k].attrs["label"])
-        self.fix_length_statistics_with_median()
+        if(useWay == 1):
+            with h5py.File(f"{self.root}/{self.split}_point_clouds.h5","r") as hf:
+                for k in hf.keys():
+                    points = hf[k]["points"][:].astype(np.float32)
+                    points = uniform_sample(points, npoint) # 均匀采样
+                    self.list_of_points.append(points)
+                    self.list_of_labels.append(hf[k].attrs["label"])
+        else:
+            with h5py.File(f"{self.root}/{self.split}_point_clouds.h5","r") as hf:
+                for k in hf.keys():
+                    points = hf[k]["points"][:].astype(np.float32)  
+                    sampled_points = random_point_sample(points, npoint)  # 随机采样
+                    self.list_of_points.append(sampled_points)  
+                    self.list_of_labels.append(hf[k].attrs["label"])
 
     def __len__(self):
         return len(self.list_of_points)
@@ -339,19 +390,19 @@ def inplace_relu(m):
 
 #     return instance_acc
 
-# def pad_collate_fn(batch):
-#     # 找到批次中最小的数组大小
-#     min_size = min([item[0].shape[0] for item in batch])
+def pad_collate_fn(batch):
+    # 找到批次中最小的数组大小
+    min_size = min([item[0].shape[0] for item in batch])
     
-#     # 截断数组
-#     padded_batch = []
-#     for points, target in batch:
-#         # 截断数组
-#         points = points[:min_size, :]
-#         padded_batch.append((points, target))
+    # 截断数组
+    padded_batch = []
+    for points, target in batch:
+        # 截断数组
+        points = points[:min_size, :]
+        padded_batch.append((points, target))
     
-#     # 使用默认的 collate_fn 处理填充后的批次
-#     return torch.utils.data.dataloader.default_collate(padded_batch)
+    # 使用默认的 collate_fn 处理填充后的批次
+    return torch.utils.data.dataloader.default_collate(padded_batch)
 
 # provider
 def shift_point_cloud(batch_data, shift_range=0.1):
@@ -411,8 +462,10 @@ def main():
     # test_dataset = PointCloudDataset(root=data_path, split='test')
 
     # 创建 DataLoader 实例
-    # train_dataloader = DataLoader(train_dataset, batch_size=32, shuffle=True, num_workers=10, drop_last=True, collate_fn=pad_collate_fn) #batch_size内固定长度截取
-    train_dataloader = DataLoader(train_dataset, batch_size=32, shuffle=True, num_workers=10, drop_last=True) #全局固定长度填充/截取
+    if(useWay == 1):
+        train_dataloader = DataLoader(train_dataset, batch_size=32, shuffle=True, num_workers=10, drop_last=True, collate_fn=pad_collate_fn) #batch_size内固定长度截取
+    else:
+        train_dataloader = DataLoader(train_dataset, batch_size=32, shuffle=True, num_workers=10, drop_last=True) #全局固定长度填充/截取
     # test_dataloader = DataLoader(test_dataset, batch_size=1, shuffle=False, num_workers=10, drop_last=False)
 
     print("finish DATA LOADING")
@@ -486,7 +539,7 @@ def main():
         #     print('Best Instance Accuracy: %f' % (best_instance_acc))
     
     print("finish TRANING")
-    param_dir = os.path.join(script_dir,'params',str(total_epoch)+'epoch')
+    param_dir = os.path.join(script_dir,'newparams',way,chway,'np'+str(npoint),str(total_epoch)+'epoch')
     save_model_params_and_buffers_to_txt(classifier, param_dir)
 
     # print("finish TRANING")

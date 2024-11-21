@@ -30,7 +30,21 @@
 #define SAMPLE 0
 #define USECONVMAX 0
 #define CLASSNUM 10
+#define DARKNETBLK 512
 // #define USECONVMAX (SAMPLE == 0 ? 1 : (NPOINT >= 128 ? 1 : 0))
+
+dim3 cuda_gridsize(size_t n){
+    size_t k = (n-1) / DARKNETBLK + 1;
+    size_t x = k;
+    size_t y = 1;
+    if(x > 65535){
+        x = ceil(sqrt(k));
+        y = (n-1)/(x*DARKNETBLK) + 1;
+    }
+    dim3 d = {x, y, 1};
+    //printf("%ld %ld %ld %ld\n", n, x, y, x*y*BLOCK);
+    return d;
+}
 
 __device__ __forceinline__
 uint32_t smem_u32addr(const void *smem_ptr) {
@@ -2578,23 +2592,68 @@ void GPU_FBR_2_F_train(int OC1,int OC2,int OC3,int batchSize,int inics,FB2FP &fb
     Linear_GPU(batchSize,OC2, OC3,fb2f.f3.weight, fb2f.f3.bias, relu2_output, output);
 }
 
+
+__global__ void backward_bias_conn_kernel(float *bias_updates, float *delta, int batch, int n)
+{
+    int index = (blockIdx.x + blockIdx.y*gridDim.x) * blockDim.x + threadIdx.x;
+    if (index >= n) return;
+    int b;
+    float sum = 0;
+    for(b = 0; b < batch; ++b){
+        int i = b*n + index;
+        sum += delta[i];
+    }
+    //bias_updates[index] += sum;
+    bias_updates[index] = sum;
+}
+__global__ void backward_bias_kernel(float *bias_updates, float *delta, int batch, int n, int size)
+{
+    __shared__ float part[DARKNETBLK];
+    int i,b;
+    int filter = blockIdx.x;
+    int p = threadIdx.x;
+    float sum = 0;
+    for(b = 0; b < batch; ++b){
+        for(i = 0; i < size; i += DARKNETBLK){
+            int index = p + i + size*(filter + n*b);
+            sum += (p+i < size) ? delta[index] : 0;
+        }
+    }
+    part[p] = sum;
+    __syncthreads();
+    if (p == 0) {
+        for(i = 0; i < DARKNETBLK; ++i) bias_updates[filter] =part[i];//+= part[i];
+    }
+}
+void backward_bias_gpu(float *bias_updates, float *delta, int batch, int n, int size)
+{
+    if(size == 1){
+        backward_bias_conn_kernel<<<cuda_gridsize(n), DARKNETBLK>>>(bias_updates, delta, batch, n);
+    }else{
+        backward_bias_kernel<<<n, DARKNETBLK>>>(bias_updates, delta, batch, n, size);
+    }
+}
+void BR_bp(bool relu,int numFeatures, int batchSize, int numPoints,float* weight,float* bias,float* running_mean,float* running_var,float* input,float* output,float esp = 1e-5)
+{
+    
+}
 void FC_bp(int batchSize, int inFeatures, int outFeatures,float* input,float* weight,float * delta_from, float * delta_gen, float* weight_up, float* bias_up) {
-
-
     //delta gen: batchsize,outf * outf,inf
     int M = batchSize;
     int N = inFeatures;
     int K = outFeatures;
     gemm_gpu(false, false, M, N, K, 1.0, delta_from,K , weight,N, 0.0, delta_gen,N);
-
-    //WEIGHT UP:
+    //WEIGHT UP: outf,batchsize * batchsize,inf
     M = outFeatures;
     N = inFeatures;
     K = batchSize;
-    //gemm(1,0,m,n,k,1,a,m,b,n,1,c,n);
     gemm_gpu(true, false, M, N, K, 1.0, delta_from,M,input,N,0.0,weight_up,N);
+    //BIAS UP: outf,batchsize
+    backward_bias_gpu(bias_up,delta_from,batchSize,outFeatures,1);
 }
-
+void FBR2F_bp(){
+    std::cout << "----START FBR2F_bp" << std::endl;
+}
 //Initial Weight and bias, rn and rv with one and zero
 void Train_GPU (int inChannels,int batchSize,int numPoints,
             int* correct_table,int* label,float* input,
@@ -2825,6 +2884,8 @@ void Train_GPU (int inChannels,int batchSize,int numPoints,
     net.fc1_output_part5_fbr2f,net.fc2_output_part5_fbr2f,0);// fc-bn-relu * 2 + fc
     LogSoftMax_GPU_train(label,net.softmax_input,
     net.softmax_output,delta.softmax_input,correct_table,10,batchSize);
+
+    
     // F->RB->F->RB->F
     // MAX->B->C -> RB->C -> TRANS-> ......
     

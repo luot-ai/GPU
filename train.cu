@@ -2768,13 +2768,10 @@ void Train_GPU (int inChannels,int batchSize,int numPoints,
     GPU_CBR_3_train(true,fstn_OC1,fstn_OC2,fstn_OC3, batchSize, numPoints,fstn_inChannel,dParams.stnkdp.cb3, net.fstn_input, 
     net.fstn_CBR3_output,net.relu1_output_fstn_cbr,net.relu2_output_fstn_cbr,
     net.conv1_output_fstn_cbr,net.conv2_output_fstn_cbr,net.conv3_output_fstn_cbr);   // conv-bn-relu * 3
-    
     GPU_MaxPooling(fstn_OC3, batchSize, maxnp,net.fstn_CBR3_output, net.fstn_maxp_output); // Max pooling
-    
     GPU_FBR_2_F_train(fstn_FC_OC1,fstn_FC_OC2,fstn_FC_OC3,batchSize,fstn_OC3,dParams.stnkdp.fb2f,net.fstn_maxp_output,
     net.stnkd_out,net.relu1_output_fstn_fbr2f,net.relu2_output_fstn_fbr2f,
     net.fc1_output_fstn_fbr2f,net.fc2_output_fstn_fbr2f);// fc-bn-relu * 2 + fc
-    
     matrix_add_I(net.stnkd_out,64,batchSize);
 
 
@@ -2795,16 +2792,8 @@ void Train_GPU (int inChannels,int batchSize,int numPoints,
     net.encoder_output,net.softmax_input,
     net.relu1_output_part5_fbr2f,net.relu2_output_part5_fbr2f,
     net.fc1_output_part5_fbr2f,net.fc2_output_part5_fbr2f,0);// fc-bn-relu * 2 + fc
-    // GPU_FBR_2_F(512,256,10,batchSize,encoderOC3,dParams.nonep,net.encoder_output,net.softmax_input,net.relu1_output_part5_fbr2f,net.relu2_output_part5_fbr2f,0);// fc-bn-relu * 2 + fc
-    // LogSoftMax_GPU(net.softmax_input,label, 10 , batchSize);
     LogSoftMax_GPU_train(label,net.softmax_input,
     net.softmax_output,delta.softmax_input,correct_table,10,batchSize);
-
-    // 最后一个函数：算softmax概率，找最大值索引，由label计算correct num，求梯度
-
-    // LABEL【传到device】 & softmaxoutput -> Loss & delatVec【softmaxoutput对应的偏导向量】
-    // LABEL & net.label -> correct num【int* 到device里】
-    //  delatVec【softmaxoutput对应的偏导向量】 -> softmax_input的偏导向量
     // F->RB->F->RB->F
     // MAX->B->C -> RB->C -> TRANS-> ......
 }

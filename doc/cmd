@@ -1,4 +1,4 @@
 ssh-keygen -t rsa -b 4096 -C "1035768203@qq.com" -f ~/.ssh/1119/id_rsa
 cat ~/.ssh/1119/id_rsa.pub
 eval "$(ssh-agent -s)"
-ssh-add ~/.ssh/1119/id_rsa
+ssh-add ~/.ssh/1119/id_rsa 

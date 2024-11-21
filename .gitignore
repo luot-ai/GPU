@@ -1,6 +1,8 @@
 params/*
 data/*
 P2
+train
+train.o
 test
 test.o
 device_info.o

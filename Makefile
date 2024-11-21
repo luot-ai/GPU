@@ -12,10 +12,10 @@ GENCODE_FLAGS = \
 LIBS = -lhdf5 -lhdf5_cpp
 
 # Target executable
-TARGET = test
+TARGET = train
 
 # Source files
-SRCS = test.cu
+SRCS = train.cu
 
 # Object files
 OBJS = $(SRCS:.cu=.o)

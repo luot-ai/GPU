@@ -16,6 +16,7 @@
 #include <dirent.h>
 #include <cstring>
 #include <hdf5/serial/H5Cpp.h>
+#include <cublas_v2.h>
 #include <cuda_profiler_api.h>
 #include <cuda_runtime.h>
 
@@ -732,6 +733,21 @@ void GPU_MaxPooling(int ics, int batchSize, int numPoints,float* input, float* o
     // CUDA_CHECK(cudaDeviceSynchronize());
 }
 
+void gemm_gpu(int TA, int TB, int M, int N, int K, float ALPHA, 
+        float *A_gpu, int lda, 
+        float *B_gpu, int ldb,
+        float BETA,
+        float *C_gpu, int ldc)
+{
+    cublasHandle_t handle;
+    cublasCreate(&handle);
+    cublasStatus_t status = cublasSgemm(handle, (TB ? CUBLAS_OP_T : CUBLAS_OP_N), 
+            (TA ? CUBLAS_OP_T : CUBLAS_OP_N), N, M, K, &ALPHA, B_gpu, ldb, A_gpu, lda, &BETA, C_gpu, ldc);
+    if (status != CUBLAS_STATUS_SUCCESS) {
+        printf("cublasSgemm failed!\n");
+    }
+    cublasDestroy(handle);
+}
 __global__ void BMM_Kernel(float* input_A,float* input_B,float* output,int M_A,int K_A,int K_B,int N_B,int BatchSize)
 {
     int tx = threadIdx.x;
@@ -757,16 +773,19 @@ __global__ void BMM_Kernel(float* input_A,float* input_B,float* output,int M_A,i
 void GPU_Bmm(float* input_A,float* input_B,float* output,int M_A,int K_A,int K_B,int N_B,int BatchSize = 1)
 {
     //std::cout << "--------BMM" << std::endl;
-
-    const int BLK_X = 32;
-    const int BLK_Y = 32;
-
-    dim3 blockDim(BLK_X, BLK_Y);
-    dim3 gridDim((N_B + BLK_X - 1) / BLK_X, (M_A + BLK_Y - 1) / BLK_Y,BatchSize);//X:宽度 Y：高度
-    BMM_Kernel<<<gridDim, blockDim>>>(input_A, input_B, output, M_A, K_A, K_B, N_B, BatchSize);
+    for(int b=0;b<32;b++)
+    {
+        gemm_gpu(false,false,M_A,N_B,K_A,1.0f,input_A+b*M_A*K_A,K_A,input_B+b*K_B*N_B,N_B,0.0f,output+b*M_A*N_B,N_B);
+    }
+    
+    
+    // const int BLK_X = 32;
+    // const int BLK_Y = 32;
+    // dim3 blockDim(BLK_X, BLK_Y);
+    // dim3 gridDim((N_B + BLK_X - 1) / BLK_X, (M_A + BLK_Y - 1) / BLK_Y,BatchSize);//X:宽度 Y：高度
+    // BMM_Kernel<<<gridDim, blockDim>>>(input_A, input_B, output, M_A, K_A, K_B, N_B, BatchSize);
     // // 检查内核启动是否成功
     // CUDA_CHECK(cudaGetLastError());
-
     // // 同步设备并检查执行错误
     // CUDA_CHECK(cudaDeviceSynchronize());
 }
@@ -2559,12 +2578,24 @@ void GPU_FBR_2_F_train(int OC1,int OC2,int OC3,int batchSize,int inics,FB2FP &fb
     Linear_GPU(batchSize,OC2, OC3,fb2f.f3.weight, fb2f.f3.bias, relu2_output, output);
 }
 
+void FC_bp(int batchSize, int inFeatures, int outFeatures,float* input,float* weight,float * delta_from, float * delta_gen, float* weight_up, float* bias_up) {
+
+
+    //delta gen: batchsize,outf * outf,inf
+    int M = batchSize;
+    int N = inFeatures;
+    int K = outFeatures;
+    gemm_gpu(false, false, M, N, K, 1.0, delta_from,K , weight,N, 0.0, delta_gen,N);
+
+    //WEIGHT UP:
+    M = outFeatures;
+    N = inFeatures;
+    K = batchSize;
+    //gemm(1,0,m,n,k,1,a,m,b,n,1,c,n);
+    gemm_gpu(true, false, M, N, K, 1.0, delta_from,M,input,N,0.0,weight_up,N);
+}
 
 //Initial Weight and bias, rn and rv with one and zero
-//batchnorm forward
-//device_delta
-//label change to correct label
-//correct tabel
 void Train_GPU (int inChannels,int batchSize,int numPoints,
             int* correct_table,int* label,float* input,
             float* device_output,float* device_delta,
@@ -2796,6 +2827,7 @@ void Train_GPU (int inChannels,int batchSize,int numPoints,
     net.softmax_output,delta.softmax_input,correct_table,10,batchSize);
     // F->RB->F->RB->F
     // MAX->B->C -> RB->C -> TRANS-> ......
+    
 }
 
 int main(int argc, char *argv[]) {

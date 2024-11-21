@@ -9,7 +9,7 @@ GENCODE_FLAGS = \
     -gencode arch=compute_61,code=sm_61 \
     -gencode arch=compute_62,code=sm_62 \
     -gencode arch=compute_70,code=sm_70
-LIBS = -lhdf5 -lhdf5_cpp
+LIBS = -lhdf5 -lhdf5_cpp -lcublas
 
 # Target executable
 TARGET = train

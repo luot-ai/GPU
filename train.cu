@@ -268,6 +268,12 @@ void read_params(std::string dir) {
     return ;
 }
 
+struct bn_layer {
+    float* norm; 
+    float* mean;   
+    float* var;   
+};
+
 struct TNET {
     //stn3d
     float* input_trans;
@@ -276,6 +282,9 @@ struct TNET {
     float* conv2_output_stn_cbr;
     float* conv3_output_stn_cbr;
 
+    // bn_layer bn1_stn_cbr;
+    // bn_layer bn2_stn_cbr;
+    // bn_layer bn3_stn_cbr;
     float* relu1_output_stn_cbr;
     float* relu2_output_stn_cbr;
     float* CBR3_output;
@@ -284,12 +293,15 @@ struct TNET {
     float* fc1_output_stn_cbr;
     float* fc2_output_stn_cbr;
 
+    // bn_layer bn1_stn_fbr2f;
+    // bn_layer bn2_stn_fbr2f;
     float* relu1_output_stn_fbr2f;
     float* relu2_output_stn_fbr2f;
     float* stn3d_out;
     //part2
     float* bmm1_res;
     float* bmm1_res_trans;
+    float* fstn_input_conv;
     float* fstn_input;
 
     //stnkd
@@ -297,15 +309,19 @@ struct TNET {
     float* conv2_output_fstn_cbr;
     float* conv3_output_fstn_cbr;
 
+    // bn_layer bn1_fstn_cbr;
+    // bn_layer bn2_fstn_cbr;
+    // bn_layer bn3_fstn_cbr;
     float* relu1_output_fstn_cbr;
     float* relu2_output_fstn_cbr;
-
     float* fstn_CBR3_output;
     float* fstn_maxp_output;
 
     float* fc1_output_fstn_fbr2f;
     float* fc2_output_fstn_fbr2f;
 
+    // bn_layer bn1_fstn_fbr2f;
+    // bn_layer bn2_fstn_fbr2f;
     float* relu1_output_fstn_fbr2f;
     float* relu2_output_fstn_fbr2f;
     float* stnkd_out;
@@ -368,6 +384,7 @@ long long cal_tnet_size(int batchSize, int numPoints, int inChannels){
     int part2_1= batchSize*numPoints*encoderIC1 ;
     int part2_2= batchSize*encoderIC1*numPoints ;
     int part2_3= batchSize*fstn_inChannel*numPoints ;
+    int part2_4= batchSize*fstn_inChannel*numPoints ;
     //stnkd
     int fstn_1_conv= bn * fstn_OC1 ;
     int fstn_2_conv= bn * fstn_OC2 ;
@@ -402,7 +419,7 @@ long long cal_tnet_size(int batchSize, int numPoints, int inChannels){
     part4_1 + part4_2 + part4_3 + part4_4 + part4_5 + part4_6 + 
     cla_1 + cla_2 + cla_3;
 
-    totalSize += stn_2_conv + stn_3_conv + stn_4_conv + stn_6_fc + stn_7_fc +
+    totalSize += stn_2_conv + stn_3_conv + stn_4_conv + stn_6_fc + stn_7_fc + part2_4 +
     fstn_1_conv + fstn_2_conv + fstn_3_conv + fstn_5_fc + fstn_6_fc +
     part4_4_conv + part4_5_conv + cla_1_fc + cla_2_fc + cla_4;
 
@@ -2689,6 +2706,7 @@ float* cudaBnWeights,float* cudaBnBias,float* cudaBnRM,float* cudaBnRV,float* ou
     //BR_Kernel<<<batchSize, outChannels>>>(relu,numPoints,cudaBnWeights,cudaBnBias,cudaBnRM,cudaBnRV,convOutput,output);
     normalize_gpu(convOutput,output,cudaBnRM,cudaBnRV,batchSize,outChannels,numPoints);
     madd_relu(relu,output,output,cudaBnWeights,cudaBnBias,batchSize,outChannels,numPoints);
+    //BR_train(relu,batchSize,numPoints,outChannels,cudaBnWeights,cudaBnBias,)
 }
 void GPU_CBR_train(bool relu,int batchSize, int numPoints, int inics, int OC,wbBnP& wbBnP, float* input, float* reluOutput, float* convOutput)
 {
@@ -2752,7 +2770,7 @@ float* cudaBnWeights,float* cudaBnBias,float* cudaBnRM,float* cudaBnRV,float* ou
         dim3 gridDim((outFeatures + 4 - 1) / 4,batchSize);//X:宽度 Y：高度
         FC_Kernel_gemv<<<gridDim,blockDim>>>(outFeatures,batchSize,inFeatures,input,cudaFcWeights,cudaFcBias,fcOutput);
         //BR_Kernel<<<batchSize, outFeatures>>>(true,1,cudaBnWeights,cudaBnBias,cudaBnRM,cudaBnRV,fcOutput,output);
-        
+        //TODO:这里用上面的会更快
         normalize_gpu(fcOutput,output,cudaBnRM,cudaBnRV,batchSize,outFeatures,1);
         madd_relu(true,output,output,cudaBnWeights,cudaBnBias,batchSize,outFeatures,1);
 }
@@ -2886,6 +2904,7 @@ void Train_GPU (int inChannels,int batchSize,int numPoints,
     int part2_1= batchSize*numPoints*encoderIC1 ;
     int part2_2= batchSize*encoderIC1*numPoints ;
     int part2_3= batchSize*fstn_inChannel*numPoints ;
+    int part2_4= batchSize*fstn_inChannel*numPoints ;
     //stnkd
     int fstn_1_conv= bn * fstn_OC1 ;
     int fstn_2_conv= bn * fstn_OC2 ;
@@ -2933,7 +2952,8 @@ void Train_GPU (int inChannels,int batchSize,int numPoints,
     //part2
     net.bmm1_res = device_output+offset;offset += part2_1;
     net.bmm1_res_trans = device_output+offset;offset += part2_2;
-    net.fstn_input = device_output+offset;offset += part2_3;
+    net.fstn_input_conv = device_output+offset;offset += part2_3;
+    net.fstn_input = device_output+offset;offset += part2_4;
     //stnkd
     net.conv1_output_fstn_cbr = device_output+offset;offset += fstn_1_conv;
     net.relu1_output_fstn_cbr = device_output+offset;offset += fstn_1;
@@ -2984,7 +3004,8 @@ void Train_GPU (int inChannels,int batchSize,int numPoints,
     //part2
     delta.bmm1_res = device_delta+offset;offset += part2_1;
     delta.bmm1_res_trans = device_delta+offset;offset += part2_2;
-    delta.fstn_input = device_delta+offset;offset += part2_3;
+    delta.fstn_input_conv = device_delta+offset;offset += part2_3;
+    delta.fstn_input = device_delta+offset;offset += part2_4;
     //stnkd
     delta.conv1_output_fstn_cbr = device_delta+offset;offset += fstn_1_conv;
     delta.relu1_output_fstn_cbr = device_delta+offset;offset += fstn_1;
@@ -3030,8 +3051,8 @@ void Train_GPU (int inChannels,int batchSize,int numPoints,
     std::cout << "PART2:TRANS->BMM->TRANS->CBR, forwarding" << std::endl;
     GPU_Bmm(input,net.stn3d_out,net.bmm1_res,numPoints,inChannels,inChannels,encoderIC1,batchSize);
     GPU_transpose(net.bmm1_res,net.bmm1_res_trans,batchSize,numPoints,encoderIC1);
-    GPU_CBR(batchSize,numPoints,encoderIC1,fstn_inChannel,dParams.featp.cb1,net.bmm1_res_trans,net.fstn_input);
-
+    //GPU_CBR(batchSize,numPoints,encoderIC1,fstn_inChannel,dParams.featp.cb1,net.bmm1_res_trans,net.fstn_input);
+    GPU_CBR_train(true,batchSize,numPoints,encoderIC1,fstn_inChannel,dParams.featp.cb1,net.bmm1_res_trans,net.fstn_input,net.fstn_input_conv);
 
     std::cout << "PART3:STNkd, forwarding"<< std::endl;
     GPU_CBR_3_train(true,fstn_OC1,fstn_OC2,fstn_OC3, batchSize, numPoints,fstn_inChannel,dParams.stnkdp.cb3, net.fstn_input, 
@@ -3042,7 +3063,6 @@ void Train_GPU (int inChannels,int batchSize,int numPoints,
     net.stnkd_out,net.relu1_output_fstn_fbr2f,net.relu2_output_fstn_fbr2f,
     net.fc1_output_fstn_fbr2f,net.fc2_output_fstn_fbr2f);// fc-bn-relu * 2 + fc
     matrix_add_I(net.stnkd_out,64,batchSize);
-
 
     std::cout << "PART4:TRANS->BMM->TRANS->CBR->CBM, forwarding" << std::endl;
     GPU_transpose(net.fstn_input,net.fstn_input_trans,batchSize,fstn_inChannel,numPoints);

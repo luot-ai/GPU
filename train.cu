@@ -2603,7 +2603,7 @@ __global__ void backward_bias_conn_kernel(float *bias_updates, float *delta, int
         int i = b*n + index;
         sum += delta[i];
     }
-    //bias_updates[index] += sum;
+    //bias_updates[index] += sum;//TODO:
     bias_updates[index] = sum;
 }
 __global__ void backward_bias_kernel(float *bias_updates, float *delta, int batch, int n, int size)
@@ -2622,7 +2622,7 @@ __global__ void backward_bias_kernel(float *bias_updates, float *delta, int batc
     part[p] = sum;
     __syncthreads();
     if (p == 0) {
-        for(i = 0; i < DARKNETBLK; ++i) bias_updates[filter] =part[i];//+= part[i];
+        for(i = 0; i < DARKNETBLK; ++i) bias_updates[filter] =part[i];//+= part[i];//TODO:
     }
 }
 void backward_bias_gpu(float *bias_updates, float *delta, int batch, int n, int size)

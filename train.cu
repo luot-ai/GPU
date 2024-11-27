@@ -19,6 +19,7 @@
 #include <cublas_v2.h>
 #include <cuda_profiler_api.h>
 #include <cuda_runtime.h>
+#include <cassert>
 
 
 
@@ -31,6 +32,7 @@
 #define USECONVMAX 0
 #define CLASSNUM 10
 #define DARKNETBLK 512
+#define BLOCK 512
 // #define USECONVMAX (SAMPLE == 0 ? 1 : (NPOINT >= 128 ? 1 : 0))
 
 dim3 cuda_gridsize(size_t n){
@@ -44,6 +46,35 @@ dim3 cuda_gridsize(size_t n){
     dim3 d = {x, y, 1};
     //printf("%ld %ld %ld %ld\n", n, x, y, x*y*BLOCK);
     return d;
+}
+void error(const char *s)
+{
+    perror(s);
+    assert(0);
+    exit(-1);
+}
+void check_error(cudaError_t status)
+{
+    //cudaDeviceSynchronize();
+    cudaError_t status2 = cudaGetLastError();
+    if (status != cudaSuccess)
+    {   
+        const char *s = cudaGetErrorString(status);
+        char buffer[256];
+        printf("CUDA Error: %s\n", s);
+        assert(0);
+        snprintf(buffer, 256, "CUDA Error: %s", s);
+        error(buffer);
+    } 
+    if (status2 != cudaSuccess)
+    {   
+        const char *s = cudaGetErrorString(status);
+        char buffer[256];
+        printf("CUDA Error Prev: %s\n", s);
+        assert(0);
+        snprintf(buffer, 256, "CUDA Error Prev: %s", s);
+        error(buffer);
+    } 
 }
 
 __device__ __forceinline__
@@ -923,26 +954,6 @@ void ReLU_GPU(int batchSize,int numPoints,int OC,float* input,float* output){
     // CUDA_CHECK(cudaDeviceSynchronize());
 }
 
-__global__ void BR_Kernel(bool relu, int numPoints,float* weight,float* bias,float* running_mean,float* running_var,float* input,float* output,float esp = 1e-5)
-{
-    int tx = threadIdx.x;
-    int bx = blockIdx.x;
-    int idx = tx + bx * blockDim.x;
-    int index = idx;
-
-    if (idx < blockDim.x * gridDim.x)
-    {
-        float mean = running_mean[tx];
-        float var = running_var[tx];
-        for (int n = 0; n < numPoints; n++)
-        {
-            float res;
-            int iIdx = index * numPoints + n;
-            res = (input[iIdx] - mean) / sqrt(var + esp) * weight[tx] + bias[tx];
-            output[iIdx] = relu ? (res> 0 ? res : 0) : res;
-        }
-    }
-}
 __global__ void BatchNorm1d_Kernel(int numPoints,float* weight,float* bias,float* running_mean,float* running_var,float* input,float* output,float esp = 1e-5)
 {
     int tx = threadIdx.x;
@@ -2221,7 +2232,287 @@ void GPU_CBR_3 (int OC1,int OC2,int OC3,int batchSize,int numPoints,int inics,CB
     GPU_CBR(batchSize, numPoints, OC2, OC3, cb3p.cb3, relu2_output, output);
 }
 
-//CBR-TRAIN
+
+// ARCH FBR
+__global__ void FBRWRAP_Kernel_gemv(int M,int batchSize,int N,float* input, 
+float* fcWeights, float* fcBias, 
+float* bnWeights,float* bnBias,float* bnRM,float* bnRV,float* output,float esp = 1e-5 )
+{
+    // Block index
+    int bx = blockIdx.x;
+    int batch = blockIdx.y;
+
+    // Thread index
+    int tx = threadIdx.x;//0~31
+    int ty = threadIdx.y;//0~3
+
+    const int warp_size=32;
+    int laneId= tx % warp_size;
+    int current_row = 4 * bx + ty;
+
+    if(current_row < M){
+
+        int oc = current_row;
+        float mean = bnRM[oc];
+        float var = bnRV[oc];
+        float bnW = bnWeights[oc];
+        float bnB = bnBias[oc];
+        float res = 0.0f;
+
+        int kIteration = (N/warp_size)/4;
+        if(kIteration==0) kIteration=1;
+        // fcWeights = &fcWeights[current_row*N];
+        // input= &input[batch*N];
+        #pragma unroll
+        for(int i=0; i< kIteration; i++){
+            int current_col_vec = (i*warp_size + laneId);
+            float4 current_val= reinterpret_cast<float4 *>(fcWeights)[current_col_vec+current_row*N/4];
+            float4 current_x = reinterpret_cast<float4 *>(input)[current_col_vec+batch*N/4];
+            res += current_val.x*current_x.x;
+            res += current_val.y*current_x.y;
+            res += current_val.z*current_x.z;
+            res += current_val.w*current_x.w;
+        }
+
+        res += __shfl_down_sync(0xffffffff, res, 16); // 0-16, 1-17, 2-18, etc.
+        res += __shfl_down_sync(0xffffffff, res, 8);// 0-8, 1-9, 2-10, etc.
+        res += __shfl_down_sync(0xffffffff, res, 4);// 0-4, 1-5, 2-6, etc.
+        res += __shfl_down_sync(0xffffffff, res, 2);// 0-2, 1-3, 4-6, 5-7, etc.
+        res += __shfl_down_sync(0xffffffff, res, 1);// 0-1, 2-3, 4-5, etc.
+
+        
+        res+=fcBias[oc];
+        res = __fdividef((res - mean),sqrt(var + esp)) * bnW + bnB;
+        res = res > 0 ? res : 0;
+        int index = oc + batch * M;
+        if(laneId==0) output[index] = res;
+    }
+}
+__global__ void FBRWRAP_Kernel(int TILEX,int TILEY,int outFeatures,int batchSize,int inFeatures,float* input, 
+float* fcWeights, float* fcBias, 
+float* bnWeights,float* bnBias,float* bnRM,float* bnRV,float* output,float esp = 1e-5 )
+{
+    int tx = threadIdx.x;
+    int ty = threadIdx.y;
+    int bx = blockIdx.x;
+    int by = blockIdx.y;
+
+    int oc = tx + bx * blockDim.x;
+    int curB = ty + by * blockDim.y;
+
+    if (oc < outFeatures && curB < batchSize)
+    {
+        float mean = bnRM[oc];
+        float var = bnRV[oc];
+        float bnW = bnWeights[oc];
+        float bnB = bnBias[oc];
+        float res = fcBias[oc];
+        for (int ic = 0; ic < inFeatures; ic++)
+        {
+            res +=
+                input[curB * inFeatures + ic] *
+                fcWeights[oc * inFeatures + ic];
+        }
+        res = __fdividef((res - mean),sqrt(var + esp)) * bnW + bnB;
+        res = res > 0 ? res : 0;
+        int index = oc + curB * outFeatures;
+        output[index] = res;
+    }
+}
+void FBRWRAP_GPU(int batchSize,int inFeatures,int outFeatures,float* input, 
+float* cudaFcWeights, float* cudaFcBias, 
+float* cudaBnWeights,float* cudaBnBias,float* cudaBnRM,float* cudaBnRV,float* output,float esp = 1e-5
+){
+    //std::cout << "------------LAYER:FBRWRAP" << std::endl;
+    // printf("inchannel %d,numPoints %d\n",inChannels,numPoints);
+    // if (inFeatures > 512)
+    // {
+    // const int BLK_X = 32;
+    // const int BLK_Y = 32;
+    // dim3 blockDim(BLK_X,BLK_Y);
+    // dim3 gridDim((outFeatures + BLK_X - 1) / BLK_X,(batchSize + BLK_Y - 1) / BLK_Y);//X:宽度 Y：高度
+    // FBRWRAP_Kernel<<<gridDim,blockDim>>>(BLK_X,BLK_Y,outFeatures,batchSize,inFeatures,input,cudaFcWeights,cudaFcBias,cudaBnWeights,cudaBnBias,cudaBnRM,cudaBnRV,
+    // output);
+    // }
+    // else
+    {
+dim3 blockDim(32,4);
+dim3 gridDim((outFeatures + 4 - 1) / 4,batchSize);//X:宽度 Y：高度
+FBRWRAP_Kernel_gemv<<<gridDim,blockDim>>>(outFeatures,batchSize,inFeatures,input,cudaFcWeights,cudaFcBias,cudaBnWeights,cudaBnBias,cudaBnRM,cudaBnRV,
+    output);
+    }
+
+    // // 检查内核启动是否成功
+    // CUDA_CHECK(cudaGetLastError());
+    // // 同步设备并检查执行错误
+    // CUDA_CHECK(cudaDeviceSynchronize());
+}
+void GPU_FBR(int batchSize, int inFeatures, 
+int outFeatures,wbBnP& fbp, float* input, float* reluOutput)
+{
+    FBRWRAP_GPU(batchSize,inFeatures,outFeatures,input,
+    fbp.weight,fbp.bias,
+    fbp.bn_weight,fbp.bn_bias,
+    fbp.bn_mean,fbp.bn_var,reluOutput);
+}
+void GPU_FBR_2_F(int OC1,int OC2,int OC3,int batchSize,int inics,FB2FP &fb2f, float* input, float* output,float* relu1_output,float* relu2_output,int param_offset=3)
+{
+    //std::cout << "----START FBR_2_F" << std::endl;
+    GPU_FBR(batchSize,inics,OC1,fb2f.fb1,input,relu1_output);
+    GPU_FBR(batchSize,OC1,OC2,fb2f.fb2,relu1_output,relu2_output);
+    Linear_GPU(batchSize,OC2, OC3,fb2f.f3.weight, fb2f.f3.bias, relu2_output, output);
+}
+
+
+//from darknet:TODO:
+__global__ void  fast_mean_kernel(float *x, int batch, int filters, int spatial, float *mean)
+{
+    const int threads = BLOCK;
+    __shared__ float local[threads];
+
+    int id = threadIdx.x;
+    local[id] = 0;
+
+    int filter = blockIdx.x;
+
+    int i, j;
+    for(j = 0; j < batch; ++j){
+        for(i = 0; i < spatial; i += threads){
+            int index = j*spatial*filters + filter*spatial + i + id;
+            local[id] += (i+id < spatial) ? x[index] : 0;
+        }
+    }
+
+    __syncthreads();
+
+    if(id == 0){
+        mean[filter] = 0;
+        for(i = 0; i < threads; ++i){
+            mean[filter] += local[i];
+        }
+        mean[filter] /= spatial * batch;
+    }
+}
+__global__ void  fast_variance_kernel(float *x, float *mean, int batch, int filters, int spatial, float *variance)
+{
+    const int threads = BLOCK;
+    __shared__ float local[threads];
+
+    int id = threadIdx.x;
+    local[id] = 0;
+
+    int filter = blockIdx.x;
+
+    int i, j;
+    for(j = 0; j < batch; ++j){
+        for(i = 0; i < spatial; i += threads){
+            int index = j*spatial*filters + filter*spatial + i + id;
+
+            local[id] += (i+id < spatial) ? powf((x[index] - mean[filter]), 2) : 0;
+        }
+    }
+
+    __syncthreads();
+
+    if(id == 0){
+        variance[filter] = 0;
+        for(i = 0; i < threads; ++i){
+            variance[filter] += local[i];
+        }
+        variance[filter] /= (spatial * batch - 1);
+    }
+}
+__global__ void scal_kernel(int N, float ALPHA, float *X, int INCX)
+{
+    int i = (blockIdx.x + blockIdx.y*gridDim.x) * blockDim.x + threadIdx.x;
+    if(i < N) X[i*INCX] *= ALPHA;
+}
+__global__ void axpy_kernel(int N, float ALPHA, float *X, int OFFX, int INCX,  float *Y, int OFFY, int INCY)
+{
+    int i = (blockIdx.x + blockIdx.y*gridDim.x) * blockDim.x + threadIdx.x;
+    if(i < N) Y[OFFY+i*INCY] += ALPHA*X[OFFX+i*INCX];
+}
+__global__ void normalize_kernel(int N, float *x, float* output, float *mean, float *variance, int batch, int filters, int spatial)
+{
+    int index = (blockIdx.x + blockIdx.y*gridDim.x) * blockDim.x + threadIdx.x;
+    if (index >= N) return;
+    int f = (index/spatial)%filters;
+    
+    output[index] = (x[index] - mean[f])/(sqrtf(variance[f] + .00001f));
+}
+void fast_mean_gpu(float *x, int batch, int filters, int spatial, float *mean)
+{
+    fast_mean_kernel<<<filters, BLOCK>>>(x, batch, filters, spatial, mean);
+    check_error(cudaPeekAtLastError());
+}
+void fast_variance_gpu(float *x, float *mean, int batch, int filters, int spatial, float *variance)
+{
+    fast_variance_kernel<<<filters, BLOCK>>>(x, mean, batch, filters, spatial, variance);
+    check_error(cudaPeekAtLastError());
+}
+void scal_gpu(int N, float ALPHA, float * X, int INCX)
+{
+    scal_kernel<<<cuda_gridsize(N), BLOCK>>>(N, ALPHA, X, INCX);
+    check_error(cudaPeekAtLastError());
+}
+void axpy_gpu_offset(int N, float ALPHA, float * X, int OFFX, int INCX, float * Y, int OFFY, int INCY)
+{
+    axpy_kernel<<<cuda_gridsize(N), BLOCK>>>(N, ALPHA, X, OFFX, INCX, Y, OFFY, INCY);
+    check_error(cudaPeekAtLastError());
+}
+void axpy_gpu(int N, float ALPHA, float * X, int INCX, float * Y, int INCY)
+{
+    axpy_gpu_offset(N, ALPHA, X, 0, INCX, Y, 0, INCY);
+}
+void normalize_gpu(float *x, float* output, float *mean, float *variance, int batch, int filters, int spatial)
+{
+    size_t N = batch*filters*spatial;
+    normalize_kernel<<<cuda_gridsize(N), BLOCK>>>(N, x, output, mean, variance, batch, filters, spatial);
+    check_error(cudaPeekAtLastError());
+}
+__global__ void madd_relu_kernel(bool relu,float* input,float *output,float* weights, float *biases, int n, int size)
+{
+    int offset = blockIdx.x * blockDim.x + threadIdx.x;
+    int filter = blockIdx.y;
+    int batch = blockIdx.z;
+    if(offset < size) 
+    {
+        float res;
+        int iIdx = (batch*n+filter)*size + offset;
+        res = input[iIdx]  * weights[filter] + biases[filter];
+        output[iIdx] = relu ? (res> 0 ? res : 0) : res;
+    }
+}
+void madd_relu(bool relu,float* input,float *output,float* weights, float *biases, int batch, int n, int size)
+{
+    dim3 dimGrid((size-1)/BLOCK + 1, n, batch);
+    dim3 dimBlock(BLOCK, 1, 1);
+
+    madd_relu_kernel<<<dimGrid, dimBlock>>>(relu,input,output,weights, biases, n, size);
+    check_error(cudaPeekAtLastError());
+}
+
+//TRAIN
+__global__ void BR_Kernel(bool relu, int numPoints,float* weight,float* bias,float* running_mean,float* running_var,float* input,float* output,float esp = 1e-5)
+{
+    int tx = threadIdx.x;
+    int bx = blockIdx.x;
+    int idx = tx + bx * blockDim.x;
+    int index = idx;
+
+    if (idx < blockDim.x * gridDim.x)
+    {
+        float mean = running_mean[tx];
+        float var = running_var[tx];
+        for (int n = 0; n < numPoints; n++)
+        {
+            float res;
+            int iIdx = index * numPoints + n;
+            res = (input[iIdx] - mean) / sqrt(var + esp) * weight[tx] + bias[tx];
+            output[iIdx] = relu ? (res> 0 ? res : 0) : res;
+        }
+    }
+}
 __global__ void CONV_64x128N_kernel(int M,int batchSize,int N,int K,float* input, 
 float* convWeights, float* convBias,float* output,float esp = 1e-5 )
 {   
@@ -2361,6 +2652,21 @@ float* convWeights, float* convBias,float* output,float esp = 1e-5 )
     }
     output[b * numPoints * outChannels + oc * numPoints + np] = res;
 }
+
+void BR_train(bool relu, int batchSize,int numPoints,int outChannels,
+float* weight,float* bias,float* mean,float* var,float* norm,
+float* running_mean,float* running_var,float* input,float* output,float esp = 1e-5)
+{
+    fast_mean_gpu(input,batchSize,outChannels,numPoints,mean);
+    fast_variance_gpu(input,mean,batchSize,outChannels,numPoints,var);
+    scal_gpu(outChannels, .99,running_mean,1);
+    axpy_gpu(outChannels, .01, mean, 1, running_mean, 1);
+    scal_gpu(outChannels, .99, running_var, 1);
+    axpy_gpu(outChannels, .01, var, 1, running_var, 1);
+    normalize_gpu(input,norm,mean,var,batchSize,outChannels,numPoints);
+    madd_relu(relu,norm,output,weight,bias,batchSize,outChannels,numPoints);
+}
+
 void CBRWRAP_GPU_train(bool relu,int batchSize,int numPoints,int inChannels,int outChannels,int kSize,float* input, 
 float* cudaConvWeights, float* cudaConvBias, 
 float* cudaBnWeights,float* cudaBnBias,float* cudaBnRM,float* cudaBnRV,float* output,float* convOutput,float esp = 1e-5
@@ -2380,7 +2686,9 @@ float* cudaBnWeights,float* cudaBnBias,float* cudaBnRM,float* cudaBnRV,float* ou
         CONV_64x128N_kernel<<<grid64, 256>>>(outChannels, batchSize, numPoints, inChannels, input, cudaConvWeights, cudaConvBias, convOutput);
     }
     //define batchnorm and relu forward
-    BR_Kernel<<<batchSize, outChannels>>>(relu,numPoints,cudaBnWeights,cudaBnBias,cudaBnRM,cudaBnRV,convOutput,output);
+    //BR_Kernel<<<batchSize, outChannels>>>(relu,numPoints,cudaBnWeights,cudaBnBias,cudaBnRM,cudaBnRV,convOutput,output);
+    normalize_gpu(convOutput,output,cudaBnRM,cudaBnRV,batchSize,outChannels,numPoints);
+    madd_relu(relu,output,output,cudaBnWeights,cudaBnBias,batchSize,outChannels,numPoints);
 }
 void GPU_CBR_train(bool relu,int batchSize, int numPoints, int inics, int OC,wbBnP& wbBnP, float* input, float* reluOutput, float* convOutput)
 {
@@ -2394,138 +2702,6 @@ void GPU_CBR_3_train (bool relu,int OC1,int OC2,int OC3,int batchSize,int numPoi
     GPU_CBR_train(relu,batchSize, numPoints, OC2, OC3, cb3p.cb3, relu2_output, output,conv3_output);
 }
 
-// ARCH FBR
-__global__ void FBRWRAP_Kernel_gemv(int M,int batchSize,int N,float* input, 
-float* fcWeights, float* fcBias, 
-float* bnWeights,float* bnBias,float* bnRM,float* bnRV,float* output,float esp = 1e-5 )
-{
-    // Block index
-    int bx = blockIdx.x;
-    int batch = blockIdx.y;
-
-    // Thread index
-    int tx = threadIdx.x;//0~31
-    int ty = threadIdx.y;//0~3
-
-    const int warp_size=32;
-    int laneId= tx % warp_size;
-    int current_row = 4 * bx + ty;
-
-    if(current_row < M){
-
-        int oc = current_row;
-        float mean = bnRM[oc];
-        float var = bnRV[oc];
-        float bnW = bnWeights[oc];
-        float bnB = bnBias[oc];
-        float res = 0.0f;
-
-        int kIteration = (N/warp_size)/4;
-        if(kIteration==0) kIteration=1;
-        // fcWeights = &fcWeights[current_row*N];
-        // input= &input[batch*N];
-        #pragma unroll
-        for(int i=0; i< kIteration; i++){
-            int current_col_vec = (i*warp_size + laneId);
-            float4 current_val= reinterpret_cast<float4 *>(fcWeights)[current_col_vec+current_row*N/4];
-            float4 current_x = reinterpret_cast<float4 *>(input)[current_col_vec+batch*N/4];
-            res += current_val.x*current_x.x;
-            res += current_val.y*current_x.y;
-            res += current_val.z*current_x.z;
-            res += current_val.w*current_x.w;
-        }
-
-        res += __shfl_down_sync(0xffffffff, res, 16); // 0-16, 1-17, 2-18, etc.
-        res += __shfl_down_sync(0xffffffff, res, 8);// 0-8, 1-9, 2-10, etc.
-        res += __shfl_down_sync(0xffffffff, res, 4);// 0-4, 1-5, 2-6, etc.
-        res += __shfl_down_sync(0xffffffff, res, 2);// 0-2, 1-3, 4-6, 5-7, etc.
-        res += __shfl_down_sync(0xffffffff, res, 1);// 0-1, 2-3, 4-5, etc.
-
-        
-        res+=fcBias[oc];
-        res = __fdividef((res - mean),sqrt(var + esp)) * bnW + bnB;
-        res = res > 0 ? res : 0;
-        int index = oc + batch * M;
-        if(laneId==0) output[index] = res;
-    }
-}
-__global__ void FBRWRAP_Kernel(int TILEX,int TILEY,int outFeatures,int batchSize,int inFeatures,float* input, 
-float* fcWeights, float* fcBias, 
-float* bnWeights,float* bnBias,float* bnRM,float* bnRV,float* output,float esp = 1e-5 )
-{
-    int tx = threadIdx.x;
-    int ty = threadIdx.y;
-    int bx = blockIdx.x;
-    int by = blockIdx.y;
-
-    int oc = tx + bx * blockDim.x;
-    int curB = ty + by * blockDim.y;
-
-    if (oc < outFeatures && curB < batchSize)
-    {
-        float mean = bnRM[oc];
-        float var = bnRV[oc];
-        float bnW = bnWeights[oc];
-        float bnB = bnBias[oc];
-        float res = fcBias[oc];
-        for (int ic = 0; ic < inFeatures; ic++)
-        {
-            res +=
-                input[curB * inFeatures + ic] *
-                fcWeights[oc * inFeatures + ic];
-        }
-        res = __fdividef((res - mean),sqrt(var + esp)) * bnW + bnB;
-        res = res > 0 ? res : 0;
-        int index = oc + curB * outFeatures;
-        output[index] = res;
-    }
-}
-void FBRWRAP_GPU(int batchSize,int inFeatures,int outFeatures,float* input, 
-float* cudaFcWeights, float* cudaFcBias, 
-float* cudaBnWeights,float* cudaBnBias,float* cudaBnRM,float* cudaBnRV,float* output,float esp = 1e-5
-){
-    //std::cout << "------------LAYER:FBRWRAP" << std::endl;
-    // printf("inchannel %d,numPoints %d\n",inChannels,numPoints);
-    // if (inFeatures > 512)
-    // {
-    // const int BLK_X = 32;
-    // const int BLK_Y = 32;
-    // dim3 blockDim(BLK_X,BLK_Y);
-    // dim3 gridDim((outFeatures + BLK_X - 1) / BLK_X,(batchSize + BLK_Y - 1) / BLK_Y);//X:宽度 Y：高度
-    // FBRWRAP_Kernel<<<gridDim,blockDim>>>(BLK_X,BLK_Y,outFeatures,batchSize,inFeatures,input,cudaFcWeights,cudaFcBias,cudaBnWeights,cudaBnBias,cudaBnRM,cudaBnRV,
-    // output);
-    // }
-    // else
-    {
-dim3 blockDim(32,4);
-dim3 gridDim((outFeatures + 4 - 1) / 4,batchSize);//X:宽度 Y：高度
-FBRWRAP_Kernel_gemv<<<gridDim,blockDim>>>(outFeatures,batchSize,inFeatures,input,cudaFcWeights,cudaFcBias,cudaBnWeights,cudaBnBias,cudaBnRM,cudaBnRV,
-    output);
-    }
-
-    // // 检查内核启动是否成功
-    // CUDA_CHECK(cudaGetLastError());
-    // // 同步设备并检查执行错误
-    // CUDA_CHECK(cudaDeviceSynchronize());
-}
-void GPU_FBR(int batchSize, int inFeatures, 
-int outFeatures,wbBnP& fbp, float* input, float* reluOutput)
-{
-    FBRWRAP_GPU(batchSize,inFeatures,outFeatures,input,
-    fbp.weight,fbp.bias,
-    fbp.bn_weight,fbp.bn_bias,
-    fbp.bn_mean,fbp.bn_var,reluOutput);
-}
-void GPU_FBR_2_F(int OC1,int OC2,int OC3,int batchSize,int inics,FB2FP &fb2f, float* input, float* output,float* relu1_output,float* relu2_output,int param_offset=3)
-{
-    //std::cout << "----START FBR_2_F" << std::endl;
-    GPU_FBR(batchSize,inics,OC1,fb2f.fb1,input,relu1_output);
-    GPU_FBR(batchSize,OC1,OC2,fb2f.fb2,relu1_output,relu2_output);
-    Linear_GPU(batchSize,OC2, OC3,fb2f.f3.weight, fb2f.f3.bias, relu2_output, output);
-}
-
-
-//FBR TRAIN
 __global__ void FC_Kernel_gemv(int M,int batchSize,int N,float* input, 
 float* fcWeights, float* fcBias,float* output,float esp = 1e-5 )
 {
@@ -2575,7 +2751,10 @@ float* cudaBnWeights,float* cudaBnBias,float* cudaBnRM,float* cudaBnRV,float* ou
         dim3 blockDim(32,4);
         dim3 gridDim((outFeatures + 4 - 1) / 4,batchSize);//X:宽度 Y：高度
         FC_Kernel_gemv<<<gridDim,blockDim>>>(outFeatures,batchSize,inFeatures,input,cudaFcWeights,cudaFcBias,fcOutput);
-        BR_Kernel<<<batchSize, outFeatures>>>(true,1,cudaBnWeights,cudaBnBias,cudaBnRM,cudaBnRV,fcOutput,output);
+        //BR_Kernel<<<batchSize, outFeatures>>>(true,1,cudaBnWeights,cudaBnBias,cudaBnRM,cudaBnRV,fcOutput,output);
+        
+        normalize_gpu(fcOutput,output,cudaBnRM,cudaBnRV,batchSize,outFeatures,1);
+        madd_relu(true,output,output,cudaBnWeights,cudaBnBias,batchSize,outFeatures,1);
 }
 void GPU_FBR_train(int batchSize, int inFeatures, int outFeatures,wbBnP& fbp, float* input, float* reluOutput, float* fcOutput)
 {

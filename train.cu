@@ -27,7 +27,7 @@
 #define ALIGN_DOWN(x, align) ((x) / (align) * (align))
 #define DIV_UP(x, y) (((x) + (y) - 1) / (y))
 #define INDEX(row, col, width) ((row) * (width) + (col))
-#define NPOINT 128
+#define NPOINT 64
 #define SAMPLE 1
 #define USECONVMAX 0
 #define CLASSNUM 10
@@ -1122,7 +1122,7 @@ float* bnWeights,float* bnBias,float* bnRM,float* bnRV,float* output,float esp =
     int twIdx = tx % 32;
     int wx = warpIdx % 2;      // th -> 8x8  warp-> 32x64
     int wy = warpIdx / 2;      // 4x2 warps per Block
-    int twx = (twIdx / 2) % 8; // TODO: z型分布
+    int twx = (twIdx / 2) % 8; 
     int twy = (twIdx / 16) * 2 + (twIdx % 2);
 
     //shared memory & registers
@@ -1422,7 +1422,7 @@ float* bnWeights,float* bnBias,float* bnRM,float* bnRV,float* output,float esp =
     int twIdx = tx % 32;
     int wx = warpIdx % 2;      // th -> 8x8  warp-> 32x64
     int wy = warpIdx / 2;      // 4x2 warps per Block
-    int twx = (twIdx / 2) % 8; // TODO: z型分布
+    int twx = (twIdx / 2) % 8; 
     int twy = (twIdx / 16) * 2 + (twIdx % 2);
 
     //shared memory & registers
@@ -1571,7 +1571,7 @@ float* bnWeights,float* bnBias,float* bnRM,float* bnRV,float* output,float esp =
     int twIdx = tx % 32;
     int wx = warpIdx % 2;      // th -> 8x8  warp-> 32x64
     int wy = warpIdx / 2;      // 4x2 warps per Block
-    int twx = (twIdx / 2) % 8; // TODO: z型分布
+    int twx = (twIdx / 2) % 8; 
     int twy = (twIdx / 16) * 2 + (twIdx % 2);
 
     //shared memory & registers
@@ -1701,7 +1701,7 @@ float* bnWeights,float* bnBias,float* bnRM,float* bnRV,float* output,float esp =
     int twIdx = tx % 32;
     int wx = warpIdx % 2;      // th -> 8x8  warp-> 32x64
     int wy = warpIdx / 2;      // 4x2 warps per Block
-    int twx = (twIdx / 2) % 8; // TODO: z型分布
+    int twx = (twIdx / 2) % 8; 
     int twy = (twIdx / 16) * 2 + (twIdx % 2);
 
     //shared memory & registers
@@ -1956,7 +1956,7 @@ float* bnWeights,float* bnBias,float* bnRM,float* bnRV,float* output,float esp =
     int twIdx = tx % 32;
     int wx = warpIdx % 2;      // th -> 8x8  warp-> 32x64
     int wy = warpIdx / 2;      // 4x2 warps per Block
-    int twx = (twIdx / 2) % 8; // TODO: z型分布
+    int twx = (twIdx / 2) % 8; 
     int twy = (twIdx / 16) * 2 + (twIdx % 2);
 
     //shared memory & registers
@@ -2576,7 +2576,7 @@ float* convWeights, float* convBias,float* output,float esp = 1e-5 )
     int twIdx = tx % 32;
     int wx = warpIdx % 2;      // th -> 8x8  warp-> 32x64
     int wy = warpIdx / 2;      // 4x2 warps per Block
-    int twx = (twIdx / 2) % 8; // TODO: z型分布
+    int twx = (twIdx / 2) % 8; 
     int twy = (twIdx / 16) * 2 + (twIdx % 2);
 
     //shared memory & registers
@@ -2701,10 +2701,10 @@ float* running_mean,float* running_var,float* input,float* output,float esp = 1e
 {
     fast_mean_gpu(input,batchSize,outChannels,numPoints,mean);
     fast_variance_gpu(input,mean,batchSize,outChannels,numPoints,var);
-    // scal_gpu(outChannels, .99,running_mean,1);
-    // axpy_gpu(outChannels, .01, mean, 1, running_mean, 1);
-    // scal_gpu(outChannels, .99, running_var, 1);
-    // axpy_gpu(outChannels, .01, var, 1, running_var, 1);
+    scal_gpu(outChannels, .99,running_mean,1);
+    axpy_gpu(outChannels, .01, mean, 1, running_mean, 1);
+    scal_gpu(outChannels, .99, running_var, 1);
+    axpy_gpu(outChannels, .01, var, 1, running_var, 1);
     normalize_gpu(input,norm,running_mean,running_var,batchSize,outChannels,numPoints);
     madd_relu(relu,norm,output,weight,bias,batchSize,outChannels,numPoints);
 }

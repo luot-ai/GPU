@@ -27,7 +27,7 @@
 #define ALIGN_DOWN(x, align) ((x) / (align) * (align))
 #define DIV_UP(x, y) (((x) + (y) - 1) / (y))
 #define INDEX(row, col, width) ((row) * (width) + (col))
-#define NPOINT 128
+#define NPOINT 1024
 #define SAMPLE 0
 #define USECONVMAX 0
 #define CLASSNUM 10
@@ -35,6 +35,34 @@
 #define BLOCK 512
 // #define USECONVMAX (SAMPLE == 0 ? 1 : (NPOINT >= 128 ? 1 : 0))
 
+void checkCublasStatus(cublasStatus_t status) {
+    switch (status) {
+        case CUBLAS_STATUS_SUCCESS:
+            printf("CUBLAS_STATUS_SUCCESS\n");
+            break;
+        case CUBLAS_STATUS_NOT_INITIALIZED:
+            printf("CUBLAS_STATUS_NOT_INITIALIZED: The handle was not initialized properly.\n");
+            break;
+        case CUBLAS_STATUS_ALLOC_FAILED:
+            printf("CUBLAS_STATUS_ALLOC_FAILED: Resource allocation failed.\n");
+            break;
+        case CUBLAS_STATUS_INVALID_VALUE:
+            printf("CUBLAS_STATUS_INVALID_VALUE: Invalid parameters were passed to the function.\n");
+            break;
+        case CUBLAS_STATUS_ARCH_MISMATCH:
+            printf("CUBLAS_STATUS_ARCH_MISMATCH: The device architecture is not supported.\n");
+            break;
+        case CUBLAS_STATUS_EXECUTION_FAILED:
+            printf("CUBLAS_STATUS_EXECUTION_FAILED: Execution failed, possibly due to a previous CUDA error.\n");
+            break;
+        case CUBLAS_STATUS_INTERNAL_ERROR:
+            printf("CUBLAS_STATUS_INTERNAL_ERROR: An internal operation failed.\n");
+            break;
+        default:
+            printf("Unknown CUBLAS error.\n");
+            break;
+    }
+}
 dim3 cuda_gridsize(size_t n){
     size_t k = (n-1) / DARKNETBLK + 1;
     size_t x = k;
@@ -208,6 +236,26 @@ void C_tile_wb(StgFrag C_frag,
               i < m_guard && n_idx < n);
     }
 }
+void printVector_GPU(float* vec, int size) {
+    printf("size:%d\n",size);
+    // 在主机端创建一个标准向量以存储从设备复制的数据
+    std::vector<float> vec_cpu(size);
+
+    // 从设备复制数据到主机
+    cudaError_t err = cudaMemcpy(vec_cpu.data(), vec, size * sizeof(float), cudaMemcpyDeviceToHost);
+    if (err != cudaSuccess) {
+        std::cerr << "cudaMemcpy failed: " << cudaGetErrorString(err) << std::endl;
+        return;
+    }
+
+    // 打印向量内容
+    // for (const auto& value : vec_cpu) {
+    //     std::cout << value << " ";
+    // }
+    std::cout << std::endl; // 输出换行
+
+}
+
 /****************************************************************************************
  * 读取模型参数
  ****************************************************************************************/
@@ -274,6 +322,20 @@ struct bn_layer {
     float* var;   
 };
 
+int cal_bn(int bn, int channel) {
+    int norm = bn * channel;
+    int mean = channel;
+    int var  = channel;
+    return norm + mean + var;
+}
+
+long long alloc_bn(bn_layer& l,float* device,long long offset,int channel,int bn){
+    l.mean = device + offset;offset += channel;
+    l.var  = device + offset;offset += channel;
+    l.norm = device + offset;offset += channel*bn;
+    return offset;
+}
+
 struct TNET {
     //stn3d
     float* input_trans;
@@ -282,9 +344,9 @@ struct TNET {
     float* conv2_output_stn_cbr;
     float* conv3_output_stn_cbr;
 
-    // bn_layer bn1_stn_cbr;
-    // bn_layer bn2_stn_cbr;
-    // bn_layer bn3_stn_cbr;
+    bn_layer bn1_stn_cbr;
+    bn_layer bn2_stn_cbr;
+    bn_layer bn3_stn_cbr;
     float* relu1_output_stn_cbr;
     float* relu2_output_stn_cbr;
     float* CBR3_output;
@@ -302,6 +364,7 @@ struct TNET {
     float* bmm1_res;
     float* bmm1_res_trans;
     float* fstn_input_conv;
+    bn_layer fstn_input_bn;
     float* fstn_input;
 
     //stnkd
@@ -309,9 +372,9 @@ struct TNET {
     float* conv2_output_fstn_cbr;
     float* conv3_output_fstn_cbr;
 
-    // bn_layer bn1_fstn_cbr;
-    // bn_layer bn2_fstn_cbr;
-    // bn_layer bn3_fstn_cbr;
+    bn_layer bn1_fstn_cbr;
+    bn_layer bn2_fstn_cbr;
+    bn_layer bn3_fstn_cbr;
     float* relu1_output_fstn_cbr;
     float* relu2_output_fstn_cbr;
     float* fstn_CBR3_output;
@@ -329,8 +392,8 @@ struct TNET {
     float* fstn_input_trans;
     float* fstn_bmm1_res;
     float* fstn_bmm1_res_trans; // B C N
-    float* cbr2_output;float* cbr2_output_conv;
-    float* feat_bn3;float* feat_bn3_conv;
+    float* cbr2_output;float* cbr2_output_conv;bn_layer cbr2_output_bn;
+    float* feat_bn3;float* feat_bn3_conv;bn_layer feat_bn3_bn;
     float* encoder_output;
     //classify
     float* fc1_output_part5_fbr2f;float* relu1_output_part5_fbr2f;
@@ -370,6 +433,7 @@ long long cal_tnet_size(int batchSize, int numPoints, int inChannels){
     int stn_2_conv = bn*OC1;
     int stn_3_conv = bn*OC2;
     int stn_4_conv = bn*OC3;
+    int stn_234_bn = cal_bn(bn,OC1)+cal_bn(bn,OC2)+cal_bn(bn,OC3);
     int stn_2 = bn*OC1;
     int stn_3 = bn*OC2;
     int stn_4 = bn*OC3;
@@ -384,11 +448,13 @@ long long cal_tnet_size(int batchSize, int numPoints, int inChannels){
     int part2_1= batchSize*numPoints*encoderIC1 ;
     int part2_2= batchSize*encoderIC1*numPoints ;
     int part2_3= batchSize*fstn_inChannel*numPoints ;
+    int part2_3_bn = cal_bn(bn,fstn_inChannel);
     int part2_4= batchSize*fstn_inChannel*numPoints ;
     //stnkd
     int fstn_1_conv= bn * fstn_OC1 ;
     int fstn_2_conv= bn * fstn_OC2 ;
     int fstn_3_conv= bn * fstn_OC3 ;
+    int fstn_234_bn = cal_bn(bn,fstn_OC1)+cal_bn(bn,fstn_OC2)+cal_bn(bn,fstn_OC3);
     int fstn_1= bn * fstn_OC1 ;
     int fstn_2= bn * fstn_OC2 ;
     int fstn_3= bn * fstn_OC3 ;
@@ -403,8 +469,8 @@ long long cal_tnet_size(int batchSize, int numPoints, int inChannels){
     int part4_1= bn * fstn_inChannel ;
     int part4_2= batchSize*numPoints*fstn_inChannel ;
     int part4_3= batchSize*fstn_inChannel*numPoints ;
-    int part4_4= batchSize*encoderOC2*numPoints ;int part4_4_conv= batchSize*encoderOC2*numPoints ;
-    int part4_5= bnEOC3 ;int part4_5_conv= bnEOC3 ;
+    int part4_4= batchSize*encoderOC2*numPoints ;int part4_4_conv= batchSize*encoderOC2*numPoints ;int part4_4_bn = cal_bn(bn,encoderOC2);
+    int part4_5= bnEOC3 ;int part4_5_conv= bnEOC3 ; int part4_5_bn = cal_bn(bn,encoderOC3);
     if (USECONVMAX == 1) { part4_5 = part4_5 / 64 ;}
     int part4_6= batchSize * encoderOC3 ;
     //classify
@@ -422,6 +488,8 @@ long long cal_tnet_size(int batchSize, int numPoints, int inChannels){
     totalSize += stn_2_conv + stn_3_conv + stn_4_conv + stn_6_fc + stn_7_fc + part2_4 +
     fstn_1_conv + fstn_2_conv + fstn_3_conv + fstn_5_fc + fstn_6_fc +
     part4_4_conv + part4_5_conv + cla_1_fc + cla_2_fc + cla_4;
+
+    totalSize += stn_234_bn + part2_3_bn + fstn_234_bn + part4_4_bn + part4_5_bn;
 
     return totalSize;
 }
@@ -644,11 +712,11 @@ __global__ void LogSoftMax_Kernel_train(int* label,float* input,float* output,fl
         //printf("label:%d,predict:%d\n",correct_label,max_index);
         //printf("correct_tabel:%d\n",correct_tabel[index]);
         //反向传播
-        for (int l = 0; l < L; l++)
-        {
-            int iIdx = l + index * L;
-            outputDelta[iIdx] = softmax[l]-(correct_label==l);
-        }
+        // for (int l = 0; l < L; l++)
+        // {
+        //     int iIdx = l + index * L;
+        //     outputDelta[iIdx] = softmax[l]-(correct_label==l);
+        // }
     }
 }
 void LogSoftMax_GPU_train(int* label,float* input,float* output,float* outputDelta,int* correct_tabel,int L,int BatchSize = 32)
@@ -801,12 +869,16 @@ void gemm_gpu(int TA, int TB, int M, int N, int K, float ALPHA,
         float BETA,
         float *C_gpu, int ldc)
 {
+    // printf("TA: %d, TB: %d, M: %d, N: %d, K: %d, ALPHA: %f, BETA: %f\n", TA, TB, M, N, K, ALPHA, BETA);
+    // printf("lda: %d, ldb: %d, ldc: %d\n", lda, ldb, ldc);
+    // printf("A_gpu: %p, B_gpu: %p, C_gpu: %p\n", A_gpu, B_gpu, C_gpu);
     cublasHandle_t handle;
     cublasCreate(&handle);
     cublasStatus_t status = cublasSgemm(handle, (TB ? CUBLAS_OP_T : CUBLAS_OP_N), 
             (TA ? CUBLAS_OP_T : CUBLAS_OP_N), N, M, K, &ALPHA, B_gpu, ldb, A_gpu, lda, &BETA, C_gpu, ldc);
     if (status != CUBLAS_STATUS_SUCCESS) {
-        printf("cublasSgemm failed!\n");
+        printf("cublasSgemm failed with error: ");
+        checkCublasStatus(status);
     }
     cublasDestroy(handle);
 }
@@ -835,9 +907,14 @@ __global__ void BMM_Kernel(float* input_A,float* input_B,float* output,int M_A,i
 void GPU_Bmm(float* input_A,float* input_B,float* output,int M_A,int K_A,int K_B,int N_B,int BatchSize = 1)
 {
     //std::cout << "--------BMM" << std::endl;
-    for(int b=0;b<32;b++)
+    for(int b=0;b<BatchSize;b++)
     {
-        gemm_gpu(false,false,M_A,N_B,K_A,1.0f,input_A+b*M_A*K_A,K_A,input_B+b*K_B*N_B,N_B,0.0f,output+b*M_A*N_B,N_B);
+        check_error(cudaPeekAtLastError());
+        
+        // 强制同步，确保没有挂起的 CUDA 操作
+        cudaDeviceSynchronize();
+        gemm_gpu(false,false,M_A,N_B,K_A,1.0f, input_A+b*M_A*K_A,K_A,input_B+b*K_B*N_B,N_B,0.0f,output+b*M_A*N_B,N_B);
+        check_error(cudaPeekAtLastError());
     }
     
     
@@ -1020,58 +1097,6 @@ void BatchNorm1d_GPU(int numFeatures, int batchSize, int numPoints,float* weight
 
     // // 同步设备并检查执行错误
     // CUDA_CHECK(cudaDeviceSynchronize());
-}
-
-__global__ void Conv1d_Kernel(int outChannels,int batchSize,int numPoints,int inChannels,float* input, float* weights, float* bias, float* output)
-{
-    int oc = threadIdx.x;
-    int b = blockIdx.x;
-    int index = oc + b * blockDim.x;
-    //printf("oc %d, batch %d, index %d\n",oc,b, index);
-    if(index >= outChannels * batchSize)
-        return ;
-    for (int n=0;n<numPoints;n++)
-    {
-        //printf("numpoint: %d\n",n);
-        float res = bias[oc];
-        //printf("the res of index %d is : %f\n",index*numPoints+n,res);
-        for (int ic=0;ic<inChannels;ic++ )
-        {
-            int ii = b*inChannels*numPoints+ic*numPoints+n;
-            int ww = oc*inChannels+ic;
-            //printf("input: %d,weight: %d\n",ii,ww);
-            res += input[ii]*weights[ww];
-            //printf("the res of index %d is : %f\n",index*numPoints+n,res);
-        }
-        output[index*numPoints+n]=res;
-    }
-    // cudaFree(w);
-}
-void Conv1d_GPU(int batchSize,int numPoints,int inChannels,int outChannels,int kSize,float* input, float* weights, float* bias, float* output ){
-    //int L=numPoints;
-    //std::cout << "------------LAYER:convolution" << std::endl;
-
-    float* cudaWeights;
-    float* cudaBias;
-    cudaMalloc((void **)&cudaWeights, inChannels * outChannels * sizeof(float));
-    cudaMalloc((void **)&cudaBias, outChannels * sizeof(float));
-    cudaMemcpy(cudaWeights, weights, inChannels * outChannels * sizeof(float), cudaMemcpyHostToDevice);
-    cudaMemcpy(cudaBias, bias, outChannels * sizeof(float), cudaMemcpyHostToDevice);
-
-    dim3 blockDim(outChannels);
-    dim3 gridDim(batchSize);
-    //std::cout << "WIDTH: " << numPoints << ", IC: " << inChannels << ", OC: " << outChannels << std::endl;
-    //std::cout << "isize: " << input.size() << ", wsize: " << weights.size() << ", bsize: " << bias.size() << ", osize: " << output.size() << std::endl;
-    Conv1d_Kernel<<<gridDim,blockDim>>>(outChannels,batchSize,numPoints,inChannels,input,cudaWeights,cudaBias,output);
-    //printVector_GPU(output,batchSize*numPoints*outChannels);
-    cudaFree(cudaWeights);
-    cudaFree(cudaBias);
-    // // 检查内核启动是否成功
-    // CUDA_CHECK(cudaGetLastError());
-
-    // // 同步设备并检查执行错误
-    // CUDA_CHECK(cudaDeviceSynchronize());
-    //printVector_GPU(output,batchSize*numPoints*outChannels);
 }
 
 //ARCH CB
@@ -2676,17 +2701,17 @@ float* running_mean,float* running_var,float* input,float* output,float esp = 1e
 {
     fast_mean_gpu(input,batchSize,outChannels,numPoints,mean);
     fast_variance_gpu(input,mean,batchSize,outChannels,numPoints,var);
-    scal_gpu(outChannels, .99,running_mean,1);
-    axpy_gpu(outChannels, .01, mean, 1, running_mean, 1);
-    scal_gpu(outChannels, .99, running_var, 1);
-    axpy_gpu(outChannels, .01, var, 1, running_var, 1);
-    normalize_gpu(input,norm,mean,var,batchSize,outChannels,numPoints);
+    // scal_gpu(outChannels, .99,running_mean,1);
+    // axpy_gpu(outChannels, .01, mean, 1, running_mean, 1);
+    // scal_gpu(outChannels, .99, running_var, 1);
+    // axpy_gpu(outChannels, .01, var, 1, running_var, 1);
+    normalize_gpu(input,norm,running_mean,running_var,batchSize,outChannels,numPoints);
     madd_relu(relu,norm,output,weight,bias,batchSize,outChannels,numPoints);
 }
 
 void CBRWRAP_GPU_train(bool relu,int batchSize,int numPoints,int inChannels,int outChannels,int kSize,float* input, 
 float* cudaConvWeights, float* cudaConvBias, 
-float* cudaBnWeights,float* cudaBnBias,float* cudaBnRM,float* cudaBnRV,float* output,float* convOutput,float esp = 1e-5
+float* cudaBnWeights,float* cudaBnBias,float* cudaBnRM,float* cudaBnRV,float* output,float* convOutput,bn_layer& bn,float esp = 1e-5
 ){
     const int BLK_X = 32;
     const int BLK_Y = 32;
@@ -2704,20 +2729,24 @@ float* cudaBnWeights,float* cudaBnBias,float* cudaBnRM,float* cudaBnRV,float* ou
     }
     //define batchnorm and relu forward
     //BR_Kernel<<<batchSize, outChannels>>>(relu,numPoints,cudaBnWeights,cudaBnBias,cudaBnRM,cudaBnRV,convOutput,output);
-    normalize_gpu(convOutput,output,cudaBnRM,cudaBnRV,batchSize,outChannels,numPoints);
-    madd_relu(relu,output,output,cudaBnWeights,cudaBnBias,batchSize,outChannels,numPoints);
-    //BR_train(relu,batchSize,numPoints,outChannels,cudaBnWeights,cudaBnBias,)
+    //normalize_gpu(convOutput,output,cudaBnRM,cudaBnRV,batchSize,outChannels,numPoints);
+    //madd_relu(relu,output,output,cudaBnWeights,cudaBnBias,batchSize,outChannels,numPoints);
+    
+    BR_train(relu,batchSize,numPoints,outChannels,cudaBnWeights,cudaBnBias,bn.mean,bn.var,bn.norm,cudaBnRM,cudaBnRV,convOutput,output);
 }
-void GPU_CBR_train(bool relu,int batchSize, int numPoints, int inics, int OC,wbBnP& wbBnP, float* input, float* reluOutput, float* convOutput)
+void GPU_CBR_train(bool relu,int batchSize, int numPoints, int inics, int OC,wbBnP& wbBnP, float* input, float* reluOutput, float* convOutput,bn_layer& bn)
 {
     CBRWRAP_GPU_train(relu,batchSize,numPoints,inics,OC,1,input,wbBnP.weight,wbBnP.bias,
-    wbBnP.bn_weight,wbBnP.bn_bias,wbBnP.bn_mean,wbBnP.bn_var,reluOutput,convOutput);
+    wbBnP.bn_weight,wbBnP.bn_bias,wbBnP.bn_mean,wbBnP.bn_var,reluOutput,convOutput,bn);
 }
-void GPU_CBR_3_train (bool relu,int OC1,int OC2,int OC3,int batchSize,int numPoints,int inics,CB3P &cb3p, float* input, float* output,float* relu1_output,float* relu2_output,float* conv1_output,float* conv2_output,float* conv3_output) {
+void GPU_CBR_3_train (bool relu,int OC1,int OC2,int OC3,int batchSize,int numPoints,int inics,CB3P &cb3p, 
+float* input, float* output,float* relu1_output,float* relu2_output,
+float* conv1_output,float* conv2_output,float* conv3_output,
+bn_layer& bn1,bn_layer& bn2,bn_layer& bn3) {
     std::cout << "----START CBR_3 TRAIN" << std::endl;
-    GPU_CBR_train(relu,batchSize, numPoints, inics, OC1, cb3p.cb1, input, relu1_output,conv1_output);
-    GPU_CBR_train(relu,batchSize, numPoints, OC1, OC2, cb3p.cb2, relu1_output, relu2_output,conv2_output);
-    GPU_CBR_train(relu,batchSize, numPoints, OC2, OC3, cb3p.cb3, relu2_output, output,conv3_output);
+    GPU_CBR_train(relu,batchSize, numPoints, inics, OC1, cb3p.cb1, input, relu1_output,conv1_output,bn1);
+    GPU_CBR_train(relu,batchSize, numPoints, OC1, OC2, cb3p.cb2, relu1_output, relu2_output,conv2_output,bn2);
+    GPU_CBR_train(relu,batchSize, numPoints, OC2, OC3, cb3p.cb3, relu2_output, output,conv3_output,bn3);
 }
 
 __global__ void FC_Kernel_gemv(int M,int batchSize,int N,float* input, 
@@ -2937,43 +2966,64 @@ void Train_GPU (int inChannels,int batchSize,int numPoints,
     long long offset = 0;
     //stn3d 
     net.input_trans = device_output+offset;offset += stn_1;
+
     net.conv1_output_stn_cbr = device_output+offset;offset += stn_2_conv;
+    offset = alloc_bn(net.bn1_stn_cbr,device_output,offset,OC1,bn);
     net.relu1_output_stn_cbr = device_output+offset;offset += stn_2;
+
     net.conv2_output_stn_cbr = device_output+offset;offset += stn_3_conv;
+    offset = alloc_bn(net.bn2_stn_cbr,device_output,offset,OC2,bn);
     net.relu2_output_stn_cbr = device_output+offset;offset += stn_3;
+
     net.conv3_output_stn_cbr = device_output+offset;offset += stn_4_conv;
+    offset = alloc_bn(net.bn3_stn_cbr,device_output,offset,OC3,bn);
     net.CBR3_output = device_output+offset;offset += stn_4;
+
     net.maxp_output = device_output+offset;offset += stn_5;
     net.fc1_output_stn_cbr = device_output+offset;offset += stn_6_fc;
     net.fc2_output_stn_cbr = device_output+offset;offset += stn_7_fc;
     net.relu1_output_stn_fbr2f = device_output+offset;offset += stn_6;
     net.relu2_output_stn_fbr2f = device_output+offset;offset += stn_7;
     net.stn3d_out = device_output+offset;offset += stn_8;
+
     //part2
     net.bmm1_res = device_output+offset;offset += part2_1;
     net.bmm1_res_trans = device_output+offset;offset += part2_2;
     net.fstn_input_conv = device_output+offset;offset += part2_3;
+    offset = alloc_bn(net.fstn_input_bn,device_output,offset,fstn_inChannel,bn);
     net.fstn_input = device_output+offset;offset += part2_4;
+
     //stnkd
     net.conv1_output_fstn_cbr = device_output+offset;offset += fstn_1_conv;
+    offset = alloc_bn(net.bn1_fstn_cbr,device_output,offset,fstn_OC1,bn);
     net.relu1_output_fstn_cbr = device_output+offset;offset += fstn_1;
+
     net.conv2_output_fstn_cbr = device_output+offset;offset += fstn_2_conv;
+    offset = alloc_bn(net.bn2_fstn_cbr,device_output,offset,fstn_OC2,bn);
     net.relu2_output_fstn_cbr = device_output+offset;offset += fstn_2;
+
     net.conv3_output_fstn_cbr = device_output+offset;offset += fstn_3_conv;
+    offset = alloc_bn(net.bn3_fstn_cbr,device_output,offset,fstn_OC3,bn);
     net.fstn_CBR3_output = device_output+offset;offset += fstn_3;
+
     net.fstn_maxp_output = device_output+offset;offset += fstn_4;
     net.fc1_output_fstn_fbr2f = device_output+offset;offset += fstn_5_fc;
     net.relu1_output_fstn_fbr2f = device_output+offset;offset += fstn_5;
     net.fc2_output_fstn_fbr2f = device_output+offset;offset += fstn_6_fc;
     net.relu2_output_fstn_fbr2f = device_output+offset;offset += fstn_6;
     net.stnkd_out = device_output+offset;offset += fstn_7;
+
     //part4
     net.fstn_input_trans = device_output+offset;offset += part4_1;
     net.fstn_bmm1_res = device_output+offset;offset += part4_2;
     net.fstn_bmm1_res_trans = device_output+offset;offset += part4_3;
+
     net.cbr2_output_conv = device_output+offset;offset += part4_4_conv;
+    offset = alloc_bn(net.cbr2_output_bn,device_output,offset,encoderOC2,bn);
     net.cbr2_output = device_output+offset;offset += part4_4;
+
     net.feat_bn3_conv = device_output+offset;offset += part4_5_conv;
+    offset = alloc_bn(net.feat_bn3_bn,device_output,offset,encoderOC3,bn);
     net.feat_bn3 = device_output+offset;offset += part4_5;
     net.encoder_output = device_output+offset;offset += part4_6;
     //classify
@@ -2983,81 +3033,82 @@ void Train_GPU (int inChannels,int batchSize,int numPoints,
     net.relu2_output_part5_fbr2f = device_output+offset;offset += cla_2;
     net.softmax_input = device_output+offset;offset += cla_3;
     net.softmax_output = device_output+offset;offset+= cla_4;
-    //printVector_GPU(net.CBR3_output,OC3*batchSize*numPoints);
 
-    TNET delta;
-    offset = 0;
-    //stn3d 
-    delta.input_trans = device_delta+offset;offset += stn_1;
-    delta.conv1_output_stn_cbr = device_delta+offset;offset += stn_2_conv;
-    delta.relu1_output_stn_cbr = device_delta+offset;offset += stn_2;
-    delta.conv2_output_stn_cbr = device_delta+offset;offset += stn_3_conv;
-    delta.relu2_output_stn_cbr = device_delta+offset;offset += stn_3;
-    delta.conv3_output_stn_cbr = device_delta+offset;offset += stn_4_conv;
-    delta.CBR3_output = device_delta+offset;offset += stn_4;
-    delta.maxp_output = device_delta+offset;offset += stn_5;
-    delta.fc1_output_stn_cbr = device_delta+offset;offset += stn_6_fc;
-    delta.fc2_output_stn_cbr = device_delta+offset;offset += stn_7_fc;
-    delta.relu1_output_stn_fbr2f = device_delta+offset;offset += stn_6;
-    delta.relu2_output_stn_fbr2f = device_delta+offset;offset += stn_7;
-    delta.stn3d_out = device_delta+offset;offset += stn_8;
-    //part2
-    delta.bmm1_res = device_delta+offset;offset += part2_1;
-    delta.bmm1_res_trans = device_delta+offset;offset += part2_2;
-    delta.fstn_input_conv = device_delta+offset;offset += part2_3;
-    delta.fstn_input = device_delta+offset;offset += part2_4;
-    //stnkd
-    delta.conv1_output_fstn_cbr = device_delta+offset;offset += fstn_1_conv;
-    delta.relu1_output_fstn_cbr = device_delta+offset;offset += fstn_1;
-    delta.conv2_output_fstn_cbr = device_delta+offset;offset += fstn_2_conv;
-    delta.relu2_output_fstn_cbr = device_delta+offset;offset += fstn_2;
-    delta.conv3_output_fstn_cbr = device_delta+offset;offset += fstn_3_conv;
-    delta.fstn_CBR3_output = device_delta+offset;offset += fstn_3;
-    delta.fstn_maxp_output = device_delta+offset;offset += fstn_4;
-    delta.fc1_output_fstn_fbr2f = device_delta+offset;offset += fstn_5_fc;
-    delta.relu1_output_fstn_fbr2f = device_delta+offset;offset += fstn_5;
-    delta.fc2_output_fstn_fbr2f = device_delta+offset;offset += fstn_6_fc;
-    delta.relu2_output_fstn_fbr2f = device_delta+offset;offset += fstn_6;
-    delta.stnkd_out = device_delta+offset;offset += fstn_7;
-    //part4
-    delta.fstn_input_trans = device_delta+offset;offset += part4_1;
-    delta.fstn_bmm1_res = device_delta+offset;offset += part4_2;
-    delta.fstn_bmm1_res_trans = device_delta+offset;offset += part4_3;
-    delta.cbr2_output_conv = device_delta+offset;offset += part4_4_conv;
-    delta.cbr2_output = device_delta+offset;offset += part4_4;
-    delta.feat_bn3_conv = device_delta+offset;offset += part4_5_conv;
-    delta.feat_bn3 = device_delta+offset;offset += part4_5;
-    delta.encoder_output = device_delta+offset;offset += part4_6;
-    //classify
-    delta.fc1_output_part5_fbr2f = device_delta+offset;offset += cla_1_fc;
-    delta.relu1_output_part5_fbr2f = device_delta+offset;offset += cla_1;
-    delta.fc2_output_part5_fbr2f = device_delta+offset;offset += cla_2_fc;
-    delta.relu2_output_part5_fbr2f = device_delta+offset;offset += cla_2;
-    delta.softmax_input = device_delta+offset;offset += cla_3;
-    delta.softmax_output = device_delta+offset;offset+= cla_4;
+    // TNET delta;
+    // offset = 0;
+    // //stn3d 
+    // //TODO:到时候直接复制就好
+    // delta.input_trans = device_delta+offset;offset += stn_1;
+    // delta.conv1_output_stn_cbr = device_delta+offset;offset += stn_2_conv;
+    // delta.relu1_output_stn_cbr = device_delta+offset;offset += stn_2;
+    // delta.conv2_output_stn_cbr = device_delta+offset;offset += stn_3_conv;
+    // delta.relu2_output_stn_cbr = device_delta+offset;offset += stn_3;
+    // delta.conv3_output_stn_cbr = device_delta+offset;offset += stn_4_conv;
+    // delta.CBR3_output = device_delta+offset;offset += stn_4;
+    // delta.maxp_output = device_delta+offset;offset += stn_5;
+    // delta.fc1_output_stn_cbr = device_delta+offset;offset += stn_6_fc;
+    // delta.fc2_output_stn_cbr = device_delta+offset;offset += stn_7_fc;
+    // delta.relu1_output_stn_fbr2f = device_delta+offset;offset += stn_6;
+    // delta.relu2_output_stn_fbr2f = device_delta+offset;offset += stn_7;
+    // delta.stn3d_out = device_delta+offset;offset += stn_8;
+    // //part2
+    // delta.bmm1_res = device_delta+offset;offset += part2_1;
+    // delta.bmm1_res_trans = device_delta+offset;offset += part2_2;
+    // delta.fstn_input_conv = device_delta+offset;offset += part2_3;
+    // delta.fstn_input = device_delta+offset;offset += part2_4;
+    // //stnkd
+    // delta.conv1_output_fstn_cbr = device_delta+offset;offset += fstn_1_conv;
+    // delta.relu1_output_fstn_cbr = device_delta+offset;offset += fstn_1;
+    // delta.conv2_output_fstn_cbr = device_delta+offset;offset += fstn_2_conv;
+    // delta.relu2_output_fstn_cbr = device_delta+offset;offset += fstn_2;
+    // delta.conv3_output_fstn_cbr = device_delta+offset;offset += fstn_3_conv;
+    // delta.fstn_CBR3_output = device_delta+offset;offset += fstn_3;
+    // delta.fstn_maxp_output = device_delta+offset;offset += fstn_4;
+    // delta.fc1_output_fstn_fbr2f = device_delta+offset;offset += fstn_5_fc;
+    // delta.relu1_output_fstn_fbr2f = device_delta+offset;offset += fstn_5;
+    // delta.fc2_output_fstn_fbr2f = device_delta+offset;offset += fstn_6_fc;
+    // delta.relu2_output_fstn_fbr2f = device_delta+offset;offset += fstn_6;
+    // delta.stnkd_out = device_delta+offset;offset += fstn_7;
+    // //part4
+    // delta.fstn_input_trans = device_delta+offset;offset += part4_1;
+    // delta.fstn_bmm1_res = device_delta+offset;offset += part4_2;
+    // delta.fstn_bmm1_res_trans = device_delta+offset;offset += part4_3;
+    // delta.cbr2_output_conv = device_delta+offset;offset += part4_4_conv;
+    // delta.cbr2_output = device_delta+offset;offset += part4_4;
+    // delta.feat_bn3_conv = device_delta+offset;offset += part4_5_conv;
+    // delta.feat_bn3 = device_delta+offset;offset += part4_5;
+    // delta.encoder_output = device_delta+offset;offset += part4_6;
+    // //classify
+    // delta.fc1_output_part5_fbr2f = device_delta+offset;offset += cla_1_fc;
+    // delta.relu1_output_part5_fbr2f = device_delta+offset;offset += cla_1;
+    // delta.fc2_output_part5_fbr2f = device_delta+offset;offset += cla_2_fc;
+    // delta.relu2_output_part5_fbr2f = device_delta+offset;offset += cla_2;
+    // delta.softmax_input = device_delta+offset;offset += cla_3;
+    // delta.softmax_output = device_delta+offset;offset+= cla_4;
 
     std::cout << "PART1:STN3d, forwaring" << std::endl;
     int maxnp = USECONVMAX? numPoints / 64 : numPoints;
     GPU_transpose(input,net.input_trans,batchSize,numPoints,inChannels);
     GPU_CBR_3_train(true,OC1,OC2,OC3, batchSize, numPoints,inChannels,dParams.stn3dp.cb3, net.input_trans, 
     net.CBR3_output,net.relu1_output_stn_cbr,net.relu2_output_stn_cbr,
-    net.conv1_output_stn_cbr,net.conv2_output_stn_cbr,net.conv3_output_stn_cbr);   // conv-bn-relu * 3
+    net.conv1_output_stn_cbr,net.conv2_output_stn_cbr,net.conv3_output_stn_cbr,
+    net.bn1_stn_cbr,net.bn2_stn_cbr,net.bn3_stn_cbr);   // conv-bn-relu * 3
     GPU_MaxPooling(OC3, batchSize, maxnp,net.CBR3_output, net.maxp_output); // Max pooling    
     GPU_FBR_2_F_train(FC_OC1,FC_OC2,FC_OC3,batchSize,OC3,dParams.stn3dp.fb2f,net.maxp_output,
     net.stn3d_out,net.relu1_output_stn_fbr2f,net.relu1_output_stn_fbr2f,
     net.fc1_output_stn_cbr,net.fc2_output_stn_cbr);// fc-bn-relu * 2 + fc
     matrix_add_I(net.stn3d_out,3,batchSize);
-
     std::cout << "PART2:TRANS->BMM->TRANS->CBR, forwarding" << std::endl;
     GPU_Bmm(input,net.stn3d_out,net.bmm1_res,numPoints,inChannels,inChannels,encoderIC1,batchSize);
     GPU_transpose(net.bmm1_res,net.bmm1_res_trans,batchSize,numPoints,encoderIC1);
     //GPU_CBR(batchSize,numPoints,encoderIC1,fstn_inChannel,dParams.featp.cb1,net.bmm1_res_trans,net.fstn_input);
-    GPU_CBR_train(true,batchSize,numPoints,encoderIC1,fstn_inChannel,dParams.featp.cb1,net.bmm1_res_trans,net.fstn_input,net.fstn_input_conv);
-
+    GPU_CBR_train(true,batchSize,numPoints,encoderIC1,fstn_inChannel,dParams.featp.cb1,net.bmm1_res_trans,net.fstn_input,net.fstn_input_conv,net.fstn_input_bn);
+    
     std::cout << "PART3:STNkd, forwarding"<< std::endl;
     GPU_CBR_3_train(true,fstn_OC1,fstn_OC2,fstn_OC3, batchSize, numPoints,fstn_inChannel,dParams.stnkdp.cb3, net.fstn_input, 
     net.fstn_CBR3_output,net.relu1_output_fstn_cbr,net.relu2_output_fstn_cbr,
-    net.conv1_output_fstn_cbr,net.conv2_output_fstn_cbr,net.conv3_output_fstn_cbr);   // conv-bn-relu * 3
+    net.conv1_output_fstn_cbr,net.conv2_output_fstn_cbr,net.conv3_output_fstn_cbr,
+    net.bn1_fstn_cbr,net.bn2_fstn_cbr,net.bn3_fstn_cbr);   // conv-bn-relu * 3
     GPU_MaxPooling(fstn_OC3, batchSize, maxnp,net.fstn_CBR3_output, net.fstn_maxp_output); // Max pooling
     GPU_FBR_2_F_train(fstn_FC_OC1,fstn_FC_OC2,fstn_FC_OC3,batchSize,fstn_OC3,dParams.stnkdp.fb2f,net.fstn_maxp_output,
     net.stnkd_out,net.relu1_output_fstn_fbr2f,net.relu2_output_fstn_fbr2f,
@@ -3068,11 +3119,13 @@ void Train_GPU (int inChannels,int batchSize,int numPoints,
     GPU_transpose(net.fstn_input,net.fstn_input_trans,batchSize,fstn_inChannel,numPoints);
     GPU_Bmm(net.fstn_input_trans,net.stnkd_out,net.fstn_bmm1_res,numPoints,fstn_inChannel,fstn_inChannel,fstn_inChannel,batchSize);
     GPU_transpose(net.fstn_bmm1_res,net.fstn_bmm1_res_trans,batchSize,numPoints,fstn_inChannel);
-    GPU_CBR_train(true,batchSize,numPoints,fstn_inChannel,encoderOC2,dParams.featp.cb2,net.fstn_bmm1_res_trans,net.cbr2_output,net.cbr2_output_conv);
+    GPU_CBR_train(true,batchSize,numPoints,fstn_inChannel,encoderOC2,
+    dParams.featp.cb2,net.fstn_bmm1_res_trans,net.cbr2_output,net.cbr2_output_conv,net.cbr2_output_bn);
     //------CB MAX
     std::string convStr = "feat.conv3";
     std::string bnStr = "feat.bn3";
-    GPU_CBR_train(false,batchSize,numPoints,encoderOC2,encoderOC3,dParams.featp.cb3,net.cbr2_output,net.feat_bn3,net.feat_bn3_conv);
+    GPU_CBR_train(false,batchSize,numPoints,encoderOC2,encoderOC3,
+    dParams.featp.cb3,net.cbr2_output, net.feat_bn3,net.feat_bn3_conv,net.feat_bn3_bn);
     GPU_MaxPooling(encoderOC3, batchSize, maxnp,net.feat_bn3, net.encoder_output); // Max pooling
     
 
@@ -3082,7 +3135,7 @@ void Train_GPU (int inChannels,int batchSize,int numPoints,
     net.relu1_output_part5_fbr2f,net.relu2_output_part5_fbr2f,
     net.fc1_output_part5_fbr2f,net.fc2_output_part5_fbr2f,0);// fc-bn-relu * 2 + fc
     LogSoftMax_GPU_train(label,net.softmax_input,
-    net.softmax_output,delta.softmax_input,correct_table,10,batchSize);
+    net.softmax_output,NULL,correct_table,10,batchSize);
 
     
     // F->RB->F->RB->F
@@ -3185,13 +3238,13 @@ int main(int argc, char *argv[]) {
     int* correct_table;
     int *device_labels;
     float *device_output;
-    float *device_delta;
+    //float *device_delta;
     long long max_output_size = cal_tnet_size(batchSize, maxNp, ic); // batchSize > curB maxNp > np
     printf("max_output_size: %lld\n", max_output_size);
     cudaMalloc((void **)&correct_table, all_num * sizeof(int));
     cudaMalloc((void **)&device_labels, all_num * sizeof(int));
     cudaMalloc((void **)&device_output, max_output_size * sizeof(float));
-    cudaMalloc((void **)&device_delta, max_output_size * sizeof(float));
+    //cudaMalloc((void **)&device_delta, max_output_size * sizeof(float));
     cudaMemcpy(device_labels, list_of_labels.data(), all_num * sizeof(int), cudaMemcpyHostToDevice);
 
     // 开始推理
@@ -3202,7 +3255,7 @@ int main(int argc, char *argv[]) {
         np = ALIGN_DOWN(np, GEMMBLKMAX);
         if (use_sample == 1) np = npoint;
         Train_GPU(ic, curB, np, correct_table + i, device_labels + i, 
-        device_all_points + inf_offset, device_output, device_delta);
+        device_all_points + inf_offset, device_output, NULL);
         inf_offset += curB * np * ic;
         //cudaMemset(device_output, 0, cal_tnet_size(curB, np, ic) * sizeof(float));
     }
@@ -3221,7 +3274,7 @@ int main(int argc, char *argv[]) {
     cudaFree(device_labels);//label
     cudaFree(device_all_points);//输入
     cudaFree(device_output);//输出
-    cudaFree(device_delta);//delta
+    //cudaFree(device_delta);//delta
     cudaFree(correct_table);//正确表
 
 	// 向主机端同步以等待所有异步调用的GPU kernel执行完毕，这句必须要有

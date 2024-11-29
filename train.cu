@@ -27,8 +27,8 @@
 #define ALIGN_DOWN(x, align) ((x) / (align) * (align))
 #define DIV_UP(x, y) (((x) + (y) - 1) / (y))
 #define INDEX(row, col, width) ((row) * (width) + (col))
-#define NPOINT 1024
-#define SAMPLE 0
+#define NPOINT 128
+#define SAMPLE 1
 #define USECONVMAX 0
 #define CLASSNUM 10
 #define DARKNETBLK 512
@@ -249,9 +249,9 @@ void printVector_GPU(float* vec, int size) {
     }
 
     // 打印向量内容
-    // for (const auto& value : vec_cpu) {
-    //     std::cout << value << " ";
-    // }
+    for (const auto& value : vec_cpu) {
+        std::cout << value << " ";
+    }
     std::cout << std::endl; // 输出换行
 
 }

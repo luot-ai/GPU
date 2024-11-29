@@ -27,7 +27,7 @@
 #define ALIGN_DOWN(x, align) ((x) / (align) * (align))
 #define DIV_UP(x, y) (((x) + (y) - 1) / (y))
 #define INDEX(row, col, width) ((row) * (width) + (col))
-#define NPOINT 64
+#define NPOINT 128
 #define SAMPLE 1
 #define USECONVMAX 0
 #define CLASSNUM 10

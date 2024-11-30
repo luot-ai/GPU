@@ -3240,7 +3240,7 @@ int main(int argc, char *argv[]) {
     read_params(dir);
 
     // 读输入：主机
-    std::string file_path = "./data/test_point_clouds.h5";
+    std::string file_path = "./data/train_point_clouds.h5";
     std::vector<std::vector<float>> list_of_points;
     std::vector<int> list_of_labels;
     read_h5_file(file_path, list_of_points, list_of_labels);
@@ -3290,14 +3290,6 @@ int main(int argc, char *argv[]) {
                                 ic * sizeof(float));  // 拷贝每个点的特征
                 }
             }
-            // for (int b = 0; b < curB; ++b) {
-            //     for (int j = 0; j < np; ++j) {
-            //         int rand_index = dis(gen); // 随机生成一个索引
-            //         std::memcpy(&input[b * bSize + j * ic], 
-            //                     &list_of_points[i + b][rand_index * ic], 
-            //                     ic * sizeof(float));  // 拷贝每个点的特征
-            //     }
-            // }
         }
         else
         {

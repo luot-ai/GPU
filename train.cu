@@ -33,6 +33,9 @@
 #define CLASSNUM 10
 #define DARKNETBLK 512
 #define BLOCK 512
+#define EPOCH 10
+// #define DEBUG
+// #define BACKDEBUG
 // #define USECONVMAX (SAMPLE == 0 ? 1 : (NPOINT >= 128 ? 1 : 0))
 
 void checkCublasStatus(cublasStatus_t status) {
@@ -515,6 +518,11 @@ void read_fcp(const std::string& layer, fcp& wbp,int i,bool update=false) {
     //std::cout << name << std::endl;
     cudaMalloc((void**)&wbp.weight, params[name + ".weight"].size() * sizeof(float));
     cudaMalloc((void**)&wbp.bias, params[name + ".bias"].size() * sizeof(float));
+    if(update == true)
+    {
+        cudaMemset(wbp.weight,0, params[name + ".weight"].size() * sizeof(float));
+        cudaMemset(wbp.bias,0, params[name + ".bias"].size() * sizeof(float));
+    }
     if(update == false)
     {
         cudaMemcpy(wbp.weight, params[name + ".weight"].data(), params[name + ".weight"].size() * sizeof(float), cudaMemcpyHostToDevice);
@@ -546,6 +554,14 @@ void read_wbBnP(const std::string& layer,const std::string& cf,wbBnP& wbBnP,int 
     cudaMalloc((void**)&wbBnP.bias, params[name + ".bias"].size() * sizeof(float));
     cudaMalloc((void**)&wbBnP.bn_weight, params[bnStr + ".weight"].size() * sizeof(float));
     cudaMalloc((void**)&wbBnP.bn_bias, params[bnStr + ".bias"].size() * sizeof(float));
+    if(update == true)
+    {
+        //printf("memset\n");
+        cudaMemset(wbBnP.weight, 0, params[name + ".weight"].size() * sizeof(float)); 
+        cudaMemset(wbBnP.bias, 0, params[name + ".bias"].size() * sizeof(float));
+        cudaMemset(wbBnP.bn_weight, 0,params[bnStr + ".weight"].size() * sizeof(float));
+        cudaMemset(wbBnP.bn_bias, 0, params[bnStr + ".bias"].size() * sizeof(float));
+    }
     if(update == false)
     {
         cudaMalloc((void**)&wbBnP.bn_mean, params[bnStr + ".running_mean"].size() * sizeof(float));
@@ -632,6 +648,7 @@ void freeDP(cudaP &dp,bool update=false)
 
 cudaP dParams;
 cudaP upParams;
+cudaP moParams;
 
 
 /****************************************************************************************
@@ -798,7 +815,6 @@ void matrix_add_I(float *input, int n,int batchSize)
     matrix_add_I_kernel<<<gridDim, blockDim>>>(input, n, batchSize);
     // cudaDeviceSynchronize();
 }
-
 
 __global__ void Maxpooling_Kernel_train(float* input,float* output,float* output_idx,int numPoints)
 {
@@ -1092,1390 +1108,6 @@ linear_Kernel<<<gridDim,blockDim>>>(outFeatures,batchSize,inFeatures,input,cudaW
     // // 同步设备并检查执行错误
     // CUDA_CHECK(cudaDeviceSynchronize());
 }
-
-__global__ void ReLu_Kernel(float *input,float *output)
-{
-    int tx = threadIdx.x;
-    int bx = blockIdx.x;
-
-    int idx = tx + bx * blockDim.x;
-    int index = idx ;
-
-    output[index] = input[index] > 0 ? input[index] : 0;
-
-}
-void ReLU_GPU(int batchSize,int numPoints,int OC,float* input,float* output){
-    //std::cout << "------------LAYER:relu" << std::endl;
-    // const int BLK_X = 32;
-    // const int BLK_Y = 32;
-
-    dim3 blockDim(OC);
-    dim3 gridDim(batchSize*numPoints);
-    ReLu_Kernel<<<gridDim, blockDim>>>(input, output);
-    // // 检查内核启动是否成功
-    // CUDA_CHECK(cudaGetLastError());
-
-    // // 同步设备并检查执行错误
-    // CUDA_CHECK(cudaDeviceSynchronize());
-}
-
-__global__ void BatchNorm1d_Kernel(int numPoints,float* weight,float* bias,float* running_mean,float* running_var,float* input,float* output,float esp = 1e-5)
-{
-    int tx = threadIdx.x;
-    int bx = blockIdx.x;
-    int idx = tx + bx * blockDim.x;
-    int index = idx;
-
-    if (idx < blockDim.x * gridDim.x)
-    {
-        float mean = running_mean[tx];
-        float var = running_var[tx];
-        for (int n = 0; n < numPoints; n++)
-        {
-            int iIdx = index * numPoints + n;
-            output[iIdx] = (input[iIdx] - mean) / sqrt(var + esp) * weight[tx] + bias[tx];
-        }
-    }
-}
-void BatchNorm1d_GPU(int numFeatures, int batchSize, int numPoints,float* weight,float* bias,float* running_mean,float* running_var,float* input,float* output,float esp = 1e-5)
-{
-    float* cudaWeights;
-    float* cudaBias;
-    float* cudaRV;
-    float* cudaRM;
-
-    cudaMalloc((void **)&cudaWeights, numFeatures * sizeof(float));
-    cudaMalloc((void **)&cudaBias, numFeatures * sizeof(float));
-    cudaMalloc((void **)&cudaRV, numFeatures * sizeof(float));
-    cudaMalloc((void **)&cudaRM, numFeatures * sizeof(float));
-
-    cudaMemcpy(cudaWeights, weight, numFeatures * sizeof(float), cudaMemcpyHostToDevice);
-    cudaMemcpy(cudaBias, bias, numFeatures * sizeof(float), cudaMemcpyHostToDevice);
-    cudaMemcpy(cudaRV, running_var, numFeatures * sizeof(float), cudaMemcpyHostToDevice);
-    cudaMemcpy(cudaRM, running_mean, numFeatures * sizeof(float), cudaMemcpyHostToDevice);
-
-    //std::cout << "------------LAYER:batchnorm" << std::endl;
-    dim3 blockDim(numFeatures);
-    dim3 gridDim(batchSize);
-    BatchNorm1d_Kernel<<<gridDim, blockDim>>>(numPoints,cudaWeights,cudaBias,cudaRM,cudaRV,input,output);
-
-    cudaFree(cudaWeights);
-    cudaFree(cudaBias);
-    cudaFree(cudaRV);
-    cudaFree(cudaRM);
-    // // 检查内核启动是否成功
-    // CUDA_CHECK(cudaGetLastError());
-
-    // // 同步设备并检查执行错误
-    // CUDA_CHECK(cudaDeviceSynchronize());
-}
-
-//ARCH CB
-__global__ void CB_1024x128N_kernel(int M,int batchSize,int N,int K,float* input, 
-float* convWeights, float* convBias, 
-float* bnWeights,float* bnBias,float* bnRM,float* bnRV,float* output,float esp = 1e-5 )
-{   
-    // param-set : variable
-    int BM = 128;
-    int BN = 128;
-    // param-set : fix
-    int BK = 8;
-    int Tsize = 8; //thread 8*8 = 2*2 * 4*4
-    // matrix
-    int tx = threadIdx.x;
-    int bx = blockIdx.x;
-    int by = blockIdx.y;
-    int b = blockIdx.z;
-    int bI = b * K * N ;
-    int bO = b * M * N ;
-    // output arrange
-    int warpIdx = tx / 32; // 4x8 threads per Warp
-    int twIdx = tx % 32;
-    int wx = warpIdx % 2;      // th -> 8x8  warp-> 32x64
-    int wy = warpIdx / 2;      // 4x2 warps per Block
-    int twx = (twIdx / 2) % 8; 
-    int twy = (twIdx / 16) * 2 + (twIdx % 2);
-
-    //shared memory & registers
-    __shared__ __align__(16 * 1024) char smem[24 * 1024];
-    float *W_shared = reinterpret_cast<float *>(smem);
-    float *I_shared = reinterpret_cast<float *>(smem + 16 * 1024);
-    float W_ldg_reg[4];
-    float I_ldg_reg[4];
-
-    float W_reg[2][8]={0};
-    float I_reg[2][8]={0};
-    float O_reg[8][8] = {0};
-
-    int W_grow = by * BM + tx / BK * 4; // 每BK个threads:连续4行读取1个数
-    int W_gcol = 0 + tx % BK;
-    int I_grow = 0 + tx / 32; // 32个threads读32个数，重复四次 刚好是一行:INTERLEAVE
-    int I_gcol = bx * BN + tx % 32;
-    int W_LoadG = INDEX(W_grow, W_gcol, K);
-    int I_LoadG = INDEX(I_grow, I_gcol, N)+bI;
-    const char *W_ldg_ptr = (const char *)(convWeights+W_LoadG);
-    const char *I_ldg_ptr = (const char *)(input + I_LoadG);
-
-    int W_srow = tx % BK; // 转置
-    int W_scol = tx / BK * 4;
-    int I_srow = tx / 32;
-    int I_scol = tx % 32;
-    int W_StoreS = INDEX(W_srow, W_scol, BM + 4);
-    int I_StoreS = INDEX(I_srow, I_scol, BN);
-    uint32_t W_sts_addr = smem_u32addr(W_shared + W_StoreS);
-    uint32_t I_sts_addr = smem_u32addr(I_shared + I_StoreS);
-
-    int W_LoadS = INDEX(0, (wy * 32 + twy * 4), BM + 4);
-    int I_LoadS = INDEX(0, (wx * 64 + twx * 4), BN);
-    uint32_t W_lds_addr = smem_u32addr(W_shared + W_LoadS);
-    uint32_t I_lds_addr = smem_u32addr(I_shared + I_LoadS);
-
-    //1st_tile:
-    #pragma unroll
-    for (int i = 0; i < 4; ++i)
-    {
-        ldg32_nc_0(W_ldg_reg[i],W_ldg_ptr + i * K * sizeof(float),true);
-    }
-    sts128(W_ldg_reg[0], W_ldg_reg[1], W_ldg_reg[2], W_ldg_reg[3],W_sts_addr);
-    #pragma unroll
-    for (int i = 0; i < 4; ++i)
-    {
-        ldg32_nc_0(I_ldg_reg[i],I_ldg_ptr + i * 32 * sizeof(float),true);
-    }
-    #pragma unroll
-    for (int i = 0; i < 4; ++i)
-    {
-        sts32(I_ldg_reg[i], I_sts_addr + i * 32 * sizeof(float));
-    }
-    __syncthreads();
-    W_ldg_ptr += BK * sizeof(float);
-    I_ldg_ptr += BK * N * sizeof(float);
-    W_sts_addr ^= 0x2000;
-    I_sts_addr ^= 0x1000;
-
-    lds128(W_reg[0][0], W_reg[0][1], W_reg[0][2], W_reg[0][3], W_lds_addr);
-    lds128(W_reg[0][4], W_reg[0][5], W_reg[0][6], W_reg[0][7], W_lds_addr + 4 * 4 * sizeof(float));
-    lds128(I_reg[0][0], I_reg[0][1], I_reg[0][2], I_reg[0][3], I_lds_addr);
-    lds128(I_reg[0][4], I_reg[0][5], I_reg[0][6], I_reg[0][7], I_lds_addr + 4 * 8 * sizeof(float));
-
-    // OUTERMOST PHASES: K/BK times
-    for (int phase = 0; phase < (K / BK - 1); phase++)
-    {
-        // ITERATIONS : BK times
-        #pragma unroll
-        for (int iter = 0; iter < BK ;iter++)
-        {
-            // next phase: ldreg->share
-            if(iter == BK - 1)
-            {
-                sts128(W_ldg_reg[0], W_ldg_reg[1], W_ldg_reg[2], W_ldg_reg[3],W_sts_addr);
-                #pragma unroll
-                for (int i = 0; i < 4; ++i)
-                {
-                    sts32(I_ldg_reg[i], I_sts_addr + i * 32 * sizeof(float));
-                }
-                __syncthreads();
-                W_ldg_ptr += BK * sizeof(float);
-                I_ldg_ptr += BK * N * sizeof(float);
-                W_lds_addr ^= 0x2000;
-                I_lds_addr ^= 0x1000;
-                W_sts_addr ^= 0x2000;
-                I_sts_addr ^= 0x1000;
-            }
-            // next iter: share->registers
-            int nI = (iter + 1) % 2;
-            int nrowS = (iter + 1) % BK;
-            int offW = nrowS * (BM + 4);
-            int offI = nrowS * BN;
-            lds128(W_reg[nI][0], W_reg[nI][1], W_reg[nI][2], W_reg[nI][3], W_lds_addr + offW * sizeof(float));
-            lds128(W_reg[nI][4], W_reg[nI][5], W_reg[nI][6], W_reg[nI][7], W_lds_addr + (offW + 16) * sizeof(float));
-            lds128(I_reg[nI][0], I_reg[nI][1], I_reg[nI][2], I_reg[nI][3], I_lds_addr + offI * sizeof(float));
-            lds128(I_reg[nI][4], I_reg[nI][5], I_reg[nI][6], I_reg[nI][7], I_lds_addr + (offI + 32) * sizeof(float));
-            // next phase:global->ldreg
-            if (iter == 0) {
-                #pragma unroll
-                for (int i = 0; i < 4; ++i)
-                {
-                    ldg32_nc_0(W_ldg_reg[i],W_ldg_ptr + i * K * sizeof(float),true);
-                }
-                #pragma unroll
-                for (int i = 0; i < 4; ++i)
-                {
-                    ldg32_nc_0(I_ldg_reg[i],I_ldg_ptr + i * 32 * sizeof(float),true);
-                }
-            }
-            // calculate
-            {
-            int cI = iter % 2;
-            #pragma unroll
-            for (int i = 0; i < Tsize; ++i) {
-                #pragma unroll
-                for (int j = 0; j < Tsize; ++j) {
-                    O_reg[i][j] += W_reg[cI][i] * I_reg[cI][j];
-                }
-            }
-            }
-        }
-    }
-    // LAST PHASE
-    #pragma unroll
-    for (int iter = 0 ; iter < BK ; iter++)
-    {
-        // next iter: share->registers
-        if (iter < (BK -1))
-        {
-            int nI = (iter + 1) % 2;
-            int nrowS = (iter + 1) % BK;
-            int offW = nrowS * (BM + 4);
-            int offI = nrowS * BN;
-            lds128(W_reg[nI][0], W_reg[nI][1], W_reg[nI][2], W_reg[nI][3], W_lds_addr + offW * sizeof(float));
-            lds128(W_reg[nI][4], W_reg[nI][5], W_reg[nI][6], W_reg[nI][7], W_lds_addr + (offW + 16) * sizeof(float));
-            lds128(I_reg[nI][0], I_reg[nI][1], I_reg[nI][2], I_reg[nI][3], I_lds_addr + offI * sizeof(float));
-            lds128(I_reg[nI][4], I_reg[nI][5], I_reg[nI][6], I_reg[nI][7], I_lds_addr + (offI + 32) * sizeof(float));
-        }
-        // calculate
-        {
-            int cI = iter % 2;
-#pragma unroll
-            for (int i = 0; i < Tsize; ++i)
-            {
-#pragma unroll
-                for (int j = 0; j < Tsize; ++j)
-                {
-                    O_reg[i][j] += W_reg[cI][i] * I_reg[cI][j];
-                }
-            }
-        }
-    }
-
-     int O_grow = by * BM + wy * 32 + twy * 4;
-    // int O_gcol = bx * BN + wx * 64 + twx * 4;
-    //int O_StoreG = INDEX(O_grow, O_gcol, N)+bO;
-    //convBias and batchnorm and relu
-    float mean[8] = {0};
-    float var[8] = {0};
-    float bnW[8] = {0};
-    float bnB[8] = {0};
-    float cvB[8] = {0};
-    #pragma unroll
-    for (int i = 0; i < 2; ++i)
-    {
-        for (int j = 0; j < 4; ++j)
-        {
-            int sIdx = i * 4 + j;
-            int gIdx = O_grow + i*16+j;
-            cvB[sIdx] = convBias[gIdx];
-            mean[sIdx] = bnRM[gIdx];
-            var[sIdx] = bnRV[gIdx];
-            bnW[sIdx] = bnWeights[gIdx];
-            bnB[sIdx] = bnBias[gIdx];
-        }
-    }
-    #pragma unroll
-    for (int i = 0; i < 4; ++i)
-    {
-        for (int j = 0; j < 4; ++j)
-        {
-            float res1 = O_reg[i][j];
-            float res2 = O_reg[i][j+4];
-            float res3 = O_reg[i+4][j];
-            float res4 = O_reg[i+4][j+4];
-            res1 += cvB[i];
-            res2 += cvB[i];
-            res3 += cvB[i+4];
-            res4 += cvB[i+4];
-            
-            res1 = __fdividef((res1 - mean[i]),sqrt(var[i] + esp)) * bnW[i] + bnB[i];
-            res2 = __fdividef((res2 - mean[i]),sqrt(var[i] + esp)) * bnW[i] + bnB[i];
-            res3 = __fdividef((res3 - mean[i+4]),sqrt(var[i+4] + esp))* bnW[i+4] + bnB[i+4];
-            res4 = __fdividef((res4 - mean[i+4]),sqrt(var[i+4] + esp)) * bnW[i+4] + bnB[i+4];
-            O_reg[i][j] =  res1;
-            O_reg[i][j+4] = res2;
-            O_reg[i+4][j] = res3;
-            O_reg[i+4][j+4] = res4;
-        }
-    }
-    #pragma unroll
-    for (int i = 0;i <8 ;i++)
-    {
-        float maxT = O_reg[i][0];
-        for (int j =1 ;j<8;j++)
-        {
-            if (O_reg[i][j]>maxT)
-            {
-                maxT = O_reg[i][j];
-            }
-        }
-    O_reg[i][0]= maxT;
-    }
-    
-    //warp内最大值规约 th 0 1 16 17 ，各8行
-    #pragma unroll
-    for (int offset = 8; offset > 1; offset >>= 1) {
-        for (int i = 0;i < 8 ;i++)
-        {
-            O_reg[i][0] = max(O_reg[i][0], __shfl_down_sync(0xFFFFFFFF, O_reg[i][0], offset));
-        }
-    }
-    if (twx == 0)
-    {
-        //printf("tx is %d\n",tx);
-        int O_gcol = bx * 2 + wx ;
-        #pragma unroll
-        for (int i = 0;i<2;i++)
-        {
-            for (int j =0 ;j <4;j++)
-            {
-                int O_grow = by * BM + wy * 32 + twy * 4 + i * 16 + j;
-                int O_StoreG = INDEX(O_grow, O_gcol, N/64) + bO/64;
-                output[O_StoreG] = O_reg[i*4+j][0];
-            }
-        }
-        
-    }
-
-    // if (twx == 0)
-    // {
-    //     int O_StoreS_0 = wx * 32 + twy * 4;  
-    //     int O_StoreS_1 = O_StoreS_0 + 16;  
-    //     uint32_t O_sts_addr_0 = smem_u32addr(W_shared + O_StoreS_0);
-    //     uint32_t O_sts_addr_1 = smem_u32addr(W_shared + O_StoreS_1);
-    // }
-
-
-    // C_tile write back, reuse A&B tile shared memory buffer
-    // uint32_t C_sts_addr = smem_u32addr((float4 *)(smem + warpIdx * 2048) +
-    //                                    twy * 4 * 8 + twx);//每个warp 32*64 =2048；每个twy 
-    // const float *C_lds_ptr = (float *)(smem + warpIdx * 2048) + twIdx;
-
-    // uint32_t m_idx = blockIdx.y * 128 + warpIdx / 2 * 32;
-    // uint32_t n_idx = blockIdx.x * 128 + warpIdx % 2 * 64 + twIdx;
-
-    // float *C_stg_ptr = output + m_idx * N + n_idx+bO;
-
-    
-        // #pragma unroll
-        // for (int i = 0; i < 2; ++i) {
-        //     #pragma unroll
-        //     for (int j = 0; j < 2; ++j) {
-        //         StgFrag stg_frag(O_reg, j, i);//4*4 matrix
-
-        //         C_tile_wb(stg_frag,
-        //                   C_stg_ptr + i * 16 * N + j * 32,
-        //                   C_lds_ptr,
-        //                   C_sts_addr,
-        //                   M,
-        //                   N,
-        //                   m_idx + i * 16,
-        //                   n_idx + j * 32);
-        //     }
-        // }
-}
-__global__ void CB_64x128N_kernel(int M,int batchSize,int N,int K,float* input, 
-float* convWeights, float* convBias, 
-float* bnWeights,float* bnBias,float* bnRM,float* bnRV,float* output,float esp = 1e-5 )
-{   
-    // param-set : variable
-    int BM = 64;
-    int BN = 64;
-    // param-set : fix
-    int BK = 8;
-    int Tsize = 4; //thread 4*4
-    // matrix
-    int tx = threadIdx.x;
-    int bx = blockIdx.x;
-    int by = blockIdx.y;
-    int b = blockIdx.z;
-    int bI = b * K * N ;
-    int bO = b * M * N ;
-    // output arrange
-    int warpIdx = tx / 32; // 4x8 threads per Warp
-    int twIdx = tx % 32;
-    int wx = warpIdx % 2;      // th -> 8x8  warp-> 32x64
-    int wy = warpIdx / 2;      // 4x2 warps per Block
-    int twx = (twIdx / 2) % 8; 
-    int twy = (twIdx / 16) * 2 + (twIdx % 2);
-
-    //shared memory & registers
-    __shared__ float W_shared[512];//1024*4B = 4KB
-    __shared__ float I_shared[512];//1024*4B = 4KB
-    float W_reg[4]={0};
-    float I_reg[4]={0};
-    float O_reg[4][4] = {0};
-
-    int W_grow = by * BM + tx / BK * 2; // 每BK个threads:连续2行读取1个数
-    int W_gcol = 0 + tx % BK;
-    int I_grow = 0 + tx / 32; // 32个threads读32个数，重复2次 刚好是一行:INTERLEAVE
-    int I_gcol = bx * BN + tx % 32;
-    int W_LoadG = INDEX(W_grow, W_gcol, K);
-    int I_LoadG = INDEX(I_grow, I_gcol, N)+bI;
-    // OUTERMOST PHASES: K/BK times
-    for (int phase = 0; phase < K / BK; phase++)
-    {
-        //【global -> share】
-        int W_srow = tx % BK ; //转置
-        int W_scol = tx / BK * 2 ; 
-        int I_srow = tx / 32; 
-        int I_scol = tx % 32; 
-        int W_StoreS = INDEX(W_srow,W_scol,BM);
-        int I_StoreS = INDEX(I_srow,I_scol,BN);
-        #pragma unroll
-        for (int ldg = 0; ldg < 2; ldg++)
-        {
-            W_shared[W_StoreS+ldg]=convWeights[W_LoadG+ldg*K];
-        }
-        #pragma unroll
-        for (int ldg = 0; ldg < 2; ldg++)
-        {
-            I_shared[I_StoreS+ldg*32]=input[I_LoadG+ldg*32];
-        }
-        __syncthreads();
-        W_LoadG += BK;
-        I_LoadG += BK * N;
-        // ITERATIONS : BK times
-        for (int iter = 0; iter< BK ;iter++)
-        {
-            //【share -> registers】
-            int W_LoadS = INDEX(iter, (wy * 16 + twy * 4), BM);
-            int I_LoadS = INDEX(iter, (wx * 32 + twx * 4), BN);
-            #pragma unroll
-            for (int i = 0; i < 4; ++i)
-            {
-                W_reg[i] = W_shared[W_LoadS+i];
-            }
-            #pragma unroll
-            for (int i = 0; i < 4; ++i)
-            {
-                I_reg[i] = I_shared[I_LoadS+i];
-            }
-            // calculate
-            #pragma unroll
-            for (int i = 0; i < Tsize; ++i) {
-                #pragma unroll
-                for (int j = 0; j < Tsize; ++j) {
-                    O_reg[i][j] += W_reg[i] * I_reg[j];
-                }
-            }
-        }
-    }
-    int O_grow = by * BM + wy * 16 + twy * 4;
-    int O_gcol = bx * BN + wx * 32 + twx * 4;
-    int O_StoreG = INDEX(O_grow, O_gcol, N)+bO;
-    //convBias and batchnorm and relu
-    float mean[4] = {0};
-    float var[4] = {0};
-    float bnW[4] = {0};
-    float bnB[4] = {0};
-    float cvB[4] = {0};
-    #pragma unroll
-    for (int j = 0; j < 4; ++j)
-    {
-        int sIdx = j;
-        int gIdx = O_grow + j;
-        cvB[sIdx] = convBias[gIdx];
-        mean[sIdx] = bnRM[gIdx];
-        var[sIdx] = bnRV[gIdx];
-        bnW[sIdx] = bnWeights[gIdx];
-        bnB[sIdx] = bnBias[gIdx];
-    }
-
-    #pragma unroll
-    for (int i = 0; i < 4; ++i)
-    {
-        for (int j = 0; j < 4; ++j)
-        {
-            float res1 = O_reg[i][j];
-            res1 += cvB[i];
-            res1 = (res1 - mean[i]) / sqrt(var[i] + esp) * bnW[i] + bnB[i];
-            O_reg[i][j] = res1;
-        }
-    }
-    //store to C
-    #pragma unroll
-    for (int i = 0; i<4;i++)
-    {
-        for (int j = 0 ; j<4 ;j++)
-        {
-            output[O_StoreG+ i*N+j]=O_reg[i][j];
-        }
-    }
-}
-void CBWRAP_GPU(int batchSize,int numPoints,int inChannels,int outChannels,int kSize,float* input, 
-float* cudaConvWeights, float* cudaConvBias, 
-float* cudaBnWeights,float* cudaBnBias,float* cudaBnRM,float* cudaBnRV,float* output,float esp = 1e-5
-){
-    //std::cout << "------------LAYER:CBWRAP" << std::endl;
-    if (USECONVMAX)
-    {
-        dim3 grid128(DIV_UP(numPoints, 128), DIV_UP(outChannels, 128), batchSize);
-        CB_1024x128N_kernel<<<grid128, 256>>>(outChannels, batchSize, numPoints, inChannels, input, cudaConvWeights, cudaConvBias,
-                                              cudaBnWeights, cudaBnBias, cudaBnRM, cudaBnRV, output);
-    }
-    else
-    {
-        dim3 grid64(DIV_UP(numPoints, 64), DIV_UP(outChannels, 64), batchSize);
-        CB_64x128N_kernel<<<grid64, 256>>>(outChannels, batchSize, numPoints, inChannels, input, cudaConvWeights, cudaConvBias,
-                                              cudaBnWeights, cudaBnBias, cudaBnRM, cudaBnRV, output);
-    }
-}
-
-//ARCH CBR
-__global__ void CBR_64x128N_kernel(int M,int batchSize,int N,int K,float* input, 
-float* convWeights, float* convBias, 
-float* bnWeights,float* bnBias,float* bnRM,float* bnRV,float* output,float esp = 1e-5 )
-{   
-    // param-set : variable
-    int BM = 64;
-    int BN = 64;
-    // param-set : fix
-    int BK = 8;
-    int Tsize = 4; //thread 4*4
-    // matrix
-    int tx = threadIdx.x;
-    int bx = blockIdx.x;
-    int by = blockIdx.y;
-    int b = blockIdx.z;
-    int bI = b * K * N ;
-    int bO = b * M * N ;
-    // output arrange
-    int warpIdx = tx / 32; // 4x8 threads per Warp
-    int twIdx = tx % 32;
-    int wx = warpIdx % 2;      // th -> 8x8  warp-> 32x64
-    int wy = warpIdx / 2;      // 4x2 warps per Block
-    int twx = (twIdx / 2) % 8; 
-    int twy = (twIdx / 16) * 2 + (twIdx % 2);
-
-    //shared memory & registers
-    __shared__ float W_shared[512];//1024*4B = 4KB
-    __shared__ float I_shared[512];//1024*4B = 4KB
-    float W_reg[4]={0};
-    float I_reg[4]={0};
-    float O_reg[4][4] = {0};
-
-    int W_grow = by * BM + tx / BK * 2; // 每BK个threads:连续2行读取1个数
-    int W_gcol = 0 + tx % BK;
-    int I_grow = 0 + tx / 32; // 32个threads读32个数，重复2次 刚好是一行:INTERLEAVE
-    int I_gcol = bx * BN + tx % 32;
-    int W_LoadG = INDEX(W_grow, W_gcol, K);
-    int I_LoadG = INDEX(I_grow, I_gcol, N)+bI;
-    // OUTERMOST PHASES: K/BK times
-    for (int phase = 0; phase < K / BK; phase++)
-    {
-        //【global -> share】
-        int W_srow = tx % BK ; //转置
-        int W_scol = tx / BK * 2 ; 
-        int I_srow = tx / 32; 
-        int I_scol = tx % 32; 
-        int W_StoreS = INDEX(W_srow,W_scol,BM);
-        int I_StoreS = INDEX(I_srow,I_scol,BN);
-        #pragma unroll
-        for (int ldg = 0; ldg < 2; ldg++)
-        {
-            W_shared[W_StoreS+ldg]=convWeights[W_LoadG+ldg*K];
-        }
-        #pragma unroll
-        for (int ldg = 0; ldg < 2; ldg++)
-        {
-            I_shared[I_StoreS+ldg*32]=input[I_LoadG+ldg*32];
-        }
-        __syncthreads();
-        W_LoadG += BK;
-        I_LoadG += BK * N;
-        // ITERATIONS : BK times
-        for (int iter = 0; iter< BK ;iter++)
-        {
-            //【share -> registers】
-            int W_LoadS = INDEX(iter, (wy * 16 + twy * 4), BM);
-            int I_LoadS = INDEX(iter, (wx * 32 + twx * 4), BN);
-            #pragma unroll
-            for (int i = 0; i < 4; ++i)
-            {
-                W_reg[i] = W_shared[W_LoadS+i];
-            }
-            #pragma unroll
-            for (int i = 0; i < 4; ++i)
-            {
-                I_reg[i] = I_shared[I_LoadS+i];
-            }
-            // calculate
-            #pragma unroll
-            for (int i = 0; i < Tsize; ++i) {
-                #pragma unroll
-                for (int j = 0; j < Tsize; ++j) {
-                    O_reg[i][j] += W_reg[i] * I_reg[j];
-                }
-            }
-        }
-    }
-    int O_grow = by * BM + wy * 16 + twy * 4;
-    int O_gcol = bx * BN + wx * 32 + twx * 4;
-    int O_StoreG = INDEX(O_grow, O_gcol, N)+bO;
-    //convBias and batchnorm and relu
-    float mean[4] = {0};
-    float var[4] = {0};
-    float bnW[4] = {0};
-    float bnB[4] = {0};
-    float cvB[4] = {0};
-    #pragma unroll
-    for (int j = 0; j < 4; ++j)
-    {
-        int sIdx = j;
-        int gIdx = O_grow + j;
-        cvB[sIdx] = convBias[gIdx];
-        mean[sIdx] = bnRM[gIdx];
-        var[sIdx] = bnRV[gIdx];
-        bnW[sIdx] = bnWeights[gIdx];
-        bnB[sIdx] = bnBias[gIdx];
-    }
-
-    #pragma unroll
-    for (int i = 0; i < 4; ++i)
-    {
-        for (int j = 0; j < 4; ++j)
-        {
-            float res1 = O_reg[i][j];
-            res1 += cvB[i];
-            res1 = (res1 - mean[i]) / sqrt(var[i] + esp) * bnW[i] + bnB[i];
-            res1 = max(0.0f, res1);
-            O_reg[i][j] = res1;
-        }
-    }
-    //store to C
-    #pragma unroll
-    for (int i = 0; i<4;i++)
-    {
-        for (int j = 0 ; j<4 ;j++)
-        {
-            output[O_StoreG+ i*N+j]=O_reg[i][j];
-        }
-    }
-}
-__global__ void CBR_128x128N_kernel(int M,int batchSize,int N,int K,float* input, 
-float* convWeights, float* convBias, 
-float* bnWeights,float* bnBias,float* bnRM,float* bnRV,float* output,float esp = 1e-5 )
-{   
-    // param-set : variable
-    int BM = 128;
-    int BN = 128;
-    // param-set : fix
-    int BK = 8;
-    int Tsize = 8; //thread 8*8 = 2*2 * 4*4
-    // matrix
-    int tx = threadIdx.x;
-    int bx = blockIdx.x;
-    int by = blockIdx.y;
-    int b = blockIdx.z;
-    int bI = b * K * N ;
-    int bO = b * M * N ;
-    // output arrange
-    int warpIdx = tx / 32; // 4x8 threads per Warp
-    int twIdx = tx % 32;
-    int wx = warpIdx % 2;      // th -> 8x8  warp-> 32x64
-    int wy = warpIdx / 2;      // 4x2 warps per Block
-    int twx = (twIdx / 2) % 8; 
-    int twy = (twIdx / 16) * 2 + (twIdx % 2);
-
-    //shared memory & registers
-    __shared__ __align__(16 * 1024) char smem[24 * 1024];
-    float *W_shared = reinterpret_cast<float *>(smem);
-    float *I_shared = reinterpret_cast<float *>(smem + 16 * 1024);
-    float W_ldg_reg[4];
-    float I_ldg_reg[4];
-
-    float W_reg[2][8]={0};
-    float I_reg[2][8]={0};
-    float O_reg[8][8] = {0};
-
-    int W_grow = by * BM + tx / BK * 4; // 每BK个threads:连续4行读取1个数
-    int W_gcol = 0 + tx % BK;
-    int I_grow = 0 + tx / 32; // 32个threads读32个数，重复四次 刚好是一行:INTERLEAVE
-    int I_gcol = bx * BN + tx % 32;
-    int W_LoadG = INDEX(W_grow, W_gcol, K);
-    int I_LoadG = INDEX(I_grow, I_gcol, N)+bI;
-    const char *W_ldg_ptr = (const char *)(convWeights+W_LoadG);
-    const char *I_ldg_ptr = (const char *)(input + I_LoadG);
-
-    int W_srow = tx % BK; // 转置
-    int W_scol = tx / BK * 4;
-    int I_srow = tx / 32;
-    int I_scol = tx % 32;
-    int W_StoreS = INDEX(W_srow, W_scol, BM + 4);
-    int I_StoreS = INDEX(I_srow, I_scol, BN);
-    uint32_t W_sts_addr = smem_u32addr(W_shared + W_StoreS);
-    uint32_t I_sts_addr = smem_u32addr(I_shared + I_StoreS);
-
-    int W_LoadS = INDEX(0, (wy * 32 + twy * 4), BM + 4);
-    int I_LoadS = INDEX(0, (wx * 64 + twx * 4), BN);
-    uint32_t W_lds_addr = smem_u32addr(W_shared + W_LoadS);
-    uint32_t I_lds_addr = smem_u32addr(I_shared + I_LoadS);
-
-    //1st_tile:
-    #pragma unroll
-    for (int i = 0; i < 4; ++i)
-    {
-        ldg32_nc_0(W_ldg_reg[i],W_ldg_ptr + i * K * sizeof(float),true);
-    }
-    sts128(W_ldg_reg[0], W_ldg_reg[1], W_ldg_reg[2], W_ldg_reg[3],W_sts_addr);
-    #pragma unroll
-    for (int i = 0; i < 4; ++i)
-    {
-        ldg32_nc_0(I_ldg_reg[i],I_ldg_ptr + i * 32 * sizeof(float),true);
-    }
-    #pragma unroll
-    for (int i = 0; i < 4; ++i)
-    {
-        sts32(I_ldg_reg[i], I_sts_addr + i * 32 * sizeof(float));
-    }
-    __syncthreads();
-    W_ldg_ptr += BK * sizeof(float);
-    I_ldg_ptr += BK * N * sizeof(float);
-    W_sts_addr ^= 0x2000;
-    I_sts_addr ^= 0x1000;
-
-    lds128(W_reg[0][0], W_reg[0][1], W_reg[0][2], W_reg[0][3], W_lds_addr);
-    lds128(W_reg[0][4], W_reg[0][5], W_reg[0][6], W_reg[0][7], W_lds_addr + 4 * 4 * sizeof(float));
-    lds128(I_reg[0][0], I_reg[0][1], I_reg[0][2], I_reg[0][3], I_lds_addr);
-    lds128(I_reg[0][4], I_reg[0][5], I_reg[0][6], I_reg[0][7], I_lds_addr + 4 * 8 * sizeof(float));
-
-    // OUTERMOST PHASES: K/BK times
-    for (int phase = 0; phase < (K / BK - 1); phase++)
-    {
-        // ITERATIONS : BK times
-        #pragma unroll
-        for (int iter = 0; iter < BK ;iter++)
-        {
-            // next phase: ldreg->share
-            if(iter == BK - 1)
-            {
-                sts128(W_ldg_reg[0], W_ldg_reg[1], W_ldg_reg[2], W_ldg_reg[3],W_sts_addr);
-                #pragma unroll
-                for (int i = 0; i < 4; ++i)
-                {
-                    sts32(I_ldg_reg[i], I_sts_addr + i * 32 * sizeof(float));
-                }
-                __syncthreads();
-                W_ldg_ptr += BK * sizeof(float);
-                I_ldg_ptr += BK * N * sizeof(float);
-                W_lds_addr ^= 0x2000;
-                I_lds_addr ^= 0x1000;
-                W_sts_addr ^= 0x2000;
-                I_sts_addr ^= 0x1000;
-            }
-            // next iter: share->registers
-            int nI = (iter + 1) % 2;
-            int nrowS = (iter + 1) % BK;
-            int offW = nrowS * (BM + 4);
-            int offI = nrowS * BN;
-            lds128(W_reg[nI][0], W_reg[nI][1], W_reg[nI][2], W_reg[nI][3], W_lds_addr + offW * sizeof(float));
-            lds128(W_reg[nI][4], W_reg[nI][5], W_reg[nI][6], W_reg[nI][7], W_lds_addr + (offW + 16) * sizeof(float));
-            lds128(I_reg[nI][0], I_reg[nI][1], I_reg[nI][2], I_reg[nI][3], I_lds_addr + offI * sizeof(float));
-            lds128(I_reg[nI][4], I_reg[nI][5], I_reg[nI][6], I_reg[nI][7], I_lds_addr + (offI + 32) * sizeof(float));
-            // next phase:global->ldreg
-            if (iter == 0) {
-                #pragma unroll
-                for (int i = 0; i < 4; ++i)
-                {
-                    ldg32_nc_0(W_ldg_reg[i],W_ldg_ptr + i * K * sizeof(float),true);
-                }
-                #pragma unroll
-                for (int i = 0; i < 4; ++i)
-                {
-                    ldg32_nc_0(I_ldg_reg[i],I_ldg_ptr + i * 32 * sizeof(float),true);
-                }
-            }
-            // calculate
-            {
-            int cI = iter % 2;
-            #pragma unroll
-            for (int i = 0; i < Tsize; ++i) {
-                #pragma unroll
-                for (int j = 0; j < Tsize; ++j) {
-                    O_reg[i][j] += W_reg[cI][i] * I_reg[cI][j];
-                }
-            }
-            }
-        }
-    }
-    // LAST PHASE
-    #pragma unroll
-    for (int iter = 0 ; iter < BK ; iter++)
-    {
-        // next iter: share->registers
-        if (iter < (BK -1))
-        {
-            int nI = (iter + 1) % 2;
-            int nrowS = (iter + 1) % BK;
-            
-            int offW = nrowS * (BM + 4);
-            int offI = nrowS * BN;
-            lds128(W_reg[nI][0], W_reg[nI][1], W_reg[nI][2], W_reg[nI][3], W_lds_addr + offW * sizeof(float));
-            lds128(W_reg[nI][4], W_reg[nI][5], W_reg[nI][6], W_reg[nI][7], W_lds_addr + (offW + 16) * sizeof(float));
-            lds128(I_reg[nI][0], I_reg[nI][1], I_reg[nI][2], I_reg[nI][3], I_lds_addr + offI * sizeof(float));
-            lds128(I_reg[nI][4], I_reg[nI][5], I_reg[nI][6], I_reg[nI][7], I_lds_addr + (offI + 32) * sizeof(float));
-        }
-        // calculate
-        {
-            int cI = iter % 2;
-#pragma unroll
-            for (int i = 0; i < Tsize; ++i)
-            {
-#pragma unroll
-                for (int j = 0; j < Tsize; ++j)
-                {
-                    O_reg[i][j] += W_reg[cI][i] * I_reg[cI][j];
-                }
-            }
-        }
-    }
-
-     int O_grow = by * BM + wy * 32 + twy * 4;
-    // int O_gcol = bx * BN + wx * 64 + twx * 4;
-    //int O_StoreG = INDEX(O_grow, O_gcol, N)+bO;
-    //convBias and batchnorm and relu
-    float mean[8] = {0};
-    float var[8] = {0};
-    float bnW[8] = {0};
-    float bnB[8] = {0};
-    float cvB[8] = {0};
-    #pragma unroll
-    for (int i = 0; i < 2; ++i)
-    {
-        for (int j = 0; j < 4; ++j)
-        {
-            int sIdx = i * 4 + j;
-            int gIdx = O_grow + i*16+j;
-            cvB[sIdx] = convBias[gIdx];
-            mean[sIdx] = bnRM[gIdx];
-            var[sIdx] = bnRV[gIdx];
-            bnW[sIdx] = bnWeights[gIdx];
-            bnB[sIdx] = bnBias[gIdx];
-        }
-    }
-    #pragma unroll
-    for (int i = 0; i < 4; ++i)
-    {
-        for (int j = 0; j < 4; ++j)
-        {
-            float res1 = O_reg[i][j];
-            float res2 = O_reg[i][j+4];
-            float res3 = O_reg[i+4][j];
-            float res4 = O_reg[i+4][j+4];
-            res1 += cvB[i];
-            res2 += cvB[i];
-            res3 += cvB[i+4];
-            res4 += cvB[i+4];
-            res1 = __fdividef((res1 - mean[i]),sqrt(var[i] + esp)) * bnW[i] + bnB[i];
-            res1 = max(0.0f, res1);
-            res2 = __fdividef((res2 - mean[i]),sqrt(var[i] + esp)) * bnW[i] + bnB[i];
-            res2 = max(0.0f, res2);
-            res3 = __fdividef((res3 - mean[i+4]),sqrt(var[i+4] + esp))* bnW[i+4] + bnB[i+4];
-            res3 = max(0.0f, res3);
-            res4 = __fdividef((res4 - mean[i+4]),sqrt(var[i+4] + esp)) * bnW[i+4] + bnB[i+4];
-            res4 = max(0.0f, res4);
-            O_reg[i][j] = res1;
-            O_reg[i][j+4] = res2;
-            O_reg[i+4][j] = res3;
-            O_reg[i+4][j+4] = res4;
-        }
-    }
-    uint32_t C_sts_addr = smem_u32addr((float4 *)(smem + warpIdx * 2048) +
-                                       twy * 4 * 8 + twx);
-    const float *C_lds_ptr = (float *)(smem + warpIdx * 2048) + twIdx;
-
-    uint32_t m_idx = blockIdx.y * 128 + warpIdx / 2 * 32;
-    uint32_t n_idx = blockIdx.x * 128 + warpIdx % 2 * 64 + twIdx;
-
-    float *C_stg_ptr = output + m_idx * N + n_idx+bO;
-
-    
-        #pragma unroll
-        for (int i = 0; i < 2; ++i) {
-            #pragma unroll
-            for (int j = 0; j < 2; ++j) {
-                StgFrag stg_frag(O_reg, j, i);
-
-                C_tile_wb(stg_frag,
-                          C_stg_ptr + i * 16 * N + j * 32,
-                          C_lds_ptr,
-                          C_sts_addr,
-                          M,
-                          N,
-                          m_idx + i * 16,
-                          n_idx + j * 32);
-            }
-        }
-}
-__global__ void CBR_1024x128N_kernel(int M,int batchSize,int N,int K,float* input, 
-float* convWeights, float* convBias, 
-float* bnWeights,float* bnBias,float* bnRM,float* bnRV,float* output,float esp = 1e-5 )
-{   
-    // param-set : variable
-    int BM = 128;
-    int BN = 128;
-    // param-set : fix
-    int BK = 8;
-    int Tsize = 8; //thread 8*8 = 2*2 * 4*4
-    // matrix
-    int tx = threadIdx.x;
-    int bx = blockIdx.x;
-    int by = blockIdx.y;
-    int b = blockIdx.z;
-    int bI = b * K * N ;
-    int bO = b * M * N ;
-    // output arrange
-    int warpIdx = tx / 32; // 4x8 threads per Warp
-    int twIdx = tx % 32;
-    int wx = warpIdx % 2;      // th -> 8x8  warp-> 32x64
-    int wy = warpIdx / 2;      // 4x2 warps per Block
-    int twx = (twIdx / 2) % 8; 
-    int twy = (twIdx / 16) * 2 + (twIdx % 2);
-
-    //shared memory & registers
-    __shared__ __align__(16 * 1024) char smem[24 * 1024];
-    float *W_shared = reinterpret_cast<float *>(smem);
-    float *I_shared = reinterpret_cast<float *>(smem + 16 * 1024);
-    float W_ldg_reg[4];
-    float I_ldg_reg[4];
-
-    float W_reg[2][8]={0};
-    float I_reg[2][8]={0};
-    float O_reg[8][8] = {0};
-
-    int W_grow = by * BM + tx / BK * 4; // 每BK个threads:连续4行读取1个数
-    int W_gcol = 0 + tx % BK;
-    int I_grow = 0 + tx / 32; // 32个threads读32个数，重复四次 刚好是一行:INTERLEAVE
-    int I_gcol = bx * BN + tx % 32;
-    int W_LoadG = INDEX(W_grow, W_gcol, K);
-    int I_LoadG = INDEX(I_grow, I_gcol, N)+bI;
-    const char *W_ldg_ptr = (const char *)(convWeights+W_LoadG);
-    const char *I_ldg_ptr = (const char *)(input + I_LoadG);
-
-    int W_srow = tx % BK; // 转置
-    int W_scol = tx / BK * 4;
-    int I_srow = tx / 32;
-    int I_scol = tx % 32;
-    int W_StoreS = INDEX(W_srow, W_scol, BM + 4);
-    int I_StoreS = INDEX(I_srow, I_scol, BN);
-    uint32_t W_sts_addr = smem_u32addr(W_shared + W_StoreS);
-    uint32_t I_sts_addr = smem_u32addr(I_shared + I_StoreS);
-
-    int W_LoadS = INDEX(0, (wy * 32 + twy * 4), BM + 4);
-    int I_LoadS = INDEX(0, (wx * 64 + twx * 4), BN);
-    uint32_t W_lds_addr = smem_u32addr(W_shared + W_LoadS);
-    uint32_t I_lds_addr = smem_u32addr(I_shared + I_LoadS);
-
-    //1st_tile:
-    #pragma unroll
-    for (int i = 0; i < 4; ++i)
-    {
-        ldg32_nc_0(W_ldg_reg[i],W_ldg_ptr + i * K * sizeof(float),true);
-    }
-    sts128(W_ldg_reg[0], W_ldg_reg[1], W_ldg_reg[2], W_ldg_reg[3],W_sts_addr);
-    #pragma unroll
-    for (int i = 0; i < 4; ++i)
-    {
-        ldg32_nc_0(I_ldg_reg[i],I_ldg_ptr + i * 32 * sizeof(float),true);
-    }
-    #pragma unroll
-    for (int i = 0; i < 4; ++i)
-    {
-        sts32(I_ldg_reg[i], I_sts_addr + i * 32 * sizeof(float));
-    }
-    __syncthreads();
-    W_ldg_ptr += BK * sizeof(float);
-    I_ldg_ptr += BK * N * sizeof(float);
-    W_sts_addr ^= 0x2000;
-    I_sts_addr ^= 0x1000;
-
-    lds128(W_reg[0][0], W_reg[0][1], W_reg[0][2], W_reg[0][3], W_lds_addr);
-    lds128(W_reg[0][4], W_reg[0][5], W_reg[0][6], W_reg[0][7], W_lds_addr + 4 * 4 * sizeof(float));
-    lds128(I_reg[0][0], I_reg[0][1], I_reg[0][2], I_reg[0][3], I_lds_addr);
-    lds128(I_reg[0][4], I_reg[0][5], I_reg[0][6], I_reg[0][7], I_lds_addr + 4 * 8 * sizeof(float));
-
-    // OUTERMOST PHASES: K/BK times
-    for (int phase = 0; phase < (K / BK - 1); phase++)
-    {
-        // ITERATIONS : BK times
-        #pragma unroll
-        for (int iter = 0; iter < BK ;iter++)
-        {
-            // next phase: ldreg->share
-            if(iter == BK - 1)
-            {
-                sts128(W_ldg_reg[0], W_ldg_reg[1], W_ldg_reg[2], W_ldg_reg[3],W_sts_addr);
-                #pragma unroll
-                for (int i = 0; i < 4; ++i)
-                {
-                    sts32(I_ldg_reg[i], I_sts_addr + i * 32 * sizeof(float));
-                }
-                __syncthreads();
-                W_ldg_ptr += BK * sizeof(float);
-                I_ldg_ptr += BK * N * sizeof(float);
-                W_lds_addr ^= 0x2000;
-                I_lds_addr ^= 0x1000;
-                W_sts_addr ^= 0x2000;
-                I_sts_addr ^= 0x1000;
-            }
-            // next iter: share->registers
-            int nI = (iter + 1) % 2;
-            int nrowS = (iter + 1) % BK;
-            int offW = nrowS * (BM + 4);
-            int offI = nrowS * BN;
-            lds128(W_reg[nI][0], W_reg[nI][1], W_reg[nI][2], W_reg[nI][3], W_lds_addr + offW * sizeof(float));
-            lds128(W_reg[nI][4], W_reg[nI][5], W_reg[nI][6], W_reg[nI][7], W_lds_addr + (offW + 16) * sizeof(float));
-            lds128(I_reg[nI][0], I_reg[nI][1], I_reg[nI][2], I_reg[nI][3], I_lds_addr + offI * sizeof(float));
-            lds128(I_reg[nI][4], I_reg[nI][5], I_reg[nI][6], I_reg[nI][7], I_lds_addr + (offI + 32) * sizeof(float));
-            // next phase:global->ldreg
-            if (iter == 0) {
-                #pragma unroll
-                for (int i = 0; i < 4; ++i)
-                {
-                    ldg32_nc_0(W_ldg_reg[i],W_ldg_ptr + i * K * sizeof(float),true);
-                }
-                #pragma unroll
-                for (int i = 0; i < 4; ++i)
-                {
-                    ldg32_nc_0(I_ldg_reg[i],I_ldg_ptr + i * 32 * sizeof(float),true);
-                }
-            }
-            // calculate
-            {
-            int cI = iter % 2;
-            #pragma unroll
-            for (int i = 0; i < Tsize; ++i) {
-                #pragma unroll
-                for (int j = 0; j < Tsize; ++j) {
-                    O_reg[i][j] += W_reg[cI][i] * I_reg[cI][j];
-                }
-            }
-            }
-        }
-    }
-    // LAST PHASE
-    #pragma unroll
-    for (int iter = 0 ; iter < BK ; iter++)
-    {
-        // next iter: share->registers
-        if (iter < (BK -1))
-        {
-            int nI = (iter + 1) % 2;
-            int nrowS = (iter + 1) % BK;
-            int offW = nrowS * (BM + 4);
-            int offI = nrowS * BN;
-            lds128(W_reg[nI][0], W_reg[nI][1], W_reg[nI][2], W_reg[nI][3], W_lds_addr + offW * sizeof(float));
-            lds128(W_reg[nI][4], W_reg[nI][5], W_reg[nI][6], W_reg[nI][7], W_lds_addr + (offW + 16) * sizeof(float));
-            lds128(I_reg[nI][0], I_reg[nI][1], I_reg[nI][2], I_reg[nI][3], I_lds_addr + offI * sizeof(float));
-            lds128(I_reg[nI][4], I_reg[nI][5], I_reg[nI][6], I_reg[nI][7], I_lds_addr + (offI + 32) * sizeof(float));
-        }
-        // calculate
-        {
-            int cI = iter % 2;
-#pragma unroll
-            for (int i = 0; i < Tsize; ++i)
-            {
-#pragma unroll
-                for (int j = 0; j < Tsize; ++j)
-                {
-                    O_reg[i][j] += W_reg[cI][i] * I_reg[cI][j];
-                }
-            }
-        }
-    }
-
-     int O_grow = by * BM + wy * 32 + twy * 4;
-    // int O_gcol = bx * BN + wx * 64 + twx * 4;
-    //int O_StoreG = INDEX(O_grow, O_gcol, N)+bO;
-    //convBias and batchnorm and relu
-    float mean[8] = {0};
-    float var[8] = {0};
-    float bnW[8] = {0};
-    float bnB[8] = {0};
-    float cvB[8] = {0};
-    #pragma unroll
-    for (int i = 0; i < 2; ++i)
-    {
-        for (int j = 0; j < 4; ++j)
-        {
-            int sIdx = i * 4 + j;
-            int gIdx = O_grow + i*16+j;
-            cvB[sIdx] = convBias[gIdx];
-            mean[sIdx] = bnRM[gIdx];
-            var[sIdx] = bnRV[gIdx];
-            bnW[sIdx] = bnWeights[gIdx];
-            bnB[sIdx] = bnBias[gIdx];
-        }
-    }
-    #pragma unroll
-    for (int i = 0; i < 4; ++i)
-    {
-        for (int j = 0; j < 4; ++j)
-        {
-            float res1 = O_reg[i][j];
-            float res2 = O_reg[i][j+4];
-            float res3 = O_reg[i+4][j];
-            float res4 = O_reg[i+4][j+4];
-            res1 += cvB[i];
-            res2 += cvB[i];
-            res3 += cvB[i+4];
-            res4 += cvB[i+4];
-            
-            res1 = __fdividef((res1 - mean[i]),sqrt(var[i] + esp)) * bnW[i] + bnB[i];
-            res1 = max(0.0f, res1);
-            res2 = __fdividef((res2 - mean[i]),sqrt(var[i] + esp)) * bnW[i] + bnB[i];
-            res2 = max(0.0f, res2);
-            res3 = __fdividef((res3 - mean[i+4]),sqrt(var[i+4] + esp))* bnW[i+4] + bnB[i+4];
-            res3 = max(0.0f, res3);
-            res4 = __fdividef((res4 - mean[i+4]),sqrt(var[i+4] + esp)) * bnW[i+4] + bnB[i+4];
-            res4 = max(0.0f, res4);
-            O_reg[i][j] =  res1;
-            O_reg[i][j+4] = res2;
-            O_reg[i+4][j] = res3;
-            O_reg[i+4][j+4] = res4;
-        }
-    }
-    #pragma unroll
-    for (int i = 0;i <8 ;i++)
-    {
-        float maxT = O_reg[i][0];
-        for (int j =1 ;j<8;j++)
-        {
-            if (O_reg[i][j]>maxT)
-            {
-                maxT = O_reg[i][j];
-            }
-        }
-    O_reg[i][0]= maxT;
-    }
-    
-    //warp内最大值规约 th 0 1 16 17 ，各8行
-    #pragma unroll
-    for (int offset = 8; offset > 1; offset >>= 1) {
-        for (int i = 0;i < 8 ;i++)
-        {
-            O_reg[i][0] = max(O_reg[i][0], __shfl_down_sync(0xFFFFFFFF, O_reg[i][0], offset));
-        }
-    }
-    if (twx == 0)
-    {
-        int O_gcol = bx * 2 + wx ;
-        #pragma unroll
-        for (int i = 0;i<2;i++)
-        {
-            for (int j =0 ;j <4;j++)
-            {
-                int O_grow = by * BM + wy * 32 + twy * 4 + i * 16 + j;
-                int O_StoreG = INDEX(O_grow, O_gcol, N/64) + bO/64;
-                output[O_StoreG] = O_reg[i*4+j][0];
-            }
-        }
-        
-    }
-}
-__global__ void CBRWRAP_Kernel_ic3(int TILEX,int TILEY,int outChannels,int batchSize,int numPoints,int inChannels,float* input, 
-float* convWeights, float* convBias, 
-float* bnWeights,float* bnBias,float* bnRM,float* bnRV,float* output,float esp = 1e-5 )
-{
-    int tx = threadIdx.x;
-    int ty = threadIdx.y;
-    int bx = blockIdx.x;
-    int by = blockIdx.y;
-    int np = tx + bx * blockDim.x;
-    int oc = ty + by * blockDim.y;
-    int b = blockIdx.z;
-    //printf("oc %d, batch %d, index %d\n",oc,b, index);
-    if(oc >= outChannels || np >= numPoints)
-        return ;
-    
-    float mean = bnRM[oc];
-    float var = bnRV[oc];
-    float bnW = bnWeights[oc];
-    float bnB = bnBias[oc];
-    float res = convBias[oc];
-
-    for (int ic = 0; ic < inChannels; ic++)
-    {
-        int ii = b * inChannels * numPoints + ic * numPoints + np;
-        int ww = oc * inChannels + ic;
-        res += input[ii] * convWeights[ww];
-    }
-    res = __fdividef((res - mean),sqrt(var + esp)) * bnW + bnB;
-    res = res > 0 ? res : 0;
-    output[b * numPoints * outChannels + oc * numPoints + np] = res;
-}
-void CBRWRAP_GPU(int batchSize,int numPoints,int inChannels,int outChannels,int kSize,float* input, 
-float* cudaConvWeights, float* cudaConvBias, 
-float* cudaBnWeights,float* cudaBnBias,float* cudaBnRM,float* cudaBnRV,float* output,float esp = 1e-5
-){
-    const int BLK_X = 32;
-    const int BLK_Y = 32;
-    dim3 blockDim(BLK_X,BLK_Y);
-    dim3 grid32(DIV_UP(numPoints, 32),DIV_UP(outChannels, 32),batchSize);//X:宽度 Y：高度
-    dim3 grid128(DIV_UP(numPoints, 128),DIV_UP(outChannels, 128),batchSize);
-    dim3 grid64(DIV_UP(numPoints, 64),DIV_UP(outChannels, 64),batchSize);
-    if (inChannels == 3)
-    {
-        CBRWRAP_Kernel_ic3<<<grid32, blockDim>>>(BLK_X, BLK_Y, outChannels, batchSize, numPoints, inChannels, input, cudaConvWeights, cudaConvBias,
-                                                  cudaBnWeights, cudaBnBias, cudaBnRM, cudaBnRV, output);
-    }
-    else if (outChannels == 1024 && inChannels == 128  && USECONVMAX == 1)
-    {
-        CBR_1024x128N_kernel<<<grid128, 256>>>(outChannels, batchSize, numPoints, inChannels, input, cudaConvWeights, cudaConvBias,
-                                                  cudaBnWeights, cudaBnBias, cudaBnRM, cudaBnRV, output);
-    }
-    else if (outChannels == 128 && inChannels == 64)
-    {
-        CBR_128x128N_kernel<<<grid128, 256>>>(outChannels, batchSize, numPoints, inChannels, input, cudaConvWeights, cudaConvBias,
-                                                  cudaBnWeights, cudaBnBias, cudaBnRM, cudaBnRV, output);
-    }
-    else
-    {
-        CBR_64x128N_kernel<<<grid64, 256>>>(outChannels, batchSize, numPoints, inChannels, input, cudaConvWeights, cudaConvBias,
-                                                  cudaBnWeights, cudaBnBias, cudaBnRM, cudaBnRV, output);
-    }
-}
-void GPU_CBR(int batchSize, int numPoints, int inics, int OC,wbBnP& wbBnP, float* input, float* reluOutput)
-{
-    CBRWRAP_GPU(batchSize,numPoints,inics,OC,1,input,wbBnP.weight,wbBnP.bias,
-    wbBnP.bn_weight,wbBnP.bn_bias,wbBnP.bn_mean,wbBnP.bn_var,reluOutput);
-}
-void GPU_CBR_3 (int OC1,int OC2,int OC3,int batchSize,int numPoints,int inics,CB3P &cb3p, float* input, float* output,float* relu1_output,float* relu2_output) {
-    //std::cout << "----START CBR_3" << std::endl;
-    GPU_CBR(batchSize, numPoints, inics, OC1, cb3p.cb1, input, relu1_output);
-    GPU_CBR(batchSize, numPoints, OC1, OC2, cb3p.cb2, relu1_output, relu2_output);
-    GPU_CBR(batchSize, numPoints, OC2, OC3, cb3p.cb3, relu2_output, output);
-}
-
-
-// ARCH FBR
-__global__ void FBRWRAP_Kernel_gemv(int M,int batchSize,int N,float* input, 
-float* fcWeights, float* fcBias, 
-float* bnWeights,float* bnBias,float* bnRM,float* bnRV,float* output,float esp = 1e-5 )
-{
-    // Block index
-    int bx = blockIdx.x;
-    int batch = blockIdx.y;
-
-    // Thread index
-    int tx = threadIdx.x;//0~31
-    int ty = threadIdx.y;//0~3
-
-    const int warp_size=32;
-    int laneId= tx % warp_size;
-    int current_row = 4 * bx + ty;
-
-    if(current_row < M){
-
-        int oc = current_row;
-        float mean = bnRM[oc];
-        float var = bnRV[oc];
-        float bnW = bnWeights[oc];
-        float bnB = bnBias[oc];
-        float res = 0.0f;
-
-        int kIteration = (N/warp_size)/4;
-        if(kIteration==0) kIteration=1;
-        // fcWeights = &fcWeights[current_row*N];
-        // input= &input[batch*N];
-        #pragma unroll
-        for(int i=0; i< kIteration; i++){
-            int current_col_vec = (i*warp_size + laneId);
-            float4 current_val= reinterpret_cast<float4 *>(fcWeights)[current_col_vec+current_row*N/4];
-            float4 current_x = reinterpret_cast<float4 *>(input)[current_col_vec+batch*N/4];
-            res += current_val.x*current_x.x;
-            res += current_val.y*current_x.y;
-            res += current_val.z*current_x.z;
-            res += current_val.w*current_x.w;
-        }
-
-        res += __shfl_down_sync(0xffffffff, res, 16); // 0-16, 1-17, 2-18, etc.
-        res += __shfl_down_sync(0xffffffff, res, 8);// 0-8, 1-9, 2-10, etc.
-        res += __shfl_down_sync(0xffffffff, res, 4);// 0-4, 1-5, 2-6, etc.
-        res += __shfl_down_sync(0xffffffff, res, 2);// 0-2, 1-3, 4-6, 5-7, etc.
-        res += __shfl_down_sync(0xffffffff, res, 1);// 0-1, 2-3, 4-5, etc.
-
-        
-        res+=fcBias[oc];
-        res = __fdividef((res - mean),sqrt(var + esp)) * bnW + bnB;
-        res = res > 0 ? res : 0;
-        int index = oc + batch * M;
-        if(laneId==0) output[index] = res;
-    }
-}
-__global__ void FBRWRAP_Kernel(int TILEX,int TILEY,int outFeatures,int batchSize,int inFeatures,float* input, 
-float* fcWeights, float* fcBias, 
-float* bnWeights,float* bnBias,float* bnRM,float* bnRV,float* output,float esp = 1e-5 )
-{
-    int tx = threadIdx.x;
-    int ty = threadIdx.y;
-    int bx = blockIdx.x;
-    int by = blockIdx.y;
-
-    int oc = tx + bx * blockDim.x;
-    int curB = ty + by * blockDim.y;
-
-    if (oc < outFeatures && curB < batchSize)
-    {
-        float mean = bnRM[oc];
-        float var = bnRV[oc];
-        float bnW = bnWeights[oc];
-        float bnB = bnBias[oc];
-        float res = fcBias[oc];
-        for (int ic = 0; ic < inFeatures; ic++)
-        {
-            res +=
-                input[curB * inFeatures + ic] *
-                fcWeights[oc * inFeatures + ic];
-        }
-        res = __fdividef((res - mean),sqrt(var + esp)) * bnW + bnB;
-        res = res > 0 ? res : 0;
-        int index = oc + curB * outFeatures;
-        output[index] = res;
-    }
-}
-void FBRWRAP_GPU(int batchSize,int inFeatures,int outFeatures,float* input, 
-float* cudaFcWeights, float* cudaFcBias, 
-float* cudaBnWeights,float* cudaBnBias,float* cudaBnRM,float* cudaBnRV,float* output,float esp = 1e-5
-){
-    //std::cout << "------------LAYER:FBRWRAP" << std::endl;
-    // printf("inchannel %d,numPoints %d\n",inChannels,numPoints);
-    // if (inFeatures > 512)
-    // {
-    // const int BLK_X = 32;
-    // const int BLK_Y = 32;
-    // dim3 blockDim(BLK_X,BLK_Y);
-    // dim3 gridDim((outFeatures + BLK_X - 1) / BLK_X,(batchSize + BLK_Y - 1) / BLK_Y);//X:宽度 Y：高度
-    // FBRWRAP_Kernel<<<gridDim,blockDim>>>(BLK_X,BLK_Y,outFeatures,batchSize,inFeatures,input,cudaFcWeights,cudaFcBias,cudaBnWeights,cudaBnBias,cudaBnRM,cudaBnRV,
-    // output);
-    // }
-    // else
-    {
-dim3 blockDim(32,4);
-dim3 gridDim((outFeatures + 4 - 1) / 4,batchSize);//X:宽度 Y：高度
-FBRWRAP_Kernel_gemv<<<gridDim,blockDim>>>(outFeatures,batchSize,inFeatures,input,cudaFcWeights,cudaFcBias,cudaBnWeights,cudaBnBias,cudaBnRM,cudaBnRV,
-    output);
-    }
-
-    // // 检查内核启动是否成功
-    // CUDA_CHECK(cudaGetLastError());
-    // // 同步设备并检查执行错误
-    // CUDA_CHECK(cudaDeviceSynchronize());
-}
-void GPU_FBR(int batchSize, int inFeatures, 
-int outFeatures,wbBnP& fbp, float* input, float* reluOutput)
-{
-    FBRWRAP_GPU(batchSize,inFeatures,outFeatures,input,
-    fbp.weight,fbp.bias,
-    fbp.bn_weight,fbp.bn_bias,
-    fbp.bn_mean,fbp.bn_var,reluOutput);
-}
-void GPU_FBR_2_F(int OC1,int OC2,int OC3,int batchSize,int inics,FB2FP &fb2f, float* input, float* output,float* relu1_output,float* relu2_output,int param_offset=3)
-{
-    //std::cout << "----START FBR_2_F" << std::endl;
-    GPU_FBR(batchSize,inics,OC1,fb2f.fb1,input,relu1_output);
-    GPU_FBR(batchSize,OC1,OC2,fb2f.fb2,relu1_output,relu2_output);
-    Linear_GPU(batchSize,OC2, OC3,fb2f.f3.weight, fb2f.f3.bias, relu2_output, output);
-}
-
 
 //from darknet:TODO:
 __global__ void  fast_mean_kernel(float *x, int batch, int filters, int spatial, float *mean)
@@ -2814,7 +1446,9 @@ void GPU_CBR_3_train (bool relu,int OC1,int OC2,int OC3,int batchSize,int numPoi
 float* input, float* output,float* relu1_output,float* relu2_output,
 float* conv1_output,float* conv2_output,float* conv3_output,
 bn_layer& bn1,bn_layer& bn2,bn_layer& bn3) {
+#ifdef DEBUG
     std::cout << "----START CBR_3 TRAIN" << std::endl;
+#endif
     GPU_CBR_train(relu,batchSize, numPoints, inics, OC1, cb3p.cb1, input, relu1_output,conv1_output,bn1);
     GPU_CBR_train(relu,batchSize, numPoints, OC1, OC2, cb3p.cb2, relu1_output, relu2_output,conv2_output,bn2);
     GPU_CBR_train(relu,batchSize, numPoints, OC2, OC3, cb3p.cb3, relu2_output, output,conv3_output,bn3);
@@ -2889,7 +1523,9 @@ void GPU_FBR_2_F_train(int OC1,int OC2,int OC3,int batchSize,int inics,FB2FP &fb
 float* input, float* output,float* relu1_output,float* relu2_output,
 float* fc1_output,float* fc2_output,bn_layer& bn1,bn_layer& bn2,int param_offset=3)
 {
+#ifdef DEBUG
     std::cout << "----START FBR_2_F TRAIN" << std::endl;
+#endif
     GPU_FBR_train(batchSize,inics,OC1,fb2f.fb1,input,relu1_output,fc1_output,bn1);
     GPU_FBR_train(batchSize,OC1,OC2,fb2f.fb2,relu1_output,relu2_output,fc2_output,bn2);
     Linear_GPU(batchSize,OC2, OC3,fb2f.f3.weight, fb2f.f3.bias, relu2_output, output);
@@ -3121,17 +1757,40 @@ float* delta_fc1,float* delta_fc2,float* delta_from,
 float* delta_relu1,float* delta_relu2,float* delta_gen, 
 bn_layer& bn1,bn_layer& bn1_delta,bn_layer& bn2,bn_layer& bn2_delta){
 
+#ifdef BACKDEBUG
     std::cout << "----START FBR2F_bp" << std::endl;
+#endif
     F_bp(batchSize,OC2,OC3,relu2_output,fb2f.f3.weight,
     delta_from,delta_relu2,fb2f_up.f3.weight,fb2f_up.f3.bias);
 
-    FBR_bp(batchSize,OC1,OC2,
-    fb2f.fb2, fb2f_up.fb2, relu1_output, relu2_output, fc2_output,
-    delta_relu2, delta_fc2, delta_relu1, bn2, bn2_delta);
+    // FBR_bp(batchSize,OC1,OC2,
+    // fb2f.fb2, fb2f_up.fb2, relu1_output, relu2_output, fc2_output,
+    // delta_relu2, delta_fc2, delta_relu1, bn2, bn2_delta);
     
-    FBR_bp(batchSize,inics,OC1,
-    fb2f.fb1, fb2f_up.fb1,  input, relu1_output, fc1_output,
-    delta_relu1, delta_fc1, delta_gen, bn1, bn1_delta);
+    // FBR_bp(batchSize,inics,OC1,
+    // fb2f.fb1, fb2f_up.fb1,  input, relu1_output, fc1_output,
+    // delta_relu1, delta_fc1, delta_gen, bn1, bn1_delta);
+}
+
+// BP_UPDATE_Momentum(dParams.nonep.f3.weight,upParams.nonep.f3.weight,moParams.nonep.f3.weight,256*10);
+
+// void BP_UPDATE_FB(float *N, float *delta, float *momentum, int width, float learning_rate=-0.01f, float momentum_factor=0.9f) {
+//     BP_UPDATE_Kernal_Momentum<<<cuda_gridsize(width), BLOCK>>>(N, delta, momentum, width, learning_rate, momentum_factor);
+//     check_error(cudaPeekAtLastError());
+// }
+
+__global__ void BP_UPDATE_Kernal_Momentum(float *N, float *delta, float *momentum, int width, float learning_rate, float momentum_factor) {
+    int index = (blockIdx.x + blockIdx.y*gridDim.x) * blockDim.x + threadIdx.x;
+    if (index < width) {
+        //printf("index: %d\n", index);
+        //printf("%f ", momentum[index]);
+        momentum[index] = momentum_factor * momentum[index] + (1-momentum_factor) * delta[index];
+        N[index] = N[index] + learning_rate*momentum[index];
+    }
+}
+void BP_UPDATE_Momentum(float *N, float *delta, float *momentum, int width, float learning_rate=-0.01f, float momentum_factor=0.9f) {
+    BP_UPDATE_Kernal_Momentum<<<cuda_gridsize(width), BLOCK>>>(N, delta, momentum, width, learning_rate, momentum_factor);
+    check_error(cudaPeekAtLastError());
 }
 
 void Train_GPU (int inChannels,int batchSize,int numPoints,
@@ -3390,7 +2049,9 @@ void Train_GPU (int inChannels,int batchSize,int numPoints,
     delta.softmax_input = device_delta+offset;offset += cla_3;
     delta.softmax_output = device_delta+offset;offset+= cla_4;
 
+#ifdef DEBUG
     std::cout << "PART1:STN3d, forwaring" << std::endl;
+#endif
     int maxnp = USECONVMAX? numPoints / 64 : numPoints;
     GPU_transpose(input,net.input_trans,batchSize,numPoints,inChannels);
     GPU_CBR_3_train(true,OC1,OC2,OC3, batchSize, numPoints,inChannels,dParams.stn3dp.cb3, net.input_trans, 
@@ -3402,13 +2063,18 @@ void Train_GPU (int inChannels,int batchSize,int numPoints,
     net.stn3d_out,net.relu1_output_stn_fbr2f,net.relu1_output_stn_fbr2f,
     net.fc1_output_stn_cbr,net.fc2_output_stn_cbr,net.bn1_stn_fbr2f,net.bn2_stn_fbr2f);// fc-bn-relu * 2 + fc
     matrix_add_I(net.stn3d_out,3,batchSize);
+
+#ifdef DEBUG
     std::cout << "PART2:TRANS->BMM->TRANS->CBR, forwarding" << std::endl;
+#endif
     GPU_Bmm(input,net.stn3d_out,net.bmm1_res,numPoints,inChannels,inChannels,encoderIC1,batchSize);
     GPU_transpose(net.bmm1_res,net.bmm1_res_trans,batchSize,numPoints,encoderIC1);
     //GPU_CBR(batchSize,numPoints,encoderIC1,fstn_inChannel,dParams.featp.cb1,net.bmm1_res_trans,net.fstn_input);
     GPU_CBR_train(true,batchSize,numPoints,encoderIC1,fstn_inChannel,dParams.featp.cb1,net.bmm1_res_trans,net.fstn_input,net.fstn_input_conv,net.fstn_input_bn);
-    
+
+#ifdef DEBUG
     std::cout << "PART3:STNkd, forwarding"<< std::endl;
+#endif
     GPU_CBR_3_train(true,fstn_OC1,fstn_OC2,fstn_OC3, batchSize, numPoints,fstn_inChannel,dParams.stnkdp.cb3, net.fstn_input, 
     net.fstn_CBR3_output,net.relu1_output_fstn_cbr,net.relu2_output_fstn_cbr,
     net.conv1_output_fstn_cbr,net.conv2_output_fstn_cbr,net.conv3_output_fstn_cbr,
@@ -3419,7 +2085,9 @@ void Train_GPU (int inChannels,int batchSize,int numPoints,
     net.fc1_output_fstn_fbr2f,net.fc2_output_fstn_fbr2f,net.bn1_fstn_fbr2f,net.bn2_fstn_fbr2f);// fc-bn-relu * 2 + fc
     matrix_add_I(net.stnkd_out,64,batchSize);
 
+#ifdef DEBUG
     std::cout << "PART4:TRANS->BMM->TRANS->CBR->CBM, forwarding" << std::endl;
+#endif
     GPU_transpose(net.fstn_input,net.fstn_input_trans,batchSize,fstn_inChannel,numPoints);
     GPU_Bmm(net.fstn_input_trans,net.stnkd_out,net.fstn_bmm1_res,numPoints,fstn_inChannel,fstn_inChannel,fstn_inChannel,batchSize);
     GPU_transpose(net.fstn_bmm1_res,net.fstn_bmm1_res_trans,batchSize,numPoints,fstn_inChannel);
@@ -3432,8 +2100,9 @@ void Train_GPU (int inChannels,int batchSize,int numPoints,
     dParams.featp.cb3,net.cbr2_output, net.feat_bn3,net.feat_bn3_conv,net.feat_bn3_bn);
     GPU_MaxPooling_train(encoderOC3, batchSize, maxnp,net.feat_bn3, net.encoder_output, net.encoder_output_idx); // Max pooling
     
-
+#ifdef DEBUG
     std::cout << "PART5:CLASSIFY, forwarding" << std::endl;
+#endif
     GPU_FBR_2_F_train(512,256,10,batchSize,encoderOC3,dParams.nonep,
     net.encoder_output,net.softmax_input,
     net.relu1_output_part5_fbr2f,net.relu2_output_part5_fbr2f,
@@ -3441,7 +2110,9 @@ void Train_GPU (int inChannels,int batchSize,int numPoints,
     LogSoftMax_GPU_train(label,net.softmax_input,
     net.softmax_output,delta.softmax_input,correct_table,10,batchSize);
 
+#ifdef BACKDEBUG
     std::cout << "BACKWARDING" << std::endl;
+#endif
     FBR2F_bp(512,256,10, batchSize, encoderOC3, dParams.nonep, upParams.nonep,
     net.encoder_output,net.relu1_output_part5_fbr2f,net.relu2_output_part5_fbr2f,
     net.fc1_output_part5_fbr2f,net.fc2_output_part5_fbr2f,
@@ -3451,6 +2122,9 @@ void Train_GPU (int inChannels,int batchSize,int numPoints,
     net.bn1_part5_fbr2f,delta.bn1_part5_fbr2f,
     net.bn2_part5_fbr2f,delta.bn2_part5_fbr2f
     );
+    //printVector_GPU(moParams.nonep.f3.weight, 10);
+    BP_UPDATE_Momentum(dParams.nonep.f3.weight,upParams.nonep.f3.weight,moParams.nonep.f3.weight,256*10);
+    //printVector_GPU(moParams.nonep.f3.weight, 10);
     //FC_bp(batchSize,)
     // F->RB->F->RB->F
     // MAX->B->C -> RB->C -> TRANS-> ......
@@ -3475,7 +2149,7 @@ int main(int argc, char *argv[]) {
     std::vector<int> list_of_labels;
     read_h5_file(file_path, list_of_points, list_of_labels);
     int all_num = list_of_points.size();
-    //all_num = 64;
+    //all_num = 32;
     //分配内存，迁移权重到device端
     read_stndP("feat.stn.", dParams.stn3dp);
     read_stndP("feat.fstn.", dParams.stnkdp);
@@ -3487,6 +2161,11 @@ int main(int argc, char *argv[]) {
     read_CB3P("feat.", upParams.featp,true);
     read_FB2FP("", upParams.nonep, 0 , true);
 
+    read_stndP("feat.stn.", moParams.stn3dp,true);
+    read_stndP("feat.fstn.", moParams.stnkdp,true);
+    read_CB3P("feat.", moParams.featp,true);
+    read_FB2FP("", moParams.nonep, 0 , true);
+    //printVector_GPU(moParams.nonep.f3.weight, 10);
     //分配内存 for 输入：device端
     size_t total_size = 0;
     float *device_all_points;
@@ -3541,9 +2220,7 @@ int main(int argc, char *argv[]) {
     }
 
     // 开始计时，使用chrono计时，不支持其它计时方式
-    auto start = std::chrono::high_resolution_clock::now();
-    int correct_num =0;
-    int inf_offset = 0;
+    // auto start = std::chrono::high_resolution_clock::now();
     
     // 分配输出内存：device端
     int* correct_table;
@@ -3551,7 +2228,6 @@ int main(int argc, char *argv[]) {
     float *device_output;
     float *device_delta;
     long long max_output_size = cal_tnet_size(batchSize, maxNp, ic); // batchSize > curB maxNp > np
-    printf("max_output_size: %lld\n", max_output_size);
     cudaMalloc((void **)&correct_table, all_num * sizeof(int));
     cudaMalloc((void **)&device_labels, all_num * sizeof(int));
     cudaMalloc((void **)&device_output, max_output_size * sizeof(float));
@@ -3559,46 +2235,51 @@ int main(int argc, char *argv[]) {
     cudaMemcpy(device_labels, list_of_labels.data(), all_num * sizeof(int), cudaMemcpyHostToDevice);
 
     // 开始推理
-    for (size_t i = 0; i < all_num; i+=batchSize) {
-        size_t curB = std::min(batchSize, all_num - i);
-        size_t np = list_of_points[i].size() / ic;
-        for (int j = 0; j < curB; j++) {np = std::min(np, list_of_points[i + j].size() / ic);}
-        np = ALIGN_DOWN(np, GEMMBLKMAX);
-        if (use_sample == 1) np = npoint;
-        Train_GPU(ic, curB, np, correct_table + i, device_labels + i, 
-        device_all_points + inf_offset, device_output, device_delta);
-        inf_offset += curB * np * ic;
-        //cudaMemset(device_output, 0, cal_tnet_size(curB, np, ic) * sizeof(float));
+    for (size_t e = 0; e < EPOCH; e++)
+    {
+        printf("epoch: %d\n", e);
+        auto start = std::chrono::high_resolution_clock::now();//STRAT
+        int correct_num =0;
+        int inf_offset = 0;
+        for (size_t i = 0; i < all_num; i+=batchSize) {
+            size_t curB = std::min(batchSize, all_num - i);
+            size_t np = list_of_points[i].size() / ic;
+            for (int j = 0; j < curB; j++) {np = std::min(np, list_of_points[i + j].size() / ic);}
+            np = ALIGN_DOWN(np, GEMMBLKMAX);
+            if (use_sample == 1) np = npoint;
+            Train_GPU(ic, curB, np, correct_table + i, device_labels + i, 
+            device_all_points + inf_offset, device_output, device_delta);
+            inf_offset += curB * np * ic;
+            //cudaMemset(device_output, 0, cal_tnet_size(curB, np, ic) * sizeof(float));
+        }
+        // 计算准确率
+        std::vector<int> result(all_num,0);
+        cudaMemcpy(result.data(), correct_table, all_num * sizeof(int), cudaMemcpyDeviceToHost);
+        for (size_t i = 0; i < all_num; i++) {
+            correct_num += result[i];
+        }
+	    float correct_rate = (float)correct_num/all_num; 
+        //END
+        cudaDeviceSynchronize();// 向主机端同步以等待所有异步调用的GPU kernel执行完毕，这句必须要有
+        auto end = std::chrono::high_resolution_clock::now();
+        std::chrono::duration<double> diff = end - start;
+        std::cout << std::fixed << std::setprecision(4) << diff.count() << ":" << std::setprecision(4) << correct_rate;
     }
-
-    // 计算准确率
-    std::vector<int> result(all_num,0);
-    cudaMemcpy(result.data(), correct_table, all_num * sizeof(int), cudaMemcpyDeviceToHost);
-    for (size_t i = 0; i < all_num; i++) {
-        correct_num += result[i];
-    }
-	float correct_rate = (float)correct_num/all_num; //(float)list_of_labels.size();
 
     // 释放内存
-    //cudaProfilerStop();
     freeDP(dParams);//权重
     freeDP(upParams, true);//更新权重
+    freeDP(moParams, true);
     cudaFree(device_labels);//label
     cudaFree(device_all_points);//输入
     cudaFree(device_output);//输出
     cudaFree(device_delta);//delta
     cudaFree(correct_table);//正确表
 
-	// 向主机端同步以等待所有异步调用的GPU kernel执行完毕，这句必须要有
-	cudaDeviceSynchronize();
-
-    // 结束计时
-    auto end = std::chrono::high_resolution_clock::now();
-    //cudaProfilerStop();
-    std::chrono::duration<double> diff = end - start;
-
-    // 输出结果，请严格保持此输出格式，并把0.0001替换成实际的准确率，请不要输出除了此结果之外的任何内容！！！
-    std::cout << std::fixed << std::setprecision(4) << diff.count() << ":" << std::setprecision(4) << correct_rate;
+	// cudaDeviceSynchronize();// 向主机端同步以等待所有异步调用的GPU kernel执行完毕，这句必须要有
+    // auto end = std::chrono::high_resolution_clock::now();
+    // std::chrono::duration<double> diff = end - start;
+    // std::cout << std::fixed << std::setprecision(4) << diff.count() << ":" << std::setprecision(4) << correct_rate;
     return 0;
 }
 

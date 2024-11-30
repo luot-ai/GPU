@@ -2926,11 +2926,156 @@ void backward_bias_gpu(float *bias_updates, float *delta, int batch, int n, int 
         backward_bias_kernel<<<n, DARKNETBLK>>>(bias_updates, delta, batch, n, size);
     }
 }
-void BR_bp(bool relu,int numFeatures, int batchSize, int numPoints,float* weight,float* bias,float* running_mean,float* running_var,float* input,float* output,float esp = 1e-5)
+__global__ void backward_scale_kernel(float *x_norm, float *delta, int batch, int n, int size, float *scale_updates)
 {
-    
+    __shared__ float part[BLOCK];
+    int i,b;
+    int filter = blockIdx.x;
+    int p = threadIdx.x;
+    float sum = 0;
+    for(b = 0; b < batch; ++b){
+        for(i = 0; i < size; i += BLOCK){
+            int index = p + i + size*(filter + n*b);
+            sum += (p+i < size) ? delta[index]*x_norm[index] : 0;
+        }
+    }
+    part[p] = sum;
+    __syncthreads();
+    if (p == 0) {
+        for(i = 0; i < BLOCK; ++i) scale_updates[filter]= part[i]; //TODO:+= part[i];
+    }
 }
-void FC_bp(int batchSize, int inFeatures, int outFeatures,float* input,float* weight,float * delta_from, float * delta_gen, float* weight_up, float* bias_up) {
+void backward_scale_gpu(float *x_norm, float *delta, int batch, int n, int size, float *scale_updates)
+{
+    backward_scale_kernel<<<n, BLOCK>>>(x_norm, delta, batch, n, size, scale_updates);
+    check_error(cudaPeekAtLastError());
+}
+__global__ void scale_bias_kernel(float *output, float *biases, int n, int size)
+{
+    int offset = blockIdx.x * blockDim.x + threadIdx.x;
+    int filter = blockIdx.y;
+    int batch = blockIdx.z;
+
+    if(offset < size) output[(batch*n+filter)*size + offset] *= biases[filter];
+}
+void scale_bias_gpu(float *output, float *biases, int batch, int n, int size)
+{
+    dim3 dimGrid((size-1)/BLOCK + 1, n, batch);
+    dim3 dimBlock(BLOCK, 1, 1);
+
+    scale_bias_kernel<<<dimGrid, dimBlock>>>(output, biases, n, size);
+    check_error(cudaPeekAtLastError());
+}
+__global__ void fast_mean_delta_kernel(float *delta, float *variance, int batch, int filters, int spatial, float *mean_delta)
+{
+    const int threads = BLOCK;
+    __shared__ float local[threads];
+
+    int id = threadIdx.x;
+    local[id] = 0;
+
+    int filter = blockIdx.x;
+
+    int i, j;
+    for(j = 0; j < batch; ++j){
+        for(i = 0; i < spatial; i += threads){
+            int index = j*spatial*filters + filter*spatial + i + id;
+            local[id] += (i+id < spatial) ? delta[index] : 0;
+        }
+    }
+
+    __syncthreads();
+
+    if(id == 0){
+        mean_delta[filter] = 0;
+        for(i = 0; i < threads; ++i){
+            mean_delta[filter] += local[i];
+        }
+        mean_delta[filter] *= (-1.f/sqrtf(variance[filter] + .00001f));
+    }
+}
+__global__ void fast_variance_delta_kernel(float *x, float *delta, float *mean, float *variance, int batch, int filters, int spatial, float *variance_delta)
+{
+    const int threads = BLOCK;
+    __shared__ float local[threads];
+
+    int id = threadIdx.x;
+    local[id] = 0;
+
+    int filter = blockIdx.x;
+
+    int i, j;
+    for(j = 0; j < batch; ++j){
+        for(i = 0; i < spatial; i += threads){
+            int index = j*spatial*filters + filter*spatial + i + id;
+
+            local[id] += (i+id < spatial) ? delta[index]*(x[index] - mean[filter]) : 0;
+        }
+    }
+
+    __syncthreads();
+
+    if(id == 0){
+        variance_delta[filter] = 0;
+        for(i = 0; i < threads; ++i){
+            variance_delta[filter] += local[i];
+        }
+        variance_delta[filter] *= -.5f * powf(variance[filter] + .00001f, (float)(-3.f/2.f));
+    }
+}
+void fast_mean_delta_gpu(float *delta, float *variance, int batch, int filters, int spatial, float *mean_delta)
+{
+    fast_mean_delta_kernel<<<filters, BLOCK>>>(delta, variance, batch, filters, spatial, mean_delta);
+    check_error(cudaPeekAtLastError());
+}
+void fast_variance_delta_gpu(float *x, float *delta, float *mean, float *variance, int batch, int filters, int spatial, float *variance_delta)
+{
+    fast_variance_delta_kernel<<<filters, BLOCK>>>(x, delta, mean, variance, batch, filters, spatial, variance_delta);
+    check_error(cudaPeekAtLastError());
+}
+__global__ void normalize_delta_kernel(int N, float *x, float *mean, float *variance, float *mean_delta, float *variance_delta, int batch, int filters, int spatial, float *delta)
+{
+    int index = (blockIdx.x + blockIdx.y*gridDim.x) * blockDim.x + threadIdx.x;
+    if (index >= N) return;
+    int f = (index/spatial)%filters;
+    
+    delta[index] = delta[index] * 1.f/(sqrtf(variance[f] + .00001f)) + variance_delta[f] * 2.f * (x[index] - mean[f]) / (spatial * batch) + mean_delta[f]/(spatial*batch);
+}
+void normalize_delta_gpu(float *x, float *mean, float *variance, float *mean_delta, float *variance_delta, int batch, int filters, int spatial, float *delta)
+{
+    size_t N = batch*filters*spatial;
+    normalize_delta_kernel<<<cuda_gridsize(N), BLOCK>>>(N, x, mean, variance, mean_delta, variance_delta, batch, filters, spatial, delta);
+    check_error(cudaPeekAtLastError());
+}
+__global__ void relu_detla_kernel(float *output,float *delta,int N)
+{
+    int i = (blockIdx.x + blockIdx.y*gridDim.x) * blockDim.x + threadIdx.x;
+    if(i < N) delta[i] = (output[i] == 0)?0:delta[i];
+}
+void relu_detla_gpu(float *output,float *delta,int N)
+{
+    relu_detla_kernel<<<cuda_gridsize(N), BLOCK>>>(output,delta,N);
+    check_error(cudaPeekAtLastError());
+}
+
+void BR_bp(bool relu,int numFeatures, int batchSize, int numPoints,
+float* weight, float* input,float* output,
+float* mean, float* var, float* norm,
+float* delta_from, float* delta_gen, float* delta_mean, float* delta_var,
+float* weight_up, float* bias_up,float esp = 1e-5)
+{
+    if(relu){relu_detla_gpu(output,delta_from,batchSize*numPoints*numFeatures);}
+    backward_bias_gpu(bias_up, delta_from, batchSize, numFeatures, numPoints);
+    backward_scale_gpu(norm, delta_from, batchSize, numFeatures, numPoints, weight_up);
+
+    scale_bias_gpu(delta_from, weight, batchSize, numFeatures, numPoints);
+
+    fast_mean_delta_gpu(delta_from, var, batchSize, numFeatures, numPoints, delta_mean);
+    fast_variance_delta_gpu(input, delta_from, mean, var, batchSize, numFeatures, numPoints, delta_var);
+    normalize_delta_gpu(input, mean, var, delta_mean, delta_var, batchSize, numFeatures, numPoints, delta_from);
+}
+void F_bp(int batchSize, int inFeatures, int outFeatures,float* input,float* weight,
+float * delta_from, float * delta_gen, float* weight_up, float* bias_up) {
     //delta gen: batchsize,outf * outf,inf
     int M = batchSize;
     int N = inFeatures;
@@ -2944,10 +3089,41 @@ void FC_bp(int batchSize, int inFeatures, int outFeatures,float* input,float* we
     //BIAS UP: outf,batchsize
     backward_bias_gpu(bias_up,delta_from,batchSize,outFeatures,1);
 }
-void FBR2F_bp(){
-    std::cout << "----START FBR2F_bp" << std::endl;
+
+void FBR_bp(int batchSize, int inFeatures, int outFeatures,
+wbBnP& fbp, wbBnP& fbp_up, float* input, float* reluOutput, float* fcOutput,
+float* delta_from,float* delta_fc,float* delta_gen,
+bn_layer& bn,bn_layer& bn_delta)
+{
+    BR_bp(true,outFeatures,batchSize,1,
+    fbp.bn_weight,fcOutput,reluOutput,
+    bn.mean,bn.var,bn.norm,
+    delta_from,delta_fc,bn_delta.mean,bn_delta.var,
+    fbp_up.bn_weight, fbp_up.bn_bias);
+    F_bp(batchSize,inFeatures,outFeatures,input,fbp.weight,
+    delta_fc, delta_gen, fbp_up.weight, fbp_up.bias);
 }
-//Initial Weight and bias, rn and rv with one and zero
+
+void FBR2F_bp(int OC1,int OC2,int OC3,int batchSize,int inics,
+FB2FP &fb2f,FB2FP &fb2f_up, float* input, 
+float* relu1_output,float* relu2_output,float* fc1_output,float* fc2_output,
+float* delta_fc1,float* delta_fc2,float* delta_from,
+float* delta_relu1,float* delta_relu2,float* delta_gen, 
+bn_layer& bn1,bn_layer& bn1_delta,bn_layer& bn2,bn_layer& bn2_delta){
+
+    std::cout << "----START FBR2F_bp" << std::endl;
+    F_bp(batchSize,OC2,OC3,relu2_output,fb2f.f3.weight,
+    delta_from,delta_relu2,fb2f_up.f3.weight,fb2f_up.f3.bias);
+
+    FBR_bp(batchSize,OC1,OC2,
+    fb2f.fb2, fb2f_up.fb2, relu1_output, relu2_output, fc2_output,
+    delta_relu2, delta_fc2, delta_relu1, bn2, bn2_delta);
+    
+    FBR_bp(batchSize,inics,OC1,
+    fb2f.fb1, fb2f_up.fb1,  input, relu1_output, fc1_output,
+    delta_relu1, delta_fc1, delta_gen, bn1, bn1_delta);
+}
+
 void Train_GPU (int inChannels,int batchSize,int numPoints,
             int* correct_table,int* label,float* input,
             float* device_output,float* device_delta,
@@ -3255,7 +3431,9 @@ void Train_GPU (int inChannels,int batchSize,int numPoints,
     LogSoftMax_GPU_train(label,net.softmax_input,
     net.softmax_output,device_delta,correct_table,10,batchSize);
 
-    
+    std::cout << "BACKWARDING" << std::endl;
+    //FBR2F_bp(512,256,10,batchSize,encoderOC3,dParams.nonep, ,)
+    //FC_bp(batchSize,)
     // F->RB->F->RB->F
     // MAX->B->C -> RB->C -> TRANS-> ......
     

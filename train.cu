@@ -509,14 +509,17 @@ struct fcp {
     float* weight; // Conv weight
     float* bias;   // Conv bias
 };
-void read_fcp(const std::string& layer, fcp& wbp,int i) {
+void read_fcp(const std::string& layer, fcp& wbp,int i,bool update=false) {
     std::string fiStr = std::to_string(i);;
     std::string name = layer + "fc" + fiStr;  
     //std::cout << name << std::endl;
     cudaMalloc((void**)&wbp.weight, params[name + ".weight"].size() * sizeof(float));
     cudaMalloc((void**)&wbp.bias, params[name + ".bias"].size() * sizeof(float));
-    cudaMemcpy(wbp.weight, params[name + ".weight"].data(), params[name + ".weight"].size() * sizeof(float), cudaMemcpyHostToDevice);
-    cudaMemcpy(wbp.bias, params[name + ".bias"].data(), params[name + ".bias"].size() * sizeof(float), cudaMemcpyHostToDevice);
+    if(update == false)
+    {
+        cudaMemcpy(wbp.weight, params[name + ".weight"].data(), params[name + ".weight"].size() * sizeof(float), cudaMemcpyHostToDevice);
+        cudaMemcpy(wbp.bias, params[name + ".bias"].data(), params[name + ".bias"].size() * sizeof(float), cudaMemcpyHostToDevice);
+    }
 }
 void free_fcp(fcp& wbp){
     cudaFree(wbp.bias);
@@ -531,7 +534,7 @@ struct wbBnP {
     float* bn_mean;   // BatchNorm running mean
     float* bn_var;    // BatchNorm running var
 };
-void read_wbBnP(const std::string& layer,const std::string& cf,wbBnP& wbBnP,int i,int param_offset=0) {
+void read_wbBnP(const std::string& layer,const std::string& cf,wbBnP& wbBnP,int i,int param_offset,bool update=false) {
 
     std::string cfiStr = std::to_string(i);
     std::string biStr = std::to_string(i+param_offset);
@@ -543,21 +546,27 @@ void read_wbBnP(const std::string& layer,const std::string& cf,wbBnP& wbBnP,int 
     cudaMalloc((void**)&wbBnP.bias, params[name + ".bias"].size() * sizeof(float));
     cudaMalloc((void**)&wbBnP.bn_weight, params[bnStr + ".weight"].size() * sizeof(float));
     cudaMalloc((void**)&wbBnP.bn_bias, params[bnStr + ".bias"].size() * sizeof(float));
-    cudaMalloc((void**)&wbBnP.bn_mean, params[bnStr + ".running_mean"].size() * sizeof(float));
-    cudaMalloc((void**)&wbBnP.bn_var, params[bnStr + ".running_var"].size() * sizeof(float));
-    cudaMemcpy(wbBnP.weight, params[name + ".weight"].data(), params[name + ".weight"].size() * sizeof(float), cudaMemcpyHostToDevice);
-    cudaMemcpy(wbBnP.bias, params[name + ".bias"].data(), params[name + ".bias"].size() * sizeof(float), cudaMemcpyHostToDevice);
-    cudaMemcpy(wbBnP.bn_weight, params[bnStr + ".weight"].data(), params[bnStr + ".weight"].size() * sizeof(float), cudaMemcpyHostToDevice);
-    cudaMemcpy(wbBnP.bn_bias, params[bnStr + ".bias"].data(), params[bnStr + ".bias"].size() * sizeof(float), cudaMemcpyHostToDevice);
-    cudaMemcpy(wbBnP.bn_mean, params[bnStr + ".running_mean"].data(), params[bnStr + ".running_mean"].size() * sizeof(float), cudaMemcpyHostToDevice);
-    cudaMemcpy(wbBnP.bn_var, params[bnStr + ".running_var"].data(), params[bnStr + ".running_var"].size() * sizeof(float), cudaMemcpyHostToDevice);
+    if(update == false)
+    {
+        cudaMalloc((void**)&wbBnP.bn_mean, params[bnStr + ".running_mean"].size() * sizeof(float));
+        cudaMalloc((void**)&wbBnP.bn_var, params[bnStr + ".running_var"].size() * sizeof(float));
+        cudaMemcpy(wbBnP.weight, params[name + ".weight"].data(), params[name + ".weight"].size() * sizeof(float), cudaMemcpyHostToDevice);
+        cudaMemcpy(wbBnP.bias, params[name + ".bias"].data(), params[name + ".bias"].size() * sizeof(float), cudaMemcpyHostToDevice);
+        cudaMemcpy(wbBnP.bn_weight, params[bnStr + ".weight"].data(), params[bnStr + ".weight"].size() * sizeof(float), cudaMemcpyHostToDevice);
+        cudaMemcpy(wbBnP.bn_bias, params[bnStr + ".bias"].data(), params[bnStr + ".bias"].size() * sizeof(float), cudaMemcpyHostToDevice);
+        cudaMemcpy(wbBnP.bn_mean, params[bnStr + ".running_mean"].data(), params[bnStr + ".running_mean"].size() * sizeof(float), cudaMemcpyHostToDevice);
+        cudaMemcpy(wbBnP.bn_var, params[bnStr + ".running_var"].data(), params[bnStr + ".running_var"].size() * sizeof(float), cudaMemcpyHostToDevice);
+    }
 }
-void free_wbBnP(wbBnP& wbBnP){
+void free_wbBnP(wbBnP& wbBnP,bool update=false){
     cudaFree(wbBnP.bias);
     cudaFree(wbBnP.weight);
     cudaFree(wbBnP.bn_bias);
-    cudaFree(wbBnP.bn_mean);
-    cudaFree(wbBnP.bn_var);
+    if(update == false)
+    {
+        cudaFree(wbBnP.bn_mean);
+        cudaFree(wbBnP.bn_var);
+    }
     cudaFree(wbBnP.bn_weight);
 }
 
@@ -566,15 +575,15 @@ struct CB3P {
     wbBnP cb2;
     wbBnP cb3;
 };
-void read_CB3P(const std::string& layer,CB3P& CB3P) {
-    read_wbBnP(layer,"conv",CB3P.cb1,1);
-    read_wbBnP(layer,"conv",CB3P.cb2,2);
-    read_wbBnP(layer,"conv",CB3P.cb3,3);   
+void read_CB3P(const std::string& layer,CB3P& CB3P,bool update=false) {
+    read_wbBnP(layer,"conv",CB3P.cb1,1,0,update);
+    read_wbBnP(layer,"conv",CB3P.cb2,2,0,update);
+    read_wbBnP(layer,"conv",CB3P.cb3,3,0,update);   
 }
-void free_CB3P(CB3P &CB3P){
-    free_wbBnP(CB3P.cb1);
-    free_wbBnP(CB3P.cb2);
-    free_wbBnP(CB3P.cb3);
+void free_CB3P(CB3P &CB3P,bool update=false){
+    free_wbBnP(CB3P.cb1,update);
+    free_wbBnP(CB3P.cb2,update);
+    free_wbBnP(CB3P.cb3,update);
 }
 
 
@@ -583,14 +592,14 @@ struct FB2FP {
     wbBnP fb2;
     fcp   f3;
 };
-void read_FB2FP(const std::string& layer,FB2FP& FB2FP,int param_offset=0)    {
-    read_wbBnP(layer,"fc",FB2FP.fb1,1,param_offset);
-    read_wbBnP(layer,"fc",FB2FP.fb2,2,param_offset);
-    read_fcp(layer,FB2FP.f3,3);
+void read_FB2FP(const std::string& layer,FB2FP& FB2FP,int param_offset,bool update=false)    {
+    read_wbBnP(layer,"fc",FB2FP.fb1,1,param_offset,update);
+    read_wbBnP(layer,"fc",FB2FP.fb2,2,param_offset,update);
+    read_fcp(layer,FB2FP.f3,3,update);
 }
-void free_FB2FP(FB2FP &FB2FP){
-    free_wbBnP(FB2FP.fb1);
-    free_wbBnP(FB2FP.fb2);
+void free_FB2FP(FB2FP &FB2FP,bool update=false){
+    free_wbBnP(FB2FP.fb1,update);
+    free_wbBnP(FB2FP.fb2,update);
     free_fcp(FB2FP.f3);
 }
 
@@ -598,13 +607,13 @@ struct stndP {
     CB3P cb3;
     FB2FP fb2f;
 };
-void read_stndP(const std::string& layer,stndP& stndP) {
-    read_CB3P(layer,stndP.cb3);
-    read_FB2FP(layer,stndP.fb2f,3);
+void read_stndP(const std::string& layer,stndP& stndP,bool update=false) {
+    read_CB3P(layer,stndP.cb3,update);
+    read_FB2FP(layer,stndP.fb2f,3,update);
 }
-void free_stndP(stndP& stndP){
-    free_CB3P(stndP.cb3);
-    free_FB2FP(stndP.fb2f);
+void free_stndP(stndP& stndP,bool update=false){
+    free_CB3P(stndP.cb3,update);
+    free_FB2FP(stndP.fb2f,update);
 }
 
 struct cudaP {
@@ -613,15 +622,16 @@ struct cudaP {
     CB3P  featp;
     FB2FP nonep;
 };
-void freeDP(cudaP &dp)
+void freeDP(cudaP &dp,bool update=false)
 {
-    free_stndP(dp.stn3dp);
-    free_stndP(dp.stnkdp);
-    free_CB3P(dp.featp);
-    free_FB2FP(dp.nonep);
+    free_stndP(dp.stn3dp,update);
+    free_stndP(dp.stnkdp,update);
+    free_CB3P(dp.featp,update);
+    free_FB2FP(dp.nonep,update);
 }
 
 cudaP dParams;
+cudaP upParams;
 
 
 /****************************************************************************************
@@ -3429,10 +3439,18 @@ void Train_GPU (int inChannels,int batchSize,int numPoints,
     net.relu1_output_part5_fbr2f,net.relu2_output_part5_fbr2f,
     net.fc1_output_part5_fbr2f,net.fc2_output_part5_fbr2f,net.bn1_part5_fbr2f,net.bn2_part5_fbr2f,0);// fc-bn-relu * 2 + fc
     LogSoftMax_GPU_train(label,net.softmax_input,
-    net.softmax_output,device_delta,correct_table,10,batchSize);
+    net.softmax_output,delta.softmax_input,correct_table,10,batchSize);
 
     std::cout << "BACKWARDING" << std::endl;
-    //FBR2F_bp(512,256,10,batchSize,encoderOC3,dParams.nonep, ,)
+    FBR2F_bp(512,256,10, batchSize, encoderOC3, dParams.nonep, upParams.nonep,
+    net.encoder_output,net.relu1_output_part5_fbr2f,net.relu2_output_part5_fbr2f,
+    net.fc1_output_part5_fbr2f,net.fc2_output_part5_fbr2f,
+    delta.fc1_output_part5_fbr2f,delta.fc2_output_part5_fbr2f,delta.softmax_input,
+    delta.relu1_output_part5_fbr2f,delta.relu2_output_part5_fbr2f,
+    delta.encoder_output,
+    net.bn1_part5_fbr2f,delta.bn1_part5_fbr2f,
+    net.bn2_part5_fbr2f,delta.bn2_part5_fbr2f
+    );
     //FC_bp(batchSize,)
     // F->RB->F->RB->F
     // MAX->B->C -> RB->C -> TRANS-> ......
@@ -3463,6 +3481,11 @@ int main(int argc, char *argv[]) {
     read_stndP("feat.fstn.", dParams.stnkdp);
     read_CB3P("feat.", dParams.featp);
     read_FB2FP("", dParams.nonep, 0);
+
+    read_stndP("feat.stn.", upParams.stn3dp,true);
+    read_stndP("feat.fstn.", upParams.stnkdp,true);
+    read_CB3P("feat.", upParams.featp,true);
+    read_FB2FP("", upParams.nonep, 0 , true);
 
     //分配内存 for 输入：device端
     size_t total_size = 0;
@@ -3559,6 +3582,7 @@ int main(int argc, char *argv[]) {
     // 释放内存
     //cudaProfilerStop();
     freeDP(dParams);//权重
+    freeDP(upParams, true);//更新权重
     cudaFree(device_labels);//label
     cudaFree(device_all_points);//输入
     cudaFree(device_output);//输出

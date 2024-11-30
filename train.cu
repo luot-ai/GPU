@@ -723,11 +723,11 @@ __global__ void LogSoftMax_Kernel_train(int* label,float* input,float* output,fl
         //printf("label:%d,predict:%d\n",correct_label,max_index);
         //printf("correct_tabel:%d\n",correct_tabel[index]);
         //反向传播
-        // for (int l = 0; l < L; l++)
-        // {
-        //     int iIdx = l + index * L;
-        //     outputDelta[iIdx] = softmax[l]-(correct_label==l);
-        // }
+        for (int l = 0; l < L; l++)
+        {
+            int iIdx = l + index * L;
+            outputDelta[iIdx] = softmax[l]-(correct_label==l);
+        }
     }
 }
 void LogSoftMax_GPU_train(int* label,float* input,float* output,float* outputDelta,int* correct_tabel,int L,int BatchSize = 32)
@@ -3118,57 +3118,91 @@ void Train_GPU (int inChannels,int batchSize,int numPoints,
     net.softmax_input = device_output+offset;offset += cla_3;
     net.softmax_output = device_output+offset;offset+= cla_4;
 
-    // TNET delta;
-    // offset = 0;
-    // //stn3d 
-    // //TODO:到时候直接复制就好
-    // delta.input_trans = device_delta+offset;offset += stn_1;
-    // delta.conv1_output_stn_cbr = device_delta+offset;offset += stn_2_conv;
-    // delta.relu1_output_stn_cbr = device_delta+offset;offset += stn_2;
-    // delta.conv2_output_stn_cbr = device_delta+offset;offset += stn_3_conv;
-    // delta.relu2_output_stn_cbr = device_delta+offset;offset += stn_3;
-    // delta.conv3_output_stn_cbr = device_delta+offset;offset += stn_4_conv;
-    // delta.CBR3_output = device_delta+offset;offset += stn_4;
-    // delta.maxp_output = device_delta+offset;offset += stn_5;
-    // delta.fc1_output_stn_cbr = device_delta+offset;offset += stn_6_fc;
-    // delta.fc2_output_stn_cbr = device_delta+offset;offset += stn_7_fc;
-    // delta.relu1_output_stn_fbr2f = device_delta+offset;offset += stn_6;
-    // delta.relu2_output_stn_fbr2f = device_delta+offset;offset += stn_7;
-    // delta.stn3d_out = device_delta+offset;offset += stn_8;
-    // //part2
-    // delta.bmm1_res = device_delta+offset;offset += part2_1;
-    // delta.bmm1_res_trans = device_delta+offset;offset += part2_2;
-    // delta.fstn_input_conv = device_delta+offset;offset += part2_3;
-    // delta.fstn_input = device_delta+offset;offset += part2_4;
-    // //stnkd
-    // delta.conv1_output_fstn_cbr = device_delta+offset;offset += fstn_1_conv;
-    // delta.relu1_output_fstn_cbr = device_delta+offset;offset += fstn_1;
-    // delta.conv2_output_fstn_cbr = device_delta+offset;offset += fstn_2_conv;
-    // delta.relu2_output_fstn_cbr = device_delta+offset;offset += fstn_2;
-    // delta.conv3_output_fstn_cbr = device_delta+offset;offset += fstn_3_conv;
-    // delta.fstn_CBR3_output = device_delta+offset;offset += fstn_3;
-    // delta.fstn_maxp_output = device_delta+offset;offset += fstn_4;
-    // delta.fc1_output_fstn_fbr2f = device_delta+offset;offset += fstn_5_fc;
-    // delta.relu1_output_fstn_fbr2f = device_delta+offset;offset += fstn_5;
-    // delta.fc2_output_fstn_fbr2f = device_delta+offset;offset += fstn_6_fc;
-    // delta.relu2_output_fstn_fbr2f = device_delta+offset;offset += fstn_6;
-    // delta.stnkd_out = device_delta+offset;offset += fstn_7;
-    // //part4
-    // delta.fstn_input_trans = device_delta+offset;offset += part4_1;
-    // delta.fstn_bmm1_res = device_delta+offset;offset += part4_2;
-    // delta.fstn_bmm1_res_trans = device_delta+offset;offset += part4_3;
-    // delta.cbr2_output_conv = device_delta+offset;offset += part4_4_conv;
-    // delta.cbr2_output = device_delta+offset;offset += part4_4;
-    // delta.feat_bn3_conv = device_delta+offset;offset += part4_5_conv;
-    // delta.feat_bn3 = device_delta+offset;offset += part4_5;
-    // delta.encoder_output = device_delta+offset;offset += part4_6;
-    // //classify
-    // delta.fc1_output_part5_fbr2f = device_delta+offset;offset += cla_1_fc;
-    // delta.relu1_output_part5_fbr2f = device_delta+offset;offset += cla_1;
-    // delta.fc2_output_part5_fbr2f = device_delta+offset;offset += cla_2_fc;
-    // delta.relu2_output_part5_fbr2f = device_delta+offset;offset += cla_2;
-    // delta.softmax_input = device_delta+offset;offset += cla_3;
-    // delta.softmax_output = device_delta+offset;offset+= cla_4;
+    TNET delta;
+    offset = 0;
+    //stn3d 
+    delta.input_trans = device_delta+offset;offset += stn_1;
+
+    delta.conv1_output_stn_cbr = device_delta+offset;offset += stn_2_conv;
+    offset = alloc_bn(delta.bn1_stn_cbr,device_delta,offset,OC1,bn);
+    delta.relu1_output_stn_cbr = device_delta+offset;offset += stn_2;
+
+    delta.conv2_output_stn_cbr = device_delta+offset;offset += stn_3_conv;
+    offset = alloc_bn(delta.bn2_stn_cbr,device_delta,offset,OC2,bn);
+    delta.relu2_output_stn_cbr = device_delta+offset;offset += stn_3;
+
+    delta.conv3_output_stn_cbr = device_delta+offset;offset += stn_4_conv;
+    offset = alloc_bn(delta.bn3_stn_cbr,device_delta,offset,OC3,bn);
+    delta.CBR3_output = device_delta+offset;offset += stn_4;
+    
+    delta.maxp_output = device_delta+offset;offset += stn_5;
+    delta.maxp_output_idx = device_delta+offset;offset += stn_5_idx;
+
+    delta.fc1_output_stn_cbr = device_delta+offset;offset += stn_6_fc;
+    offset = alloc_bn(delta.bn1_stn_fbr2f,device_delta,offset,FC_OC1,batchSize);
+    delta.relu1_output_stn_fbr2f = device_delta+offset;offset += stn_6;
+
+    delta.fc2_output_stn_cbr = device_delta+offset;offset += stn_7_fc;
+    offset = alloc_bn(delta.bn2_stn_fbr2f,device_delta,offset,FC_OC2,batchSize);
+    delta.relu2_output_stn_fbr2f = device_delta+offset;offset += stn_7;
+    delta.stn3d_out = device_delta+offset;offset += stn_8;
+
+    //part2
+    delta.bmm1_res = device_delta+offset;offset += part2_1;
+    delta.bmm1_res_trans = device_delta+offset;offset += part2_2;
+    delta.fstn_input_conv = device_delta+offset;offset += part2_3;
+    offset = alloc_bn(delta.fstn_input_bn,device_delta,offset,fstn_inChannel,bn);
+    delta.fstn_input = device_delta+offset;offset += part2_4;
+
+    //stnkd
+    delta.conv1_output_fstn_cbr = device_delta+offset;offset += fstn_1_conv;
+    offset = alloc_bn(delta.bn1_fstn_cbr,device_delta,offset,fstn_OC1,bn);
+    delta.relu1_output_fstn_cbr = device_delta+offset;offset += fstn_1;
+
+    delta.conv2_output_fstn_cbr = device_delta+offset;offset += fstn_2_conv;
+    offset = alloc_bn(delta.bn2_fstn_cbr,device_delta,offset,fstn_OC2,bn);
+    delta.relu2_output_fstn_cbr = device_delta+offset;offset += fstn_2;
+
+    delta.conv3_output_fstn_cbr = device_delta+offset;offset += fstn_3_conv;
+    offset = alloc_bn(delta.bn3_fstn_cbr,device_delta,offset,fstn_OC3,bn);
+    delta.fstn_CBR3_output = device_delta+offset;offset += fstn_3;
+
+    delta.fstn_maxp_output = device_delta+offset;offset += fstn_4;
+    delta.fstn_maxp_output_idx = device_delta+offset;offset += fstn_4_idx;
+
+    delta.fc1_output_fstn_fbr2f = device_delta+offset;offset += fstn_5_fc;
+    offset = alloc_bn(delta.bn1_fstn_fbr2f,device_delta,offset,fstn_FC_OC1,batchSize);
+    delta.relu1_output_fstn_fbr2f = device_delta+offset;offset += fstn_5;
+    
+    delta.fc2_output_fstn_fbr2f = device_delta+offset;offset += fstn_6_fc;
+    offset = alloc_bn(delta.bn2_fstn_fbr2f,device_delta,offset,fstn_FC_OC2,batchSize);
+    delta.relu2_output_fstn_fbr2f = device_delta+offset;offset += fstn_6;
+    delta.stnkd_out = device_delta+offset;offset += fstn_7;
+
+    //part4
+    delta.fstn_input_trans = device_delta+offset;offset += part4_1;
+    delta.fstn_bmm1_res = device_delta+offset;offset += part4_2;
+    delta.fstn_bmm1_res_trans = device_delta+offset;offset += part4_3;
+
+    delta.cbr2_output_conv = device_delta+offset;offset += part4_4_conv;
+    offset = alloc_bn(delta.cbr2_output_bn,device_delta,offset,encoderOC2,bn);
+    delta.cbr2_output = device_delta+offset;offset += part4_4;
+
+    delta.feat_bn3_conv = device_delta+offset;offset += part4_5_conv;
+    offset = alloc_bn(delta.feat_bn3_bn,device_delta,offset,encoderOC3,bn);
+    delta.feat_bn3 = device_delta+offset;offset += part4_5;
+    
+    delta.encoder_output = device_delta+offset;offset += part4_6;
+    delta.encoder_output_idx = device_delta+offset;offset += part4_6_idx;
+    //classify
+    delta.fc1_output_part5_fbr2f = device_delta+offset;offset += cla_1_fc;
+    offset = alloc_bn(delta.bn1_part5_fbr2f,device_delta,offset,ch_half,batchSize);
+    delta.relu1_output_part5_fbr2f = device_delta+offset;offset += cla_1;
+    delta.fc2_output_part5_fbr2f = device_delta+offset;offset += cla_2_fc;
+    offset = alloc_bn(delta.bn2_part5_fbr2f,device_delta,offset,ch_quarter,batchSize);
+    delta.relu2_output_part5_fbr2f = device_delta+offset;offset += cla_2;
+    delta.softmax_input = device_delta+offset;offset += cla_3;
+    delta.softmax_output = device_delta+offset;offset+= cla_4;
 
     std::cout << "PART1:STN3d, forwaring" << std::endl;
     int maxnp = USECONVMAX? numPoints / 64 : numPoints;
@@ -3219,7 +3253,7 @@ void Train_GPU (int inChannels,int batchSize,int numPoints,
     net.relu1_output_part5_fbr2f,net.relu2_output_part5_fbr2f,
     net.fc1_output_part5_fbr2f,net.fc2_output_part5_fbr2f,net.bn1_part5_fbr2f,net.bn2_part5_fbr2f,0);// fc-bn-relu * 2 + fc
     LogSoftMax_GPU_train(label,net.softmax_input,
-    net.softmax_output,NULL,correct_table,10,batchSize);
+    net.softmax_output,device_delta,correct_table,10,batchSize);
 
     
     // F->RB->F->RB->F
@@ -3240,7 +3274,7 @@ int main(int argc, char *argv[]) {
     read_params(dir);
 
     // 读输入：主机
-    std::string file_path = "./data/train_point_clouds.h5";
+    std::string file_path = "./data/test_point_clouds.h5";
     std::vector<std::vector<float>> list_of_points;
     std::vector<int> list_of_labels;
     read_h5_file(file_path, list_of_points, list_of_labels);
@@ -3314,13 +3348,13 @@ int main(int argc, char *argv[]) {
     int* correct_table;
     int *device_labels;
     float *device_output;
-    //float *device_delta;
+    float *device_delta;
     long long max_output_size = cal_tnet_size(batchSize, maxNp, ic); // batchSize > curB maxNp > np
     printf("max_output_size: %lld\n", max_output_size);
     cudaMalloc((void **)&correct_table, all_num * sizeof(int));
     cudaMalloc((void **)&device_labels, all_num * sizeof(int));
     cudaMalloc((void **)&device_output, max_output_size * sizeof(float));
-    //cudaMalloc((void **)&device_delta, max_output_size * sizeof(float));
+    cudaMalloc((void **)&device_delta, max_output_size * sizeof(float));
     cudaMemcpy(device_labels, list_of_labels.data(), all_num * sizeof(int), cudaMemcpyHostToDevice);
 
     // 开始推理
@@ -3331,7 +3365,7 @@ int main(int argc, char *argv[]) {
         np = ALIGN_DOWN(np, GEMMBLKMAX);
         if (use_sample == 1) np = npoint;
         Train_GPU(ic, curB, np, correct_table + i, device_labels + i, 
-        device_all_points + inf_offset, device_output, NULL);
+        device_all_points + inf_offset, device_output, device_delta);
         inf_offset += curB * np * ic;
         //cudaMemset(device_output, 0, cal_tnet_size(curB, np, ic) * sizeof(float));
     }
@@ -3350,7 +3384,7 @@ int main(int argc, char *argv[]) {
     cudaFree(device_labels);//label
     cudaFree(device_all_points);//输入
     cudaFree(device_output);//输出
-    //cudaFree(device_delta);//delta
+    cudaFree(device_delta);//delta
     cudaFree(correct_table);//正确表
 
 	// 向主机端同步以等待所有异步调用的GPU kernel执行完毕，这句必须要有

@@ -20,7 +20,8 @@
 #include <cuda_profiler_api.h>
 #include <cuda_runtime.h>
 #include <cassert>
-
+#include <random> // 包含随机数生成相关的库
+#include <ctime>  // 包含 time 函数
 
 
 #define GEMMBLKMAX 128
@@ -34,6 +35,7 @@
 #define DARKNETBLK 512
 #define BLOCK 512
 #define EPOCH 5
+#define PRETRAIN 1
 // #define DEBUG
 // #define BACKDEBUG
 // #define USECONVMAX (SAMPLE == 0 ? 1 : (NPOINT >= 128 ? 1 : 0))
@@ -319,6 +321,28 @@ void read_params(std::string dir) {
     return ;
 }
 
+void para_init(float* N,int width,float init = 0.2){
+    std::random_device rd;
+    std::mt19937 gen(rd());  
+    std::uniform_real_distribution<float> dist(-init, init);  
+    float* rand = new float[width];
+    for (int i = 0; i < width; ++i) {
+        rand[i] = dist(gen); 
+    }
+    cudaMemcpy(N, rand, width * sizeof(float), cudaMemcpyHostToDevice);
+    delete[] rand;
+}
+
+void para_init_val(float* N,int width,float val)
+{
+    float* h_bn_var = (float*)malloc(width * sizeof(float));
+    for (int i = 0; i < width; ++i) {
+        h_bn_var[i] = val;  // 初始化为 1.0f
+    }
+    cudaMemcpy(N, h_bn_var, width * sizeof(float), cudaMemcpyHostToDevice);
+    cudaDeviceSynchronize(); 
+    free(h_bn_var);
+}
 struct bn_layer {
     float* norm; 
     float* mean;   
@@ -525,8 +549,18 @@ void read_fcp(const std::string& layer, fcp& wbp,int i,bool update=false) {
     }
     if(update == false)
     {
-        cudaMemcpy(wbp.weight, params[name + ".weight"].data(), params[name + ".weight"].size() * sizeof(float), cudaMemcpyHostToDevice);
-        cudaMemcpy(wbp.bias, params[name + ".bias"].data(), params[name + ".bias"].size() * sizeof(float), cudaMemcpyHostToDevice);
+        int wcnt = params[name + ".weight"].size();
+        int bcnt = params[name + ".bias"].size();
+        if (PRETRAIN == 1)
+        {
+            cudaMemcpy(wbp.weight, params[name + ".weight"].data(), wcnt*sizeof(float), cudaMemcpyHostToDevice);
+            cudaMemcpy(wbp.bias, params[name + ".bias"].data(), bcnt* sizeof(float), cudaMemcpyHostToDevice);
+        }
+        else 
+        {
+            para_init(wbp.weight,wcnt);
+            para_init(wbp.bias,bcnt);
+        }
     }
 }
 void free_fcp(fcp& wbp){
@@ -564,14 +598,32 @@ void read_wbBnP(const std::string& layer,const std::string& cf,wbBnP& wbBnP,int 
     }
     if(update == false)
     {
-        cudaMalloc((void**)&wbBnP.bn_mean, params[bnStr + ".running_mean"].size() * sizeof(float));
-        cudaMalloc((void**)&wbBnP.bn_var, params[bnStr + ".running_var"].size() * sizeof(float));
-        cudaMemcpy(wbBnP.weight, params[name + ".weight"].data(), params[name + ".weight"].size() * sizeof(float), cudaMemcpyHostToDevice);
-        cudaMemcpy(wbBnP.bias, params[name + ".bias"].data(), params[name + ".bias"].size() * sizeof(float), cudaMemcpyHostToDevice);
-        cudaMemcpy(wbBnP.bn_weight, params[bnStr + ".weight"].data(), params[bnStr + ".weight"].size() * sizeof(float), cudaMemcpyHostToDevice);
-        cudaMemcpy(wbBnP.bn_bias, params[bnStr + ".bias"].data(), params[bnStr + ".bias"].size() * sizeof(float), cudaMemcpyHostToDevice);
-        cudaMemcpy(wbBnP.bn_mean, params[bnStr + ".running_mean"].data(), params[bnStr + ".running_mean"].size() * sizeof(float), cudaMemcpyHostToDevice);
-        cudaMemcpy(wbBnP.bn_var, params[bnStr + ".running_var"].data(), params[bnStr + ".running_var"].size() * sizeof(float), cudaMemcpyHostToDevice);
+        int wcnt = params[name + ".weight"].size();
+        int bcnt = params[name + ".bias"].size();
+        int bn_wcnt = params[bnStr + ".weight"].size();
+        int bn_bcnt = params[bnStr + ".bias"].size();
+        int bn_mcnt = params[bnStr + ".running_mean"].size();
+        int bn_vcnt = params[bnStr + ".running_var"].size();
+        cudaMalloc((void**)&wbBnP.bn_mean, bn_mcnt * sizeof(float));
+        cudaMalloc((void**)&wbBnP.bn_var, bn_vcnt * sizeof(float));
+        if(PRETRAIN == 1)
+        {
+            cudaMemcpy(wbBnP.weight, params[name + ".weight"].data(), wcnt * sizeof(float), cudaMemcpyHostToDevice);
+            cudaMemcpy(wbBnP.bias, params[name + ".bias"].data(), bcnt * sizeof(float), cudaMemcpyHostToDevice);
+            cudaMemcpy(wbBnP.bn_weight, params[bnStr + ".weight"].data(), bn_wcnt * sizeof(float), cudaMemcpyHostToDevice);
+            cudaMemcpy(wbBnP.bn_bias, params[bnStr + ".bias"].data(), bn_bcnt * sizeof(float), cudaMemcpyHostToDevice);
+            cudaMemcpy(wbBnP.bn_mean, params[bnStr + ".running_mean"].data(), bn_mcnt * sizeof(float), cudaMemcpyHostToDevice);
+            cudaMemcpy(wbBnP.bn_var, params[bnStr + ".running_var"].data(), bn_vcnt * sizeof(float), cudaMemcpyHostToDevice);
+        }
+        else 
+        {
+            para_init(wbBnP.weight,wcnt);
+            para_init(wbBnP.bias,bcnt);
+            para_init(wbBnP.bn_weight,bn_wcnt);
+            para_init(wbBnP.bn_bias,bn_bcnt);
+            cudaMemset(wbBnP.bn_mean, 0, bn_mcnt * sizeof(float));
+            para_init_val(wbBnP.bn_var, bn_vcnt, 1.0f);
+        }
     }
 }
 void free_wbBnP(wbBnP& wbBnP,bool update=false){

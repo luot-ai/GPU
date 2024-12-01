@@ -1763,21 +1763,15 @@ bn_layer& bn1,bn_layer& bn1_delta,bn_layer& bn2,bn_layer& bn2_delta){
     F_bp(batchSize,OC2,OC3,relu2_output,fb2f.f3.weight,
     delta_from,delta_relu2,fb2f_up.f3.weight,fb2f_up.f3.bias);
 
-    // FBR_bp(batchSize,OC1,OC2,
-    // fb2f.fb2, fb2f_up.fb2, relu1_output, relu2_output, fc2_output,
-    // delta_relu2, delta_fc2, delta_relu1, bn2, bn2_delta);
+    FBR_bp(batchSize,OC1,OC2,
+    fb2f.fb2, fb2f_up.fb2, relu1_output, relu2_output, fc2_output,
+    delta_relu2, delta_fc2, delta_relu1, bn2, bn2_delta);
     
-    // FBR_bp(batchSize,inics,OC1,
-    // fb2f.fb1, fb2f_up.fb1,  input, relu1_output, fc1_output,
-    // delta_relu1, delta_fc1, delta_gen, bn1, bn1_delta);
+    FBR_bp(batchSize,inics,OC1,
+    fb2f.fb1, fb2f_up.fb1,  input, relu1_output, fc1_output,
+    delta_relu1, delta_fc1, delta_gen, bn1, bn1_delta);
 }
 
-// BP_UPDATE_Momentum(dParams.nonep.f3.weight,upParams.nonep.f3.weight,moParams.nonep.f3.weight,256*10);
-
-// void BP_UPDATE_FB(float *N, float *delta, float *momentum, int width, float learning_rate=-0.01f, float momentum_factor=0.9f) {
-//     BP_UPDATE_Kernal_Momentum<<<cuda_gridsize(width), BLOCK>>>(N, delta, momentum, width, learning_rate, momentum_factor);
-//     check_error(cudaPeekAtLastError());
-// }
 
 __global__ void BP_UPDATE_Kernal_Momentum(float *N, float *delta, float *momentum, int width, float learning_rate, float momentum_factor) {
     int index = (blockIdx.x + blockIdx.y*gridDim.x) * blockDim.x + threadIdx.x;
@@ -1791,6 +1785,24 @@ __global__ void BP_UPDATE_Kernal_Momentum(float *N, float *delta, float *momentu
 void BP_UPDATE_Momentum(float *N, float *delta, float *momentum, int width, float learning_rate=-0.01f, float momentum_factor=0.9f) {
     BP_UPDATE_Kernal_Momentum<<<cuda_gridsize(width), BLOCK>>>(N, delta, momentum, width, learning_rate, momentum_factor);
     check_error(cudaPeekAtLastError());
+}
+
+void FB_update(int IC,int OC,wbBnP& fbp, wbBnP& fbp_up,wbBnP& fbp_mo)
+{
+    int width = OC*IC;
+    BP_UPDATE_Momentum(fbp.bn_weight, fbp_up.bn_weight, fbp_mo.bn_weight, OC);
+    BP_UPDATE_Momentum(fbp.bn_bias, fbp_up.bn_bias, fbp_mo.bn_bias, OC);
+    BP_UPDATE_Momentum(fbp.weight, fbp_up.weight, fbp_mo.weight, OC);
+    BP_UPDATE_Momentum(fbp.bias, fbp_up.bias, fbp_mo.bias, OC);
+}
+
+void FBR2F_update(int OC1,int OC2,int OC3,int inics,
+FB2FP &fb2f,FB2FP &fb2f_up,FB2FP &fb2f_mo)
+{
+    BP_UPDATE_Momentum(fb2f.f3.weight, fb2f_up.f3.weight, fb2f_mo.f3.weight, OC3*OC2);
+    BP_UPDATE_Momentum(fb2f.f3.bias, fb2f_up.f3.bias, fb2f_mo.f3.bias, OC3);
+    FB_update(OC1,OC2,fb2f.fb2, fb2f_up.fb2, fb2f_mo.fb2);
+    FB_update(inics,OC1,fb2f.fb1, fb2f_up.fb1, fb2f_mo.fb1);
 }
 
 void Train_GPU (int inChannels,int batchSize,int numPoints,
@@ -2123,7 +2135,8 @@ void Train_GPU (int inChannels,int batchSize,int numPoints,
     net.bn2_part5_fbr2f,delta.bn2_part5_fbr2f
     );
     //printVector_GPU(moParams.nonep.f3.weight, 10);
-    BP_UPDATE_Momentum(dParams.nonep.f3.weight,upParams.nonep.f3.weight,moParams.nonep.f3.weight,256*10);
+    //BP_UPDATE_Momentum(dParams.nonep.f3.weight,upParams.nonep.f3.weight,moParams.nonep.f3.weight,256*10);
+    FBR2F_update(512,256,10,encoderOC3,dParams.nonep,upParams.nonep,moParams.nonep);
     //printVector_GPU(moParams.nonep.f3.weight, 10);
     //FC_bp(batchSize,)
     // F->RB->F->RB->F

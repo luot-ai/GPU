@@ -33,7 +33,7 @@
 #define CLASSNUM 10
 #define DARKNETBLK 512
 #define BLOCK 512
-#define EPOCH 10
+#define EPOCH 5
 // #define DEBUG
 // #define BACKDEBUG
 // #define USECONVMAX (SAMPLE == 0 ? 1 : (NPOINT >= 128 ? 1 : 0))
@@ -1735,7 +1735,6 @@ float * delta_from, float * delta_gen, float* weight_up, float* bias_up) {
     //BIAS UP: outf,batchsize
     backward_bias_gpu(bias_up,delta_from,batchSize,outFeatures,1);
 }
-
 void FBR_bp(int batchSize, int inFeatures, int outFeatures,
 wbBnP& fbp, wbBnP& fbp_up, float* input, float* reluOutput, float* fcOutput,
 float* delta_from,float* delta_fc,float* delta_gen,
@@ -1749,7 +1748,6 @@ bn_layer& bn,bn_layer& bn_delta)
     F_bp(batchSize,inFeatures,outFeatures,input,fbp.weight,
     delta_fc, delta_gen, fbp_up.weight, fbp_up.bias);
 }
-
 void FBR2F_bp(int OC1,int OC2,int OC3,int batchSize,int inics,
 FB2FP &fb2f,FB2FP &fb2f_up, float* input, 
 float* relu1_output,float* relu2_output,float* fc1_output,float* fc2_output,
@@ -1772,6 +1770,66 @@ bn_layer& bn1,bn_layer& bn1_delta,bn_layer& bn2,bn_layer& bn2_delta){
     delta_relu1, delta_fc1, delta_gen, bn1, bn1_delta);
 }
 
+__global__ void Maxpooling_bp_Kernel(float* delta_from,float* delta_gen,float* idx,int numPoints)
+{
+    int tx = threadIdx.x;
+    int channel = blockIdx.x;
+    float idx_val       = idx[channel];
+    float delta_val     = delta_from[channel];
+    int cnum = channel * numPoints;
+    for (int i = tx; i < numPoints; i += blockDim.x) {
+        delta_gen[cnum + i] = (i == idx_val)? delta_val : 0;
+    }
+}
+void MaxPooling_bp(int ics, int batchSize, int numPoints, float* idx, float* delta_from, float* delta_gen)
+{
+    //std::cout << "----START MAXPOOLING" << std::endl;
+    dim3 gridDim(ics*batchSize);
+    dim3 blockDim(1024);
+    Maxpooling_bp_Kernel<<<gridDim, blockDim>>>(delta_from, delta_gen, idx, numPoints);
+}
+
+void conv_bp(int batchSize,int numPoints,int inChannels,int outChannels,
+float* input, float* weight, float * delta_from, float * delta_gen, float* weight_up, float* bias_up) {
+    //delta gen
+    int M = inChannels;
+    int N = numPoints;
+    int K = outChannels;
+    for (int i = 0; i < batchSize; i++)
+    {
+        gemm_gpu(true, false, M, N, K, 1.0, weight, M, delta_from+i*K*N, N, 0.0, delta_gen+i*M*N, N);
+    }
+    //WEIGHT UP:
+    M = outChannels;
+    N = inChannels;
+    K = numPoints;
+    for (int i = 0; i < batchSize; i++)
+    {
+        if (i == 0)
+        {
+            gemm_gpu(false, true, M, N, K, 1.0, delta_from+i*K*M,K, input+i*K*N,K, 0.0, weight_up,N);
+        }
+        else
+        {
+            gemm_gpu(false, true, M, N, K, 1.0, delta_from+i*K*M,K, input+i*K*N,K, 1.0, weight_up,N);
+        }
+    }
+    //BIAS UP: 
+    backward_bias_gpu(bias_up,delta_from,batchSize,outChannels,numPoints);
+}
+void CBR_bp(bool relu,int batchSize, int numPoints, int inFeatures, int outFeatures,
+wbBnP& cbp, wbBnP& cbp_up, float* input, float* reluOutput, float* convOutput,
+float* delta_from,float* delta_conv,float* delta_gen,
+bn_layer& bn,bn_layer& bn_delta)
+{
+    BR_bp(relu,outFeatures,batchSize,numPoints,
+    cbp.bn_weight,convOutput,reluOutput,
+    bn.mean,bn.var,bn.norm,
+    delta_from,delta_conv,bn_delta.mean,bn_delta.var,
+    cbp_up.bn_weight, cbp_up.bn_bias);
+    conv_bp(batchSize,numPoints,inFeatures,outFeatures,input,cbp.weight,
+    delta_conv, delta_gen, cbp_up.weight, cbp_up.bias);
+}
 
 __global__ void BP_UPDATE_Kernal_Momentum(float *N, float *delta, float *momentum, int width, float learning_rate, float momentum_factor) {
     int index = (blockIdx.x + blockIdx.y*gridDim.x) * blockDim.x + threadIdx.x;
@@ -1786,16 +1844,13 @@ void BP_UPDATE_Momentum(float *N, float *delta, float *momentum, int width, floa
     BP_UPDATE_Kernal_Momentum<<<cuda_gridsize(width), BLOCK>>>(N, delta, momentum, width, learning_rate, momentum_factor);
     check_error(cudaPeekAtLastError());
 }
-
 void FB_update(int IC,int OC,wbBnP& fbp, wbBnP& fbp_up,wbBnP& fbp_mo)
 {
-    int width = OC*IC;
     BP_UPDATE_Momentum(fbp.bn_weight, fbp_up.bn_weight, fbp_mo.bn_weight, OC);
     BP_UPDATE_Momentum(fbp.bn_bias, fbp_up.bn_bias, fbp_mo.bn_bias, OC);
-    BP_UPDATE_Momentum(fbp.weight, fbp_up.weight, fbp_mo.weight, OC);
+    BP_UPDATE_Momentum(fbp.weight, fbp_up.weight, fbp_mo.weight, OC*IC);
     BP_UPDATE_Momentum(fbp.bias, fbp_up.bias, fbp_mo.bias, OC);
 }
-
 void FBR2F_update(int OC1,int OC2,int OC3,int inics,
 FB2FP &fb2f,FB2FP &fb2f_up,FB2FP &fb2f_mo)
 {
@@ -2105,9 +2160,6 @@ void Train_GPU (int inChannels,int batchSize,int numPoints,
     GPU_transpose(net.fstn_bmm1_res,net.fstn_bmm1_res_trans,batchSize,numPoints,fstn_inChannel);
     GPU_CBR_train(true,batchSize,numPoints,fstn_inChannel,encoderOC2,
     dParams.featp.cb2,net.fstn_bmm1_res_trans,net.cbr2_output,net.cbr2_output_conv,net.cbr2_output_bn);
-    //------CB MAX
-    std::string convStr = "feat.conv3";
-    std::string bnStr = "feat.bn3";
     GPU_CBR_train(false,batchSize,numPoints,encoderOC2,encoderOC3,
     dParams.featp.cb3,net.cbr2_output, net.feat_bn3,net.feat_bn3_conv,net.feat_bn3_bn);
     GPU_MaxPooling_train(encoderOC3, batchSize, maxnp,net.feat_bn3, net.encoder_output, net.encoder_output_idx); // Max pooling
@@ -2122,6 +2174,7 @@ void Train_GPU (int inChannels,int batchSize,int numPoints,
     LogSoftMax_GPU_train(label,net.softmax_input,
     net.softmax_output,delta.softmax_input,correct_table,10,batchSize);
 
+
 #ifdef BACKDEBUG
     std::cout << "BACKWARDING" << std::endl;
 #endif
@@ -2134,11 +2187,19 @@ void Train_GPU (int inChannels,int batchSize,int numPoints,
     net.bn1_part5_fbr2f,delta.bn1_part5_fbr2f,
     net.bn2_part5_fbr2f,delta.bn2_part5_fbr2f
     );
-    //printVector_GPU(moParams.nonep.f3.weight, 10);
+    MaxPooling_bp(encoderOC3, batchSize, maxnp, net.encoder_output_idx, delta.encoder_output, delta.feat_bn3 );
+    CBR_bp(false,batchSize,numPoints,encoderOC2,encoderOC3,
+    dParams.featp.cb3, upParams.featp.cb3, net.cbr2_output, net.feat_bn3, net.feat_bn3_conv,
+    delta.feat_bn3, delta.feat_bn3_conv, delta.cbr2_output, net.feat_bn3_bn, delta.feat_bn3_bn);
+    CBR_bp(true,batchSize,numPoints,fstn_inChannel,encoderOC2,
+    dParams.featp.cb2, upParams.featp.cb2, net.fstn_bmm1_res_trans,net.cbr2_output,net.cbr2_output_conv,
+    delta.cbr2_output,delta.cbr2_output_conv, delta.fstn_bmm1_res_trans, net.cbr2_output_bn, delta.cbr2_output_bn);
+
+
     //BP_UPDATE_Momentum(dParams.nonep.f3.weight,upParams.nonep.f3.weight,moParams.nonep.f3.weight,256*10);
     FBR2F_update(512,256,10,encoderOC3,dParams.nonep,upParams.nonep,moParams.nonep);
-    //printVector_GPU(moParams.nonep.f3.weight, 10);
-    //FC_bp(batchSize,)
+    FB_update(encoderOC2,encoderOC3,dParams.featp.cb3, upParams.featp.cb3, moParams.featp.cb3);
+    FB_update(fstn_inChannel,encoderOC2,dParams.featp.cb2, upParams.featp.cb2, moParams.featp.cb2);
     // F->RB->F->RB->F
     // MAX->B->C -> RB->C -> TRANS-> ......
     

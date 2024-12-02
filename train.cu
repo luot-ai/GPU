@@ -1049,24 +1049,25 @@ void GPU_Bmm(float* input_A,float* input_B,float* output,int M_A,int K_A,int K_B
     for(int b=0;b<BatchSize;b++)
     {
         check_error(cudaPeekAtLastError());
-        
-        // 强制同步，确保没有挂起的 CUDA 操作
-        cudaDeviceSynchronize();
+        //cudaDeviceSynchronize();
         gemm_gpu(false,false,M_A,N_B,K_A,1.0f, input_A+b*M_A*K_A,K_A,input_B+b*K_B*N_B,N_B,0.0f,output+b*M_A*N_B,N_B);
         check_error(cudaPeekAtLastError());
     }
-    
-    
-    // const int BLK_X = 32;
-    // const int BLK_Y = 32;
-    // dim3 blockDim(BLK_X, BLK_Y);
-    // dim3 gridDim((N_B + BLK_X - 1) / BLK_X, (M_A + BLK_Y - 1) / BLK_Y,BatchSize);//X:宽度 Y：高度
-    // BMM_Kernel<<<gridDim, blockDim>>>(input_A, input_B, output, M_A, K_A, K_B, N_B, BatchSize);
-    // // 检查内核启动是否成功
-    // CUDA_CHECK(cudaGetLastError());
-    // // 同步设备并检查执行错误
-    // CUDA_CHECK(cudaDeviceSynchronize());
 }
+
+void Bmm_bp(float* input_A,float* input_B,float* output,int M_A,int K_A,int K_B,int N_B,int BatchSize = 1)
+{
+    //std::cout << "--------BMM" << std::endl;
+    for(int b=0;b<BatchSize;b++)
+    {
+        check_error(cudaPeekAtLastError());
+        cudaDeviceSynchronize();
+        gemm_gpu(true,false,K_A,N_B,M_A,1.0f,  input_A+b*M_A*K_A,K_A,  output+b*M_A*N_B, N_B, 0.0f, input_B+b*K_B*N_B,N_B);
+        gemm_gpu(false,true,M_A,K_A,N_B,1.0f,  output+b*M_A*N_B, N_B,  input_B+b*K_B*N_B,N_B, 0.0f, input_A+b*M_A*K_A,K_A);
+        check_error(cudaPeekAtLastError());
+    }
+}
+
 
 __global__ void transpose_Kernel(float* input,float* output,int dim0,int dim1,int dim2)
 {
@@ -2246,15 +2247,26 @@ void Train_GPU (int inChannels,int batchSize,int numPoints,
     CBR_bp(true,batchSize,numPoints,fstn_inChannel,encoderOC2,
     dParams.featp.cb2, upParams.featp.cb2, net.fstn_bmm1_res_trans,net.cbr2_output,net.cbr2_output_conv,
     delta.cbr2_output,delta.cbr2_output_conv, delta.fstn_bmm1_res_trans, net.cbr2_output_bn, delta.cbr2_output_bn);
+    GPU_transpose(delta.fstn_bmm1_res_trans,delta.fstn_bmm1_res,batchSize,fstn_inChannel,numPoints);
+    Bmm_bp(delta.fstn_input_trans,delta.stnkd_out,delta.fstn_bmm1_res,numPoints,fstn_inChannel,fstn_inChannel,fstn_inChannel,batchSize);
+    GPU_transpose(delta.fstn_input_trans, delta.fstn_input, batchSize,numPoints,fstn_inChannel);
+#ifdef BACKDEBUG
+    std::cout << "PART3:STNkd, backwarding" << std::endl;
+#endif
+    FBR2F_bp(fstn_FC_OC1,fstn_FC_OC2,fstn_FC_OC3,batchSize,fstn_OC3, dParams.stnkdp.fb2f, upParams.stnkdp.fb2f,
+    net.fstn_maxp_output,net.relu1_output_fstn_fbr2f,net.relu2_output_fstn_fbr2f,
+    net.fc1_output_fstn_fbr2f,net.fc2_output_fstn_fbr2f,
+    delta.fc1_output_fstn_fbr2f,delta.fc2_output_fstn_fbr2f,delta.stnkd_out,
+    delta.relu1_output_fstn_fbr2f,delta.relu2_output_fstn_fbr2f,delta.fstn_maxp_output,
+    net.bn1_fstn_fbr2f,delta.bn1_fstn_fbr2f,
+    net.bn2_fstn_fbr2f,delta.bn2_fstn_fbr2f
+    );
+    MaxPooling_bp(fstn_OC3, batchSize, maxnp, net.fstn_maxp_output_idx, delta.fstn_maxp_output, delta.fstn_CBR3_output);
 
-
-    //BP_UPDATE_Momentum(dParams.nonep.f3.weight,upParams.nonep.f3.weight,moParams.nonep.f3.weight,256*10);
     FBR2F_update(512,256,10,encoderOC3,dParams.nonep,upParams.nonep,moParams.nonep);
-    FB_update(encoderOC2,encoderOC3,dParams.featp.cb3, upParams.featp.cb3, moParams.featp.cb3);
-    FB_update(fstn_inChannel,encoderOC2,dParams.featp.cb2, upParams.featp.cb2, moParams.featp.cb2);
-    // F->RB->F->RB->F
-    // MAX->B->C -> RB->C -> TRANS-> ......
-    
+    FB_update(encoderOC2,encoderOC3,dParams.featp.cb3, upParams.featp.cb3, moParams.featp.cb3);//CB
+    FB_update(fstn_inChannel,encoderOC2,dParams.featp.cb2, upParams.featp.cb2, moParams.featp.cb2);//CB
+    FBR2F_update(fstn_FC_OC1,fstn_FC_OC2,fstn_FC_OC3,fstn_OC3,dParams.stnkdp.fb2f,upParams.stnkdp.fb2f,moParams.stnkdp.fb2f);
 }
 
 int main(int argc, char *argv[]) {

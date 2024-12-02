@@ -1843,14 +1843,14 @@ void MaxPooling_bp(int ics, int batchSize, int numPoints, float* idx, float* del
 }
 
 void conv_bp(int batchSize,int numPoints,int inChannels,int outChannels,
-float* input, float* weight, float * delta_from, float * delta_gen, float* weight_up, float* bias_up) {
+float* input, float* weight, float * delta_from, float * delta_gen, float* weight_up, float* bias_up , float add_up=0.0f) {
     //delta gen
     int M = inChannels;
     int N = numPoints;
     int K = outChannels;
     for (int i = 0; i < batchSize; i++)
     {
-        gemm_gpu(true, false, M, N, K, 1.0, weight, M, delta_from+i*K*N, N, 0.0, delta_gen+i*M*N, N);
+        gemm_gpu(true, false, M, N, K, 1.0, weight, M, delta_from+i*K*N, N, add_up, delta_gen+i*M*N, N);
     }
     //WEIGHT UP:
     M = outChannels;
@@ -1873,7 +1873,7 @@ float* input, float* weight, float * delta_from, float * delta_gen, float* weigh
 void CBR_bp(bool relu,int batchSize, int numPoints, int inFeatures, int outFeatures,
 wbBnP& cbp, wbBnP& cbp_up, float* input, float* reluOutput, float* convOutput,
 float* delta_from,float* delta_conv,float* delta_gen,
-bn_layer& bn,bn_layer& bn_delta)
+bn_layer& bn,bn_layer& bn_delta,float add_up=0.0f)
 {
     BR_bp(relu,outFeatures,batchSize,numPoints,
     cbp.bn_weight,convOutput,reluOutput,
@@ -1881,7 +1881,30 @@ bn_layer& bn,bn_layer& bn_delta)
     delta_from,delta_conv,bn_delta.mean,bn_delta.var,
     cbp_up.bn_weight, cbp_up.bn_bias);
     conv_bp(batchSize,numPoints,inFeatures,outFeatures,input,cbp.weight,
-    delta_conv, delta_gen, cbp_up.weight, cbp_up.bias);
+    delta_conv, delta_gen, cbp_up.weight, cbp_up.bias , add_up);
+}
+void CBR3_bp(bool relu,int OC1,int OC2,int OC3,int batchSize,int numPoints,int inics,
+CB3P &cb3p,CB3P &cb3p_up, float* input, float* output,
+float* relu1_output,float* relu2_output,float* conv1_output,float* conv2_output,float* conv3_output,
+float* delta_conv1,float* delta_conv2,float* delta_conv3,
+float* delta_from, float* delta_relu1,float* delta_relu2,float* delta_gen, 
+bn_layer& bn1,bn_layer& bn2,bn_layer& bn3,
+bn_layer& bn1_delta,bn_layer& bn2_delta,bn_layer& bn3_delta,float add_up=0.0f)
+{
+    #ifdef BACKDEBUG
+    std::cout << "----START CBR3_bp" << std::endl;
+    #endif
+    CBR_bp(relu, batchSize, numPoints, OC2, OC3, cb3p.cb3, cb3p_up.cb3,
+    relu2_output, output, conv3_output,
+    delta_from, delta_conv3, delta_relu2, bn3,bn3_delta);
+
+    CBR_bp(relu, batchSize, numPoints, OC1, OC2, cb3p.cb2, cb3p_up.cb2,
+    relu1_output, relu2_output, conv2_output,
+    delta_relu2, delta_conv2, delta_relu1, bn2,bn2_delta);
+
+    CBR_bp(relu, batchSize, numPoints, inics, OC1, cb3p.cb1, cb3p_up.cb1,
+    input, relu1_output, conv1_output,
+    delta_relu1, delta_conv1, delta_gen, bn1,bn1_delta , add_up);
 }
 
 __global__ void BP_UPDATE_Kernal_Momentum(float *N, float *delta, float *momentum, int width, float learning_rate, float momentum_factor) {
@@ -1912,6 +1935,15 @@ FB2FP &fb2f,FB2FP &fb2f_up,FB2FP &fb2f_mo)
     FB_update(OC1,OC2,fb2f.fb2, fb2f_up.fb2, fb2f_mo.fb2);
     FB_update(inics,OC1,fb2f.fb1, fb2f_up.fb1, fb2f_mo.fb1);
 }
+void CBR3_update(int OC1,int OC2,int OC3,int inics,
+CB3P &cb3p,CB3P &cb3p_up,CB3P &cb3p_mo)
+{
+    FB_update(OC2,OC3,cb3p.cb3, cb3p_up.cb3, cb3p_mo.cb3);
+    FB_update(OC1,OC2,cb3p.cb2, cb3p_up.cb2, cb3p_mo.cb2);
+    FB_update(inics,OC1,cb3p.cb1, cb3p_up.cb1, cb3p_mo.cb1);
+}
+
+
 
 void Train_GPU (int inChannels,int batchSize,int numPoints,
             int* correct_table,int* label,float* input,
@@ -2262,11 +2294,21 @@ void Train_GPU (int inChannels,int batchSize,int numPoints,
     net.bn2_fstn_fbr2f,delta.bn2_fstn_fbr2f
     );
     MaxPooling_bp(fstn_OC3, batchSize, maxnp, net.fstn_maxp_output_idx, delta.fstn_maxp_output, delta.fstn_CBR3_output);
+    CBR3_bp(true,fstn_OC1,fstn_OC2,fstn_OC3, batchSize, numPoints,fstn_inChannel,
+    dParams.stnkdp.cb3, upParams.stnkdp.cb3, net.fstn_input, 
+    net.fstn_CBR3_output,net.relu1_output_fstn_cbr,net.relu2_output_fstn_cbr,
+    net.conv1_output_fstn_cbr,net.conv2_output_fstn_cbr,net.conv3_output_fstn_cbr,
+    delta.conv1_output_fstn_cbr,delta.conv2_output_fstn_cbr,delta.conv3_output_fstn_cbr,
+    delta.fstn_CBR3_output,delta.relu1_output_fstn_cbr,delta.relu2_output_fstn_cbr,delta.fstn_input, 
+    net.bn1_fstn_cbr,net.bn2_fstn_cbr,net.bn3_fstn_cbr,
+    delta.bn1_fstn_cbr,delta.bn2_fstn_cbr,delta.bn3_fstn_cbr,1.0f
+    );
 
     FBR2F_update(512,256,10,encoderOC3,dParams.nonep,upParams.nonep,moParams.nonep);
     FB_update(encoderOC2,encoderOC3,dParams.featp.cb3, upParams.featp.cb3, moParams.featp.cb3);//CB
     FB_update(fstn_inChannel,encoderOC2,dParams.featp.cb2, upParams.featp.cb2, moParams.featp.cb2);//CB
     FBR2F_update(fstn_FC_OC1,fstn_FC_OC2,fstn_FC_OC3,fstn_OC3,dParams.stnkdp.fb2f,upParams.stnkdp.fb2f,moParams.stnkdp.fb2f);
+    CBR3_update(fstn_OC1,fstn_OC2,fstn_OC3,fstn_inChannel,dParams.stnkdp.cb3, upParams.stnkdp.cb3, moParams.stnkdp.cb3);
 }
 
 int main(int argc, char *argv[]) {

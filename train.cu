@@ -34,8 +34,8 @@
 #define CLASSNUM 10
 #define DARKNETBLK 512
 #define BLOCK 512
-#define EPOCH 5
-#define PRETRAIN 1
+#define EPOCH 8
+#define PRETRAIN 0
 // #define DEBUG
 // #define BACKDEBUG
 // #define USECONVMAX (SAMPLE == 0 ? 1 : (NPOINT >= 128 ? 1 : 0))
@@ -1055,15 +1055,19 @@ void GPU_Bmm(float* input_A,float* input_B,float* output,int M_A,int K_A,int K_B
     }
 }
 
-void Bmm_bp(float* input_A,float* input_B,float* output,int M_A,int K_A,int K_B,int N_B,int BatchSize = 1)
+void Bmm_bp(float* input_A,float* input_B,float* delta_a,float* delta_b,float* delta_from,
+int M_A,int K_A,int K_B,int N_B,int BatchSize = 1,bool genA = true)
 {
     //std::cout << "--------BMM" << std::endl;
     for(int b=0;b<BatchSize;b++)
     {
         check_error(cudaPeekAtLastError());
         cudaDeviceSynchronize();
-        gemm_gpu(true,false,K_A,N_B,M_A,1.0f,  input_A+b*M_A*K_A,K_A,  output+b*M_A*N_B, N_B, 0.0f, input_B+b*K_B*N_B,N_B);
-        gemm_gpu(false,true,M_A,K_A,N_B,1.0f,  output+b*M_A*N_B, N_B,  input_B+b*K_B*N_B,N_B, 0.0f, input_A+b*M_A*K_A,K_A);
+        gemm_gpu(true,false,K_A,N_B,M_A,1.0f,  input_A+b*M_A*K_A,K_A,  delta_from+b*M_A*N_B, N_B, 0.0f, delta_b+b*K_B*N_B,N_B);
+        if(genA)
+        {
+            gemm_gpu(false,true,M_A,K_A,N_B,1.0f,  delta_from+b*M_A*N_B, N_B,  input_B+b*K_B*N_B,N_B, 0.0f, delta_a+b*M_A*K_A,K_A);
+        }
         check_error(cudaPeekAtLastError());
     }
 }
@@ -2212,7 +2216,7 @@ void Train_GPU (int inChannels,int batchSize,int numPoints,
     net.bn1_stn_cbr,net.bn2_stn_cbr,net.bn3_stn_cbr);   // conv-bn-relu * 3
     GPU_MaxPooling_train(OC3, batchSize, maxnp,net.CBR3_output, net.maxp_output,net.maxp_output_idx); // Max pooling    
     GPU_FBR_2_F_train(FC_OC1,FC_OC2,FC_OC3,batchSize,OC3,dParams.stn3dp.fb2f,net.maxp_output,
-    net.stn3d_out,net.relu1_output_stn_fbr2f,net.relu1_output_stn_fbr2f,
+    net.stn3d_out,net.relu1_output_stn_fbr2f,net.relu2_output_stn_fbr2f,
     net.fc1_output_stn_cbr,net.fc2_output_stn_cbr,net.bn1_stn_fbr2f,net.bn2_stn_fbr2f);// fc-bn-relu * 2 + fc
     matrix_add_I(net.stn3d_out,3,batchSize);
 
@@ -2221,7 +2225,6 @@ void Train_GPU (int inChannels,int batchSize,int numPoints,
 #endif
     GPU_Bmm(input,net.stn3d_out,net.bmm1_res,numPoints,inChannels,inChannels,encoderIC1,batchSize);
     GPU_transpose(net.bmm1_res,net.bmm1_res_trans,batchSize,numPoints,encoderIC1);
-    //GPU_CBR(batchSize,numPoints,encoderIC1,fstn_inChannel,dParams.featp.cb1,net.bmm1_res_trans,net.fstn_input);
     GPU_CBR_train(true,batchSize,numPoints,encoderIC1,fstn_inChannel,dParams.featp.cb1,net.bmm1_res_trans,net.fstn_input,net.fstn_input_conv,net.fstn_input_bn);
 
 #ifdef DEBUG
@@ -2272,6 +2275,10 @@ void Train_GPU (int inChannels,int batchSize,int numPoints,
     net.bn1_part5_fbr2f,delta.bn1_part5_fbr2f,
     net.bn2_part5_fbr2f,delta.bn2_part5_fbr2f
     );
+
+#ifdef BACKDEBUG
+    std::cout << "PART4, BACKWARDING" << std::endl;
+#endif
     MaxPooling_bp(encoderOC3, batchSize, maxnp, net.encoder_output_idx, delta.encoder_output, delta.feat_bn3 );
     CBR_bp(false,batchSize,numPoints,encoderOC2,encoderOC3,
     dParams.featp.cb3, upParams.featp.cb3, net.cbr2_output, net.feat_bn3, net.feat_bn3_conv,
@@ -2280,8 +2287,10 @@ void Train_GPU (int inChannels,int batchSize,int numPoints,
     dParams.featp.cb2, upParams.featp.cb2, net.fstn_bmm1_res_trans,net.cbr2_output,net.cbr2_output_conv,
     delta.cbr2_output,delta.cbr2_output_conv, delta.fstn_bmm1_res_trans, net.cbr2_output_bn, delta.cbr2_output_bn);
     GPU_transpose(delta.fstn_bmm1_res_trans,delta.fstn_bmm1_res,batchSize,fstn_inChannel,numPoints);
-    Bmm_bp(delta.fstn_input_trans,delta.stnkd_out,delta.fstn_bmm1_res,numPoints,fstn_inChannel,fstn_inChannel,fstn_inChannel,batchSize);
+    Bmm_bp(net.fstn_input_trans,net.stnkd_out,delta.fstn_input_trans,delta.stnkd_out,delta.fstn_bmm1_res,
+    numPoints,fstn_inChannel,fstn_inChannel,fstn_inChannel,batchSize);
     GPU_transpose(delta.fstn_input_trans, delta.fstn_input, batchSize,numPoints,fstn_inChannel);
+
 #ifdef BACKDEBUG
     std::cout << "PART3:STNkd, backwarding" << std::endl;
 #endif
@@ -2304,11 +2313,47 @@ void Train_GPU (int inChannels,int batchSize,int numPoints,
     delta.bn1_fstn_cbr,delta.bn2_fstn_cbr,delta.bn3_fstn_cbr,1.0f
     );
 
+#ifdef DEBUG
+    std::cout << "PART2:backwarding" << std::endl;
+#endif
+    CBR_bp(true,batchSize,numPoints,encoderIC1,fstn_inChannel,
+    dParams.featp.cb1, upParams.featp.cb1, net.bmm1_res_trans, net.fstn_input, net.fstn_input_conv,
+    delta.fstn_input, delta.fstn_input_conv, delta.bmm1_res_trans,
+    net.fstn_input_bn,delta.fstn_input_bn);
+    GPU_transpose(delta.bmm1_res_trans, delta.bmm1_res, batchSize, encoderIC1, numPoints);
+    Bmm_bp(input,net.stn3d_out,NULL,delta.stn3d_out,delta.bmm1_res,
+    numPoints,inChannels,inChannels,encoderIC1,batchSize,false);
+
+#ifdef BACKDEBUG
+    std::cout << "PART1:STN3d, backwarding" << std::endl;
+#endif
+    FBR2F_bp(FC_OC1,FC_OC2,FC_OC3,batchSize,OC3, dParams.stn3dp.fb2f, upParams.stn3dp.fb2f,
+    net.maxp_output,net.relu1_output_stn_fbr2f,net.relu2_output_stn_fbr2f,
+    net.fc1_output_stn_cbr,net.fc2_output_stn_cbr,
+    delta.fc1_output_stn_cbr,delta.fc2_output_stn_cbr,delta.stn3d_out,
+    delta.relu1_output_stn_fbr2f,delta.relu2_output_stn_fbr2f,delta.maxp_output,
+    net.bn1_stn_fbr2f,delta.bn1_stn_fbr2f,
+    net.bn2_stn_fbr2f,delta.bn2_stn_fbr2f
+    );
+    MaxPooling_bp(OC3, batchSize, maxnp, net.maxp_output_idx, delta.maxp_output, delta.CBR3_output);
+    CBR3_bp(true,OC1,OC2,OC3, batchSize, numPoints,inChannels,
+    dParams.stn3dp.cb3, upParams.stn3dp.cb3, net.input_trans, 
+    net.CBR3_output,net.relu1_output_stn_cbr,net.relu2_output_stn_cbr,
+    net.conv1_output_stn_cbr,net.conv2_output_stn_cbr,net.conv3_output_stn_cbr,
+    delta.conv1_output_stn_cbr,delta.conv2_output_stn_cbr,delta.conv3_output_stn_cbr,
+    delta.CBR3_output,delta.relu1_output_stn_cbr,delta.relu2_output_stn_cbr,delta.input_trans, 
+    net.bn1_stn_cbr,net.bn2_stn_cbr,net.bn3_stn_cbr,
+    delta.bn1_stn_cbr,delta.bn2_stn_cbr,delta.bn3_stn_cbr
+    );//这里的delta.input_trans, 没必要生成TODO:
+
     FBR2F_update(512,256,10,encoderOC3,dParams.nonep,upParams.nonep,moParams.nonep);
     FB_update(encoderOC2,encoderOC3,dParams.featp.cb3, upParams.featp.cb3, moParams.featp.cb3);//CB
     FB_update(fstn_inChannel,encoderOC2,dParams.featp.cb2, upParams.featp.cb2, moParams.featp.cb2);//CB
     FBR2F_update(fstn_FC_OC1,fstn_FC_OC2,fstn_FC_OC3,fstn_OC3,dParams.stnkdp.fb2f,upParams.stnkdp.fb2f,moParams.stnkdp.fb2f);
     CBR3_update(fstn_OC1,fstn_OC2,fstn_OC3,fstn_inChannel,dParams.stnkdp.cb3, upParams.stnkdp.cb3, moParams.stnkdp.cb3);
+    FB_update(encoderIC1,fstn_inChannel,dParams.featp.cb1, upParams.featp.cb1, moParams.featp.cb1);//CB
+    FBR2F_update(FC_OC1,FC_OC2,FC_OC3,OC3,dParams.stn3dp.fb2f,upParams.stn3dp.fb2f,moParams.stn3dp.fb2f);
+    CBR3_update(OC1,OC2,OC3,inChannels,dParams.stn3dp.cb3, upParams.stn3dp.cb3, moParams.stn3dp.cb3);
 }
 
 int main(int argc, char *argv[]) {
@@ -2324,7 +2369,7 @@ int main(int argc, char *argv[]) {
     read_params(dir);
 
     // 读输入：主机
-    std::string file_path = "./data/test_point_clouds.h5";
+    std::string file_path = "./data/train_point_clouds.h5";
     std::vector<std::vector<float>> list_of_points;
     std::vector<int> list_of_labels;
     read_h5_file(file_path, list_of_points, list_of_labels);

@@ -546,16 +546,16 @@ def do_inference(list_of_points,list_of_labels,params): #请在本函数下使�
     model_input = torch.tensor(np.array(list_of_points), dtype=torch.float32, device='cuda')
     
     trans = stnd(model_input,"feat.stn.",IC,OC1,OC2,OC3,FC_OC1,FC_OC2,FC_OC3)
-    x_mul_trans = bmm(model_input,trans,batchSize,numPoints,3,3)
-    feat_conv_1_out = CBR(x_mul_trans, "feat." , 1 , 3 , 64)
+    x_mul_trans = bmm(model_input,trans,batchSize,numPoints,IC,IC)
+    feat_conv_1_out = CBR(x_mul_trans, "feat." , 1 , encoderIC1 , fstn_IC)
 
     trans_feat = stnd(feat_conv_1_out,"feat.fstn.",fstn_IC,fstn_OC1,fstn_OC2,fstn_OC3,fstn_FC_OC1,fstn_FC_OC2,fstn_FC_OC3)
-    x_mul_trans_feat = bmm(feat_conv_1_out,trans_feat,batchSize,32,64,64)
-    feat_conv_2_out = CBR(x_mul_trans_feat, "feat.", 2 , 64, 128)
-    feat_conv_3_out = CBR(feat_conv_2_out, "feat.", 3 , 128, 1024 , "norelu")
-    feat_output = max_along_dim(feat_conv_3_out, batchSize, 1024, 32, block_size=32)
+    x_mul_trans_feat = bmm(feat_conv_1_out,trans_feat,batchSize,numPoints,fstn_IC,fstn_IC)
+    feat_conv_2_out = CBR(x_mul_trans_feat, "feat.", 2 , fstn_IC, encoderOC2)
+    feat_conv_3_out = CBR(feat_conv_2_out, "feat.", 3 , encoderOC2, encoderOC3 , "norelu")
+    feat_output = max_along_dim(feat_conv_3_out, batchSize, encoderOC3, numPoints, block_size=32)
 
-    fc_3_out = FBR_2_F(feat_output,"",1024,512,256,10,off=0)
+    fc_3_out = FBR_2_F(feat_output,"",encoderOC3,512,256,10,off=0)
     final_output = compute_max(fc_3_out, batchSize, 10)
     correct_num = 0
 

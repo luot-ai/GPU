@@ -22,6 +22,7 @@
 #include <cassert>
 #include <random> // 包含随机数生成相关的库
 #include <ctime>  // 包含 time 函数
+#include <curand_kernel.h>
 
 
 #define GEMMBLKMAX 128
@@ -34,8 +35,10 @@
 #define CLASSNUM 10
 #define DARKNETBLK 512
 #define BLOCK 512
-#define EPOCH 8
+#define EPOCH 15
 #define PRETRAIN 0
+#define USEMATDIFF 0
+#define DROPOUT 0
 // #define DEBUG
 // #define BACKDEBUG
 // #define USECONVMAX (SAMPLE == 0 ? 1 : (NPOINT >= 128 ? 1 : 0))
@@ -321,6 +324,30 @@ void read_params(std::string dir) {
     return ;
 }
 
+__global__ void initialize_weights(float *weights, int width, int fan_in, unsigned long long seed) {
+    int idx = threadIdx.x + blockIdx.x * blockDim.x;
+
+    // 计算标准差 std = sqrt(2.0f / fan_in)（He 初始化）
+    if (idx < width) {
+        unsigned long long thread_seed = seed + idx;
+        curandState state;
+        curand_init(thread_seed, idx, 0, &state);  // 为每个线程初始化随机数生成器
+
+        // He 初始化，生成均值为0，标准差为 sqrt(2.0f / fan_in) 的正态分布
+        float std = sqrtf(2.0f / fan_in);
+        weights[idx] = curand_normal(&state) * std;
+    }
+}
+
+void para_init_he(float *weights, int width, int fan_in) {
+    int blockSize = 256;
+    int numBlocks = (width + blockSize - 1) / blockSize;
+    unsigned long long seed = static_cast<unsigned long long>(time(0));
+    // 调用 kernel 初始化权重
+    initialize_weights<<<numBlocks, blockSize>>>(weights, width, fan_in, seed);
+    cudaDeviceSynchronize();
+}
+
 void para_init(float* N,int width,float init = 0.2){
     std::random_device rd;
     std::mt19937 gen(rd());  
@@ -536,7 +563,7 @@ struct fcp {
     float* weight; // Conv weight
     float* bias;   // Conv bias
 };
-void read_fcp(const std::string& layer, fcp& wbp,int i,bool update=false) {
+void read_fcp(const std::string& layer, fcp& wbp,int i,bool update=false,float IC=0) {
     std::string fiStr = std::to_string(i);;
     std::string name = layer + "fc" + fiStr;  
     //std::cout << name << std::endl;
@@ -558,8 +585,8 @@ void read_fcp(const std::string& layer, fcp& wbp,int i,bool update=false) {
         }
         else 
         {
-            para_init(wbp.weight,wcnt);
-            para_init(wbp.bias,bcnt);
+            para_init_he(wbp.weight,wcnt,IC);
+            cudaMemset(wbp.bias, 0, bcnt * sizeof(float));
         }
     }
 }
@@ -576,7 +603,8 @@ struct wbBnP {
     float* bn_mean;   // BatchNorm running mean
     float* bn_var;    // BatchNorm running var
 };
-void read_wbBnP(const std::string& layer,const std::string& cf,wbBnP& wbBnP,int i,int param_offset,bool update=false) {
+void read_wbBnP(const std::string& layer,const std::string& cf,wbBnP& wbBnP,int i,int param_offset,bool update=false,
+float IC=0) {
 
     std::string cfiStr = std::to_string(i);
     std::string biStr = std::to_string(i+param_offset);
@@ -617,10 +645,10 @@ void read_wbBnP(const std::string& layer,const std::string& cf,wbBnP& wbBnP,int 
         }
         else 
         {
-            para_init(wbBnP.weight,wcnt);
-            para_init(wbBnP.bias,bcnt);
-            para_init(wbBnP.bn_weight,bn_wcnt);
-            para_init(wbBnP.bn_bias,bn_bcnt);
+            para_init_he(wbBnP.weight,wcnt,IC);
+            cudaMemset(wbBnP.bias, 0, bcnt * sizeof(float));
+            para_init_val(wbBnP.bn_weight,bn_wcnt,1.0f);
+            cudaMemset(wbBnP.bn_bias, 0, bn_bcnt * sizeof(float));
             cudaMemset(wbBnP.bn_mean, 0, bn_mcnt * sizeof(float));
             para_init_val(wbBnP.bn_var, bn_vcnt, 1.0f);
         }
@@ -643,10 +671,11 @@ struct CB3P {
     wbBnP cb2;
     wbBnP cb3;
 };
-void read_CB3P(const std::string& layer,CB3P& CB3P,bool update=false) {
-    read_wbBnP(layer,"conv",CB3P.cb1,1,0,update);
-    read_wbBnP(layer,"conv",CB3P.cb2,2,0,update);
-    read_wbBnP(layer,"conv",CB3P.cb3,3,0,update);   
+void read_CB3P(const std::string& layer,CB3P& CB3P,bool update=false,
+float IC1=0,float IC2=0,float IC3=0) {
+    read_wbBnP(layer,"conv",CB3P.cb1,1,0,update,IC1);
+    read_wbBnP(layer,"conv",CB3P.cb2,2,0,update,IC2);
+    read_wbBnP(layer,"conv",CB3P.cb3,3,0,update,IC3);   
 }
 void free_CB3P(CB3P &CB3P,bool update=false){
     free_wbBnP(CB3P.cb1,update);
@@ -660,10 +689,11 @@ struct FB2FP {
     wbBnP fb2;
     fcp   f3;
 };
-void read_FB2FP(const std::string& layer,FB2FP& FB2FP,int param_offset,bool update=false)    {
-    read_wbBnP(layer,"fc",FB2FP.fb1,1,param_offset,update);
-    read_wbBnP(layer,"fc",FB2FP.fb2,2,param_offset,update);
-    read_fcp(layer,FB2FP.f3,3,update);
+void read_FB2FP(const std::string& layer,FB2FP& FB2FP,int param_offset,bool update=false,
+float IC1=0,float IC2=0,float IC3=0)    {
+    read_wbBnP(layer,"fc",FB2FP.fb1,1,param_offset,update,IC1);
+    read_wbBnP(layer,"fc",FB2FP.fb2,2,param_offset,update,IC2);
+    read_fcp(layer,FB2FP.f3,3,update,IC3);
 }
 void free_FB2FP(FB2FP &FB2FP,bool update=false){
     free_wbBnP(FB2FP.fb1,update);
@@ -675,9 +705,11 @@ struct stndP {
     CB3P cb3;
     FB2FP fb2f;
 };
-void read_stndP(const std::string& layer,stndP& stndP,bool update=false) {
-    read_CB3P(layer,stndP.cb3,update);
-    read_FB2FP(layer,stndP.fb2f,3,update);
+void read_stndP(const std::string& layer,stndP& stndP,bool update=false,
+float IC1=0,float IC2=0,float IC3=0,
+float fIC1=0,float fIC2=0,float fIC3=0) {
+    read_CB3P(layer,stndP.cb3,update,IC1,IC2,IC3);
+    read_FB2FP(layer,stndP.fb2f,3,update,fIC1,fIC2,fIC3);
 }
 void free_stndP(stndP& stndP,bool update=false){
     free_CB3P(stndP.cb3,update);
@@ -1056,14 +1088,14 @@ void GPU_Bmm(float* input_A,float* input_B,float* output,int M_A,int K_A,int K_B
 }
 
 void Bmm_bp(float* input_A,float* input_B,float* delta_a,float* delta_b,float* delta_from,
-int M_A,int K_A,int K_B,int N_B,int BatchSize = 1,bool genA = true)
+int M_A,int K_A,int K_B,int N_B,int BatchSize = 1,bool genA = true,float add_b = 0.0f)
 {
     //std::cout << "--------BMM" << std::endl;
     for(int b=0;b<BatchSize;b++)
     {
         check_error(cudaPeekAtLastError());
         cudaDeviceSynchronize();
-        gemm_gpu(true,false,K_A,N_B,M_A,1.0f,  input_A+b*M_A*K_A,K_A,  delta_from+b*M_A*N_B, N_B, 0.0f, delta_b+b*K_B*N_B,N_B);
+        gemm_gpu(true,false,K_A,N_B,M_A,1.0f,  input_A+b*M_A*K_A,K_A,  delta_from+b*M_A*N_B, N_B, add_b, delta_b+b*K_B*N_B,N_B);
         if(genA)
         {
             gemm_gpu(false,true,M_A,K_A,N_B,1.0f,  delta_from+b*M_A*N_B, N_B,  input_B+b*K_B*N_B,N_B, 0.0f, delta_a+b*M_A*K_A,K_A);
@@ -1071,7 +1103,6 @@ int M_A,int K_A,int K_B,int N_B,int BatchSize = 1,bool genA = true)
         check_error(cudaPeekAtLastError());
     }
 }
-
 
 __global__ void transpose_Kernel(float* input,float* output,int dim0,int dim1,int dim2)
 {
@@ -1512,7 +1543,7 @@ bn_layer& bn1,bn_layer& bn2,bn_layer& bn3) {
 }
 
 __global__ void FC_Kernel_gemv(int M,int batchSize,int N,float* input, 
-float* fcWeights, float* fcBias,float* output,float esp = 1e-5 )
+float* fcWeights, float* fcBias,float* output,float dropout = 0.0f,unsigned int seed = 0)
 {
     // Block index
     int bx = blockIdx.x;
@@ -1548,19 +1579,37 @@ float* fcWeights, float* fcBias,float* output,float esp = 1e-5 )
         res += __shfl_down_sync(0xffffffff, res, 4);// 0-4, 1-5, 2-6, etc.
         res += __shfl_down_sync(0xffffffff, res, 2);// 0-2, 1-3, 4-6, 5-7, etc.
         res += __shfl_down_sync(0xffffffff, res, 1);// 0-1, 2-3, 4-5, etc.
-        res+=fcBias[oc];
+        res += fcBias[oc];
         int index = oc + batch * M;
-        if(laneId==0) output[index] = res;
+        if(laneId==0) 
+        {
+            curandState state;
+            curand_init(seed, index, 0, &state);  
+            float rand_val = curand_uniform(&state);
+            if(dropout != 0.0f)
+            {
+                if (rand_val < dropout)
+                {
+                    res = 0.0f;
+                }
+                else
+                {
+                    res = res / (1.0f - dropout);
+                }
+            }
+            output[index]  = res;
+        }
     }
 }
 void FBRWRAP_GPU_train(int batchSize,int inFeatures,int outFeatures,float* input, 
 float* cudaFcWeights, float* cudaFcBias, 
 float* cudaBnWeights,float* cudaBnBias,float* cudaBnRM,float* cudaBnRV,
-float* output,float* fcOutput,bn_layer& bn,float esp = 1e-5)
+float* output,float* fcOutput,bn_layer& bn,float dropout = 0.0f)
 {
     dim3 blockDim(32,4);
     dim3 gridDim((outFeatures + 4 - 1) / 4,batchSize);//X:宽度 Y：高度
-    FC_Kernel_gemv<<<gridDim,blockDim>>>(outFeatures,batchSize,inFeatures,input,cudaFcWeights,cudaFcBias,fcOutput);
+    unsigned int seed = time(0); 
+    FC_Kernel_gemv<<<gridDim,blockDim>>>(outFeatures,batchSize,inFeatures,input,cudaFcWeights,cudaFcBias,fcOutput,dropout,seed);
     //BR_Kernel<<<batchSize, outFeatures>>>(true,1,cudaBnWeights,cudaBnBias,cudaBnRM,cudaBnRV,fcOutput,output);
     //TODO:这里用上面的会更快
     // normalize_gpu(fcOutput,output,cudaBnRM,cudaBnRV,batchSize,outFeatures,1);
@@ -1569,22 +1618,22 @@ float* output,float* fcOutput,bn_layer& bn,float esp = 1e-5)
     bn.mean,bn.var,bn.norm,cudaBnRM,cudaBnRV,fcOutput,output);
 }
 void GPU_FBR_train(int batchSize, int inFeatures, int outFeatures,wbBnP& fbp, 
-float* input, float* reluOutput, float* fcOutput,bn_layer& bn)
+float* input, float* reluOutput, float* fcOutput,bn_layer& bn,float dropout = 0.0f)
 {
     FBRWRAP_GPU_train(batchSize,inFeatures,outFeatures,input,
     fbp.weight,fbp.bias,
     fbp.bn_weight,fbp.bn_bias,
-    fbp.bn_mean,fbp.bn_var,reluOutput,fcOutput,bn);
+    fbp.bn_mean,fbp.bn_var,reluOutput,fcOutput,bn,dropout);
 }
 void GPU_FBR_2_F_train(int OC1,int OC2,int OC3,int batchSize,int inics,FB2FP &fb2f, 
 float* input, float* output,float* relu1_output,float* relu2_output,
-float* fc1_output,float* fc2_output,bn_layer& bn1,bn_layer& bn2,int param_offset=3)
+float* fc1_output,float* fc2_output,bn_layer& bn1,bn_layer& bn2,int param_offset=3,float dropout = 0.0f)
 {
 #ifdef DEBUG
     std::cout << "----START FBR_2_F TRAIN" << std::endl;
 #endif
     GPU_FBR_train(batchSize,inics,OC1,fb2f.fb1,input,relu1_output,fc1_output,bn1);
-    GPU_FBR_train(batchSize,OC1,OC2,fb2f.fb2,relu1_output,relu2_output,fc2_output,bn2);
+    GPU_FBR_train(batchSize,OC1,OC2,fb2f.fb2,relu1_output,relu2_output,fc2_output,bn2,dropout);
     Linear_GPU(batchSize,OC2, OC3,fb2f.f3.weight, fb2f.f3.bias, relu2_output, output);
 }
 
@@ -1761,6 +1810,17 @@ void relu_detla_gpu(float *output,float *delta,int N)
     check_error(cudaPeekAtLastError());
 }
 
+__global__ void dp_detla_kernel(float *output,float *delta,int N,float dp = 0.4f)
+{
+    int i = (blockIdx.x + blockIdx.y*gridDim.x) * blockDim.x + threadIdx.x;
+    if(i < N) delta[i] = (output[i] == 0.0f) ? 0.0f : delta[i] * (1.0f / (1.0f-dp));
+}
+void dp_detla_gpu(float *output,float *delta,int N,float dp = 0.4f)
+{
+    dp_detla_kernel<<<cuda_gridsize(N), BLOCK>>>(output,delta,N);
+    check_error(cudaPeekAtLastError());
+}
+
 void BR_bp(bool relu,int numFeatures, int batchSize, int numPoints,
 float* weight, float* input,float* output,
 float* mean, float* var, float* norm,
@@ -1778,11 +1838,12 @@ float* weight_up, float* bias_up,float esp = 1e-5)
     normalize_delta_gpu(input, mean, var, delta_mean, delta_var, batchSize, numFeatures, numPoints, delta_from);
 }
 void F_bp(int batchSize, int inFeatures, int outFeatures,float* input,float* weight,
-float * delta_from, float * delta_gen, float* weight_up, float* bias_up) {
+float * delta_from, float * delta_gen, float* weight_up, float* bias_up,float dp = 0.0f,float* output=NULL) {
     //delta gen: batchsize,outf * outf,inf
     int M = batchSize;
     int N = inFeatures;
     int K = outFeatures;
+    if(dp != 0.0f){dp_detla_gpu(output,delta_from,batchSize*outFeatures,dp);}
     gemm_gpu(false, false, M, N, K, 1.0, delta_from,K , weight,N, 0.0, delta_gen,N);
     //WEIGHT UP: outf,batchsize * batchsize,inf
     M = outFeatures;
@@ -1795,7 +1856,7 @@ float * delta_from, float * delta_gen, float* weight_up, float* bias_up) {
 void FBR_bp(int batchSize, int inFeatures, int outFeatures,
 wbBnP& fbp, wbBnP& fbp_up, float* input, float* reluOutput, float* fcOutput,
 float* delta_from,float* delta_fc,float* delta_gen,
-bn_layer& bn,bn_layer& bn_delta)
+bn_layer& bn,bn_layer& bn_delta,float dp = 0.0f)
 {
     BR_bp(true,outFeatures,batchSize,1,
     fbp.bn_weight,fcOutput,reluOutput,
@@ -1803,14 +1864,14 @@ bn_layer& bn,bn_layer& bn_delta)
     delta_from,delta_fc,bn_delta.mean,bn_delta.var,
     fbp_up.bn_weight, fbp_up.bn_bias);
     F_bp(batchSize,inFeatures,outFeatures,input,fbp.weight,
-    delta_fc, delta_gen, fbp_up.weight, fbp_up.bias);
+    delta_fc, delta_gen, fbp_up.weight, fbp_up.bias, dp, fcOutput);
 }
 void FBR2F_bp(int OC1,int OC2,int OC3,int batchSize,int inics,
 FB2FP &fb2f,FB2FP &fb2f_up, float* input, 
 float* relu1_output,float* relu2_output,float* fc1_output,float* fc2_output,
 float* delta_fc1,float* delta_fc2,float* delta_from,
 float* delta_relu1,float* delta_relu2,float* delta_gen, 
-bn_layer& bn1,bn_layer& bn1_delta,bn_layer& bn2,bn_layer& bn2_delta){
+bn_layer& bn1,bn_layer& bn1_delta,bn_layer& bn2,bn_layer& bn2_delta,float dp = 0.0f){
 
 #ifdef BACKDEBUG
     std::cout << "----START FBR2F_bp" << std::endl;
@@ -1820,7 +1881,7 @@ bn_layer& bn1,bn_layer& bn1_delta,bn_layer& bn2,bn_layer& bn2_delta){
 
     FBR_bp(batchSize,OC1,OC2,
     fb2f.fb2, fb2f_up.fb2, relu1_output, relu2_output, fc2_output,
-    delta_relu2, delta_fc2, delta_relu1, bn2, bn2_delta);
+    delta_relu2, delta_fc2, delta_relu1, bn2, bn2_delta,dp);
     
     FBR_bp(batchSize,inics,OC1,
     fb2f.fb1, fb2f_up.fb1,  input, relu1_output, fc1_output,
@@ -1947,6 +2008,41 @@ CB3P &cb3p,CB3P &cb3p_up,CB3P &cb3p_mo)
     FB_update(inics,OC1,cb3p.cb1, cb3p_up.cb1, cb3p_mo.cb1);
 }
 
+__global__ void mat_diff_loss_backward(
+    const float* trans_feat, // (batch_size, num_features, num_features)
+    float* grad_trans_feat,  // (batch_size, num_features, num_features)
+    int batch_size, int num_features) 
+{
+    int idx = blockIdx.x * blockDim.x + threadIdx.x;
+    int feature_size = num_features * num_features;
+
+    if (idx < batch_size * feature_size) {
+        int batch_idx = idx / feature_size;
+        int row = (idx % feature_size) / num_features;
+        int col = idx % num_features;
+
+        // Compute trans_feat[batch_idx] * trans_feat[batch_idx]^T
+        float diff = 0.0;
+        for (int k = 0; k < num_features; ++k) {
+            diff += trans_feat[batch_idx * feature_size + row * num_features + k] *
+                    trans_feat[batch_idx * feature_size + col * num_features + k];
+        }
+
+        // Subtract identity matrix
+        if (row == col) {
+            diff -= 1.0f; // I[row][col] = 1
+        }
+
+        // Compute gradient for backward pass
+        grad_trans_feat[idx] = 2 * diff * 0.001f;  // Scaled by 2
+    }
+}
+
+void compute_mat_diff_grad(const float* trans_feat, float* grad, int numFeatures, int batchSize) {
+    dim3 block(256);
+    dim3 grid((batchSize * numFeatures * numFeatures + block.x - 1) / block.x);
+    mat_diff_loss_backward<<<grid, block>>>(trans_feat, grad, batchSize, numFeatures);
+}
 
 
 void Train_GPU (int inChannels,int batchSize,int numPoints,
@@ -2255,10 +2351,12 @@ void Train_GPU (int inChannels,int batchSize,int numPoints,
 #ifdef DEBUG
     std::cout << "PART5:CLASSIFY, forwarding" << std::endl;
 #endif
+    float drop_rate = 0.0f;
+    if (DROPOUT == 1) drop_rate = 0.4f;
     GPU_FBR_2_F_train(512,256,10,batchSize,encoderOC3,dParams.nonep,
     net.encoder_output,net.softmax_input,
     net.relu1_output_part5_fbr2f,net.relu2_output_part5_fbr2f,
-    net.fc1_output_part5_fbr2f,net.fc2_output_part5_fbr2f,net.bn1_part5_fbr2f,net.bn2_part5_fbr2f,0);// fc-bn-relu * 2 + fc
+    net.fc1_output_part5_fbr2f,net.fc2_output_part5_fbr2f,net.bn1_part5_fbr2f,net.bn2_part5_fbr2f,0,drop_rate);// fc-bn-relu * 2 + fc
     LogSoftMax_GPU_train(label,net.softmax_input,
     net.softmax_output,delta.softmax_input,correct_table,10,batchSize);
 
@@ -2273,7 +2371,7 @@ void Train_GPU (int inChannels,int batchSize,int numPoints,
     delta.relu1_output_part5_fbr2f,delta.relu2_output_part5_fbr2f,
     delta.encoder_output,
     net.bn1_part5_fbr2f,delta.bn1_part5_fbr2f,
-    net.bn2_part5_fbr2f,delta.bn2_part5_fbr2f
+    net.bn2_part5_fbr2f,delta.bn2_part5_fbr2f, drop_rate
     );
 
 #ifdef BACKDEBUG
@@ -2287,8 +2385,14 @@ void Train_GPU (int inChannels,int batchSize,int numPoints,
     dParams.featp.cb2, upParams.featp.cb2, net.fstn_bmm1_res_trans,net.cbr2_output,net.cbr2_output_conv,
     delta.cbr2_output,delta.cbr2_output_conv, delta.fstn_bmm1_res_trans, net.cbr2_output_bn, delta.cbr2_output_bn);
     GPU_transpose(delta.fstn_bmm1_res_trans,delta.fstn_bmm1_res,batchSize,fstn_inChannel,numPoints);
+    float mat_diff_addup = 0.0f;
+    if(USEMATDIFF == 1)
+    {
+        mat_diff_addup = 1.0f;
+        compute_mat_diff_grad(net.stnkd_out,delta.stnkd_out,fstn_inChannel,batchSize);
+    }
     Bmm_bp(net.fstn_input_trans,net.stnkd_out,delta.fstn_input_trans,delta.stnkd_out,delta.fstn_bmm1_res,
-    numPoints,fstn_inChannel,fstn_inChannel,fstn_inChannel,batchSize);
+    numPoints,fstn_inChannel,fstn_inChannel,fstn_inChannel,batchSize,true,mat_diff_addup);
     GPU_transpose(delta.fstn_input_trans, delta.fstn_input, batchSize,numPoints,fstn_inChannel);
 
 #ifdef BACKDEBUG
@@ -2376,10 +2480,26 @@ int main(int argc, char *argv[]) {
     int all_num = list_of_points.size();
     //all_num = 32;
     //分配内存，迁移权重到device端
-    read_stndP("feat.stn.", dParams.stn3dp);
-    read_stndP("feat.fstn.", dParams.stnkdp);
-    read_CB3P("feat.", dParams.featp);
-    read_FB2FP("", dParams.nonep, 0);
+    int ch = 1024;
+    int ch_half = 512;
+    int ch_quarter = 256;
+    int OC1 = 64;
+    int OC2 = 128;
+    int OC3 = ch;
+    int FC_OC1 = ch_half;
+    int FC_OC2 = ch_quarter;
+    int fstn_inChannel = 64;//encoderOC1
+    int fstn_OC1 = 64;
+    int fstn_OC2 = 128;
+    int fstn_OC3 = ch;
+    int fstn_FC_OC1 = ch_half;
+    int fstn_FC_OC2 = ch_quarter;
+    int encoderIC1 = ic;
+    int encoderOC2 = 128;
+    read_stndP("feat.stn.", dParams.stn3dp,false,ic,OC1,OC2,OC3,FC_OC1,FC_OC2);
+    read_stndP("feat.fstn.", dParams.stnkdp,false,fstn_inChannel,fstn_OC1,fstn_OC2,fstn_OC3,fstn_FC_OC1,fstn_FC_OC2);
+    read_CB3P("feat.", dParams.featp,false,encoderIC1,fstn_inChannel,encoderOC2);
+    read_FB2FP("", dParams.nonep, 0,false,ch,512,256);
 
     read_stndP("feat.stn.", upParams.stn3dp,true);
     read_stndP("feat.fstn.", upParams.stnkdp,true);
@@ -2390,7 +2510,7 @@ int main(int argc, char *argv[]) {
     read_stndP("feat.fstn.", moParams.stnkdp,true);
     read_CB3P("feat.", moParams.featp,true);
     read_FB2FP("", moParams.nonep, 0 , true);
-    //printVector_GPU(moParams.nonep.f3.weight, 10);
+    //printVector_GPU(moParams.nonep.f3.weight, 10);f
     //分配内存 for 输入：device端
     size_t total_size = 0;
     float *device_all_points;

@@ -106,7 +106,7 @@ def get_cuda_autotune_config():
 def conv_bn_ru_kernel(
         a_ptr, b_ptr, conv_bias, c_ptr,
         bn_weight, bn_bias, bn_mean, bn_var,
-        batch_size, M, N, K,
+        M, N, K,
         stride_am, stride_ak,
         stride_bk, stride_bn,
         stride_cm, stride_cn,
@@ -201,7 +201,7 @@ def conv_bn_ru(x, conv_weight, conv_bias, bn_weight, bn_bias, bn_mean, bn_var, b
     conv_bn_ru_kernel[grid](
         x, conv_weight, conv_bias, conv_bn_ru_output,
         bn_weight, bn_bias, bn_mean, bn_var,
-        batch_size, width, out_channels, in_channels,
+        width, out_channels, in_channels,
         in_channels, 1,
         1, in_channels,
         out_channels, 1,
@@ -487,7 +487,6 @@ def bmm_kernel(
     c_mask = (offs_cm[:, None] < M) & (offs_cn[None, :] < N)
     tl.store(c_ptrs, c, mask=c_mask)
 def bmm(a, b, batch_size,M,K,N):
-    # 分配输出。
     c = torch.empty((batch_size, M, N), device=a.device, dtype=a.dtype)
     grid = lambda META: (triton.cdiv(M, META['BLOCK_SIZE_M']) * triton.cdiv(N, META['BLOCK_SIZE_N']), batch_size,)
     bmm_kernel[grid](

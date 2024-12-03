@@ -2474,7 +2474,7 @@ int main(int argc, char *argv[]) {
     read_params(dir);
 
     // 读输入：主机
-    std::string file_path = "./data/test_point_clouds.h5";
+    std::string file_path = "./data/train_point_clouds.h5";
     std::vector<std::vector<float>> list_of_points;
     std::vector<int> list_of_labels;
     read_h5_file(file_path, list_of_points, list_of_labels);

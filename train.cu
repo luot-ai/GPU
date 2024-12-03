@@ -35,7 +35,7 @@
 #define CLASSNUM 10
 #define DARKNETBLK 512
 #define BLOCK 512
-#define EPOCH 15
+#define EPOCH 30
 #define PRETRAIN 0
 #define USEMATDIFF 0
 #define DROPOUT 0
@@ -329,7 +329,7 @@ __global__ void initialize_weights(float *weights, int width, int fan_in, unsign
 
     // 计算标准差 std = sqrt(2.0f / fan_in)（He 初始化）
     if (idx < width) {
-        unsigned long long thread_seed = seed + idx;
+        unsigned long long thread_seed = seed ^ (idx * 0x5DEECE66DLL + 0xB);
         curandState state;
         curand_init(thread_seed, idx, 0, &state);  // 为每个线程初始化随机数生成器
 
@@ -345,7 +345,7 @@ void para_init_he(float *weights, int width, int fan_in) {
     unsigned long long seed = static_cast<unsigned long long>(time(0));
     // 调用 kernel 初始化权重
     initialize_weights<<<numBlocks, blockSize>>>(weights, width, fan_in, seed);
-    cudaDeviceSynchronize();
+    //cudaDeviceSynchronize();
 }
 
 void para_init(float* N,int width,float init = 0.2){
@@ -367,7 +367,7 @@ void para_init_val(float* N,int width,float val)
         h_bn_var[i] = val;  // 初始化为 1.0f
     }
     cudaMemcpy(N, h_bn_var, width * sizeof(float), cudaMemcpyHostToDevice);
-    cudaDeviceSynchronize(); 
+    //cudaDeviceSynchronize(); 
     free(h_bn_var);
 }
 struct bn_layer {
@@ -1094,7 +1094,7 @@ int M_A,int K_A,int K_B,int N_B,int BatchSize = 1,bool genA = true,float add_b =
     for(int b=0;b<BatchSize;b++)
     {
         check_error(cudaPeekAtLastError());
-        cudaDeviceSynchronize();
+        //cudaDeviceSynchronize();
         gemm_gpu(true,false,K_A,N_B,M_A,1.0f,  input_A+b*M_A*K_A,K_A,  delta_from+b*M_A*N_B, N_B, add_b, delta_b+b*K_B*N_B,N_B);
         if(genA)
         {
@@ -1583,11 +1583,12 @@ float* fcWeights, float* fcBias,float* output,float dropout = 0.0f,unsigned int 
         int index = oc + batch * M;
         if(laneId==0) 
         {
-            curandState state;
-            curand_init(seed, index, 0, &state);  
-            float rand_val = curand_uniform(&state);
             if(dropout != 0.0f)
             {
+                curandState state;
+                //unsigned long long thread_seed = seed ^ (idx * 0x5DEECE66DLL + 0xB);
+                curand_init(seed, index, 0, &state);  
+                float rand_val = curand_uniform(&state);
                 if (rand_val < dropout)
                 {
                     res = 0.0f;
@@ -2473,7 +2474,7 @@ int main(int argc, char *argv[]) {
     read_params(dir);
 
     // 读输入：主机
-    std::string file_path = "./data/train_point_clouds.h5";
+    std::string file_path = "./data/test_point_clouds.h5";
     std::vector<std::vector<float>> list_of_points;
     std::vector<int> list_of_labels;
     read_h5_file(file_path, list_of_points, list_of_labels);

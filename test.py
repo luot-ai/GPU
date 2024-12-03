@@ -8,6 +8,29 @@ import torch
 import triton
 import triton.language as tl
 
+ch = 1024
+ch_half = 512
+ch_quarter = 256
+numPoints  = 32
+batchSize  = 1000
+IC  = 3
+OC1 = 64
+OC2 = 128
+OC3 = ch
+FC_OC1 = ch_half
+FC_OC2 = ch_quarter
+FC_OC3 = 9
+fstn_IC = 64
+fstn_OC1 = 64
+fstn_OC2 = 128
+fstn_OC3 = ch
+fstn_FC_OC1 = ch_half
+fstn_FC_OC2 = ch_quarter
+fstn_FC_OC3 = fstn_IC * fstn_IC 
+encoderIC1 = IC
+encoderOC2 = 128
+encoderOC3 = ch
+
 def read_params(dir, device='cuda'):
     # 列出所有txt文件
     files = [f for f in os.listdir(dir) if f.endswith('.txt')]
@@ -476,54 +499,64 @@ def bmm(a, b, batch_size,M,K,N):
     )
     return c
 
-def stn3d(x):
-    stn3d_conv_1_out = conv_bn_ru(x, params["feat.stn.conv1.weight"], params["feat.stn.conv1.bias"], params["feat.stn.bn1.weight"], params["feat.stn.bn1.bias"], params["feat.stn.bn1.running_mean"], params["feat.stn.bn1.running_var"], 1000, 32, 3, 64, activation="relu")
-    stn3d_conv_2_out = conv_bn_ru(stn3d_conv_1_out, params["feat.stn.conv2.weight"], params["feat.stn.conv2.bias"], params["feat.stn.bn2.weight"], params["feat.stn.bn2.bias"], params["feat.stn.bn2.running_mean"], params["feat.stn.bn2.running_var"], 1000, 32, 64, 128, activation="relu")
-    stn3d_conv_3_out = conv_bn_ru(stn3d_conv_2_out, params["feat.stn.conv3.weight"], params["feat.stn.conv3.bias"], params["feat.stn.bn3.weight"], params["feat.stn.bn3.bias"], params["feat.stn.bn3.running_mean"], params["feat.stn.bn3.running_var"], 1000, 32, 128, 1024, activation="relu")
-    stn3d_max_pool_out = max_along_dim(stn3d_conv_3_out, 1000, 1024, 32, block_size=32)
-    stn3d_fc_1_out = conv_bn_ru(stn3d_max_pool_out, params["feat.stn.fc1.weight"], params["feat.stn.fc1.bias"], params["feat.stn.bn4.weight"], params["feat.stn.bn4.bias"], params["feat.stn.bn4.running_mean"], params["feat.stn.bn4.running_var"], 1000, 1, 1024, 512, activation="relu")
-    stn3d_fc_2_out = conv_bn_ru(stn3d_fc_1_out, params["feat.stn.fc2.weight"], params["feat.stn.fc2.bias"], params["feat.stn.bn5.weight"], params["feat.stn.bn5.bias"], params["feat.stn.bn5.running_mean"], params["feat.stn.bn5.running_var"], 1000, 1, 512, 256, activation="relu")
-    stn3d_fc_3_out = fc(stn3d_fc_2_out, params["feat.stn.fc3.weight"], params["feat.stn.fc3.bias"], 1000, 1, 256, 9)
-    feat = add_iden(stn3d_fc_3_out, 1000, 3)
+def CBR(x,prefix,idx,IC,OC,activation="relu"):
+    cvw = f"{prefix}conv{idx}.weight"
+    cvb = f"{prefix}conv{idx}.bias"
+    bnw = f"{prefix}bn{idx}.weight"
+    bnb = f"{prefix}bn{idx}.bias"
+    bnrm = f"{prefix}bn{idx}.running_mean"
+    bnrv = f"{prefix}bn{idx}.running_var"
+    res = conv_bn_ru(x, params[cvw], params[cvb], params[bnw], params[bnb], params[bnrm], params[bnrv], 1000, 32, IC, OC, activation)
+    return res
+
+def CBR3(x,prefix,IC,OC1,OC2,OC3):
+    res1 = CBR(x,prefix,1,IC,OC1)
+    res2 = CBR(res1,prefix,2,OC1,OC2)
+    res3 = CBR(res2,prefix,3,OC2,OC3)
+    return res3
+
+def FBR(x,prefix,idx,IC,OC,off):
+    bnidx = idx + off
+    fcw = f"{prefix}fc{idx}.weight"
+    fcb = f"{prefix}fc{idx}.bias"
+    bnw = f"{prefix}bn{bnidx}.weight"
+    bnb = f"{prefix}bn{bnidx}.bias"
+    bnrm = f"{prefix}bn{bnidx}.running_mean"
+    bnrv = f"{prefix}bn{bnidx}.running_var"
+    res = conv_bn_ru(x, params[fcw], params[fcb], params[bnw], params[bnb], params[bnrm], params[bnrv], 1000, 1, IC, OC, activation="relu")
+    return res
+
+def FBR_2_F(x,prefix,IC,OC1,OC2,OC3,off):
+    res1 = FBR(x,prefix,1,IC,OC1,off)
+    res2 = FBR(res1,prefix,2,OC1,OC2,off)
+    fcw = f"{prefix}fc3.weight"
+    fcb = f"{prefix}fc3.bias"
+    res3 = fc(res2, params[fcw], params[fcb], 1000, 1, OC2, OC3)
+    return res3
+
+def stnd(x,prefix,IC,OC1,OC2,OC3,f1,f2,f3):
+    CBR3_out = CBR3(x,prefix,IC,OC1,OC2,OC3)
+    max_pool_out = max_along_dim(CBR3_out, 1000, OC3, 32, block_size=32)
+    fbr2f_out = FBR_2_F(max_pool_out,prefix,OC3,f1,f2,f3,off=3)
+    feat = add_iden(fbr2f_out, 1000, IC)
     return feat
-
-def stnkd(x):
-    stnkd_conv_1_out = conv_bn_ru(x, params["feat.fstn.conv1.weight"], params["feat.fstn.conv1.bias"], params["feat.fstn.bn1.weight"], params["feat.fstn.bn1.bias"], params["feat.fstn.bn1.running_mean"], params["feat.fstn.bn1.running_var"], 1000, 32, 64, 64, activation="relu")
-    stnkd_conv_2_out = conv_bn_ru(stnkd_conv_1_out, params["feat.fstn.conv2.weight"], params["feat.fstn.conv2.bias"], params["feat.fstn.bn2.weight"], params["feat.fstn.bn2.bias"], params["feat.fstn.bn2.running_mean"], params["feat.fstn.bn2.running_var"], 1000, 32, 64, 128, activation="relu")
-    stnkd_conv_3_out = conv_bn_ru(stnkd_conv_2_out, params["feat.fstn.conv3.weight"], params["feat.fstn.conv3.bias"], params["feat.fstn.bn3.weight"], params["feat.fstn.bn3.bias"], params["feat.fstn.bn3.running_mean"], params["feat.fstn.bn3.running_var"], 1000, 32, 128, 1024, activation="relu")
-    stnkd_max_pool_out = max_along_dim(stnkd_conv_3_out, 1000, 1024, 32, block_size=32)
-    stnkd_fc_1_out = conv_bn_ru(stnkd_max_pool_out, params["feat.fstn.fc1.weight"], params["feat.fstn.fc1.bias"], params["feat.fstn.bn4.weight"], params["feat.fstn.bn4.bias"], params["feat.fstn.bn4.running_mean"], params["feat.fstn.bn4.running_var"], 1000, 1, 1024, 512, activation="relu")
-    stnkd_fc_2_out = conv_bn_ru(stnkd_fc_1_out, params["feat.fstn.fc2.weight"], params["feat.fstn.fc2.bias"], params["feat.fstn.bn5.weight"], params["feat.fstn.bn5.bias"], params["feat.fstn.bn5.running_mean"], params["feat.fstn.bn5.running_var"], 1000, 1, 512, 256, activation="relu")
-    stnkd_fc_3_out = fc(stnkd_fc_2_out, params["feat.fstn.fc3.weight"], params["feat.fstn.fc3.bias"], 1000, 1, 256, 64 * 64)
-    trans_feat = add_iden(stnkd_fc_3_out, 1000, 64)
-    return trans_feat
-
-
-def PointNetEncoder(x):
-    trans = stn3d(x)
-    x_mul_trans = bmm(x,trans,1000,32,3,3)
-    feat_conv_1_out = conv_bn_ru(x_mul_trans, params["feat.conv1.weight"], params["feat.conv1.bias"], params["feat.bn1.weight"], params["feat.bn1.bias"], params["feat.bn1.running_mean"], params["feat.bn1.running_var"], 1000, 32, 3, 64, activation="relu")
-    trans_feat = stnkd(feat_conv_1_out)
-    x_mul_trans_feat = bmm(feat_conv_1_out,trans_feat,1000,32,64,64)
-    feat_conv_2_out = conv_bn_ru(x_mul_trans_feat, params["feat.conv2.weight"], params["feat.conv2.bias"], params["feat.bn2.weight"], params["feat.bn2.bias"], params["feat.bn2.running_mean"], params["feat.bn2.running_var"], 1000, 32, 64, 128, activation="relu")
-    feat_conv_3_out = conv_bn_ru(feat_conv_2_out, params["feat.conv3.weight"], params["feat.conv3.bias"], params["feat.bn3.weight"], params["feat.bn3.bias"], params["feat.bn3.running_mean"], params["feat.bn3.running_var"], 1000, 32, 128, 1024, activation="norelu")
-    feat_max_pool_out = max_along_dim(feat_conv_3_out, 1000, 1024, 32, block_size=32)
-    return feat_max_pool_out
-
-def get_model(x):
-    feat_output = PointNetEncoder(x)
-    fc_1_out = conv_bn_ru(feat_output, params["fc1.weight"], params["fc1.bias"], params["bn1.weight"], params["bn1.bias"], params["bn1.running_mean"], params["bn1.running_var"], 1000, 1, 1024, 512, activation="relu")
-    fc_2_out = conv_bn_ru(fc_1_out, params["fc2.weight"], params["fc2.bias"], params["bn2.weight"], params["bn2.bias"], params["bn2.running_mean"], params["bn2.running_var"], 1000, 1, 512, 256, activation="relu")
-    fc_3_out = fc(fc_2_out, params["fc3.weight"], params["fc3.bias"], 1000, 1, 256, 10)
-    #model_output = log_softmax(fc_3_out, 1000, 10)
-    return fc_3_out
-
 
 
 def do_inference(list_of_points,list_of_labels,params): #请在本函数下使用triton实现推理操作
     model_input = torch.tensor(np.array(list_of_points), dtype=torch.float32, device='cuda')
-    model_output = get_model(model_input)
-    final_output = compute_max(model_output, 1000, 10)
+    
+    trans = stnd(model_input,"feat.stn.",IC,OC1,OC2,OC3,FC_OC1,FC_OC2,FC_OC3)
+    x_mul_trans = bmm(model_input,trans,batchSize,numPoints,3,3)
+    feat_conv_1_out = CBR(x_mul_trans, "feat." , 1 , 3 , 64)
+
+    trans_feat = stnd(feat_conv_1_out,"feat.fstn.",fstn_IC,fstn_OC1,fstn_OC2,fstn_OC3,fstn_FC_OC1,fstn_FC_OC2,fstn_FC_OC3)
+    x_mul_trans_feat = bmm(feat_conv_1_out,trans_feat,batchSize,32,64,64)
+    feat_conv_2_out = CBR(x_mul_trans_feat, "feat.", 2 , 64, 128)
+    feat_conv_3_out = CBR(feat_conv_2_out, "feat.", 3 , 128, 1024 , "norelu")
+    feat_output = max_along_dim(feat_conv_3_out, batchSize, 1024, 32, block_size=32)
+
+    fc_3_out = FBR_2_F(feat_output,"",1024,512,256,10,off=0)
+    final_output = compute_max(fc_3_out, batchSize, 10)
     correct_num = 0
 
     for output, label in zip(final_output, list_of_labels):

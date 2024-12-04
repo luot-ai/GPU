@@ -11,7 +11,7 @@ import triton.language as tl
 ch = 1024
 ch_half = 512
 ch_quarter = 256
-numPoints  = 32
+numPoints  = 128
 batchSize  = 1000
 IC  = 3
 OC1 = 64
@@ -56,25 +56,35 @@ def read_params(dir, device='cuda'):
 import h5py
 import numpy as np
 
+def uniform_sample(points, num_sample):
+    # 假设每个点云是 Nx3 的矩阵 (N为点的个数，3为坐标)
+    num_points = points.shape[0]
+    
+    if num_points <= num_sample:
+        return points
+    
+    # 计算采样间隔
+    sampled_indices = np.linspace(0, num_points - 1, num_sample).astype(int)
+    sampled_points = points[sampled_indices]
+    return sampled_points
+
 def read_h5_file(dataPath):
     list_of_points = []
     list_of_labels = []
     
     with h5py.File(dataPath, "r") as hf:
         for k in hf.keys():
-            # 读取点云数据
             points = hf[k]["points"][:].astype(np.float32)
-        
-            # 如果点云的点数超过32，均匀采样32个点
-            sampled_indices = np.linspace(0, points.shape[0] - 1, 32).astype(int)
-            sampled_points = points[sampled_indices]
-            # 将采样后的点云数据添加到 list_of_points
-            list_of_points.append(sampled_points)  # 将点云数据展平为一维
-
-            # 获取标签并添加到 list_of_labels
+            points = uniform_sample(points, numPoints) # 均匀采样
+            list_of_points.append(points)
             list_of_labels.append(hf[k].attrs["label"])
+            # points = hf[k]["points"][:].astype(np.float32)
+            # sampled_indices = np.linspace(0, points.shape[0] - 1, numPoints).astype(int)
+            # sampled_points = points[sampled_indices]
+            # list_of_points.append(sampled_points)  # 将点云数据展平为一维
+            # list_of_labels.append(hf[k].attrs["label"])
 
-    return list_of_points, list_of_labels
+    return list_of_points, list_of_labels   
 
 
 def get_cuda_autotune_config():
@@ -108,7 +118,7 @@ def relu(x):
     key=['M', 'N', 'K'],
 )
 @triton.jit
-def gemm1_kernel(
+def gemm_br_kernel(
         a_ptr, b_ptr, c_ptr,
         M, N, K,
         stride_am, stride_ak,
@@ -192,7 +202,7 @@ def gemm1_kernel(
     c_ptrs = c_ptr + stride_cm * offs_cm[:, None] + stride_cn * offs_cn[None, :] + pid_b * M * N
     c_mask = (offs_cm[:, None] < M) & (offs_cn[None, :] < N)
     tl.store(c_ptrs, accumulator, mask=c_mask)
-def gemm1(a, b, batch_size, M, K, N, 
+def gbr(a, b, batch_size, M, K, N, 
         cvb,
         bnw, 
         bnb, 
@@ -203,7 +213,7 @@ def gemm1(a, b, batch_size, M, K, N,
     c = torch.empty((batch_size, M, N), device=a.device, dtype=a.dtype)
 
     grid = lambda META: (triton.cdiv(M, META['BLOCK_SIZE_M']) * triton.cdiv(N, META['BLOCK_SIZE_N']), batch_size,)
-    gemm1_kernel[grid](
+    gemm_br_kernel[grid](
         a, b, c,
         M, N, K,
         K,  1,
@@ -223,109 +233,46 @@ def maxPooling_kernel(
     b = tl.program_id(axis=0)  
     c = tl.program_id(axis=1)  
 
-    # 每个线程负责 N 维度中的一个元素
-    offs_n = tl.arange(0, BLOCK_SIZE)  # N 维度中的偏移量
-    x = x_ptr + (b * channel * N + c + offs_n * channel)  # 每个线程计算 x 中的数据位置
-    x_vals = tl.load(x)  # 加载数据
+    offs_n = tl.arange(0, BLOCK_SIZE) 
+    x = x_ptr + (b * channel * N + c + offs_n * channel)  
+    x_vals = tl.load(x)  
 
-    # 使用 warp reduce 来计算最大值
-    max_val = tl.max(x_vals)  # 在当前线程组内计算最大值
+    max_val = tl.max(x_vals)  
 
-    # 将最大值写回到结果数组
     result_ptr_b_c = result_ptr + (b * channel + c)  
     tl.store(result_ptr_b_c, max_val)  
 
-# 处理数据的主函数
-def maxPooling(x, batchsize, channel, N, block_size=32):
+def maxPooling(x, batchsize, channel, N, block_size=numPoints):
     result = torch.zeros((batchsize, channel), device=x.device, dtype=torch.float32)
-
-    # 配置 Triton 内核的 grid 和 block
-    grid = (batchsize, channel)  # 批次和通道维度的网格大小
-
-    # 启动 Triton 内核
+    grid = (batchsize, channel)  
     maxPooling_kernel[grid](
         x, result, batchsize, channel, N,
         BLOCK_SIZE=block_size,
     )
-
     return result
-
-@triton.jit
-def log_softmax_kernel(input_ptr, output_ptr, batchsize, features, BLOCK_SIZE: tl.constexpr):
-    # Get the batch index (iter_batch)
-    batch_index = tl.program_id(0)
-    
-    # The block range for each thread within a batch
-    feature_index = tl.arange(0, BLOCK_SIZE)
-    
-    # Pointer to the starting location of the current batch in input/output tensors
-    input_batch_ptr = input_ptr + batch_index * features
-    output_batch_ptr = output_ptr + batch_index * features
-
-    # Read the input values for the current batch
-    input_values = tl.load(input_batch_ptr + feature_index)
-
-    # Compute the sum of exponentials for the current batch
-    exp_values = tl.exp(input_values)
-    exp_sum = tl.sum(exp_values)
-
-    # Compute log_softmax
-    log_exp_values = tl.log(exp_values / exp_sum)
-    
-    # Write the result back to the output tensor
-    tl.store(output_batch_ptr + feature_index, log_exp_values)
-def log_softmax(input, batchsize, features):
-    # Define the block size for processing
-    BLOCK_SIZE = 1024  # Depending on your GPU architecture, adjust this value
-    
-    # Allocate output tensor
-    output = input.new_zeros(input.shape, dtype=torch.float32)
-
-    # Launch the Triton kernel
-    grid = (batchsize,)
-    log_softmax_kernel[grid](input, output, batchsize, features, BLOCK_SIZE)
-    
-    return output
-
 
 @triton.jit
 def addI_kernel(input_ptr, iden_ptr, output_ptr, channel:tl.constexpr):
     pid_b = tl.program_id(axis=0)  # 批次 ID
-
-    # 计算每个线程的偏移量并读取输入矩阵
     if(channel == 3):
         offs_iden = tl.arange(0, 16)
     else:
         offs_iden = tl.arange(0, channel * channel)
     input_ptrs = input_ptr + pid_b * channel * channel + offs_iden
     input_matrix = tl.load(input_ptrs, mask= offs_iden < channel * channel)
-
-    # 读取身份矩阵
     iden_ptrs = iden_ptr + offs_iden
     iden_matrix = tl.load(iden_ptrs, mask= offs_iden < channel * channel)
-
-    # 计算输出矩阵
     output_matrix = input_matrix + iden_matrix
-
-    # 将结果存储到输出矩阵
     output_ptrs = output_ptr + pid_b * channel * channel + offs_iden
     tl.store(output_ptrs, output_matrix, mask= offs_iden < channel * channel )
 
 def matrix_addI(input_tensor, batch_size, channel):
-    # 分配输出 tensor
     output_tensor = torch.empty_like(input_tensor)
-
-    # 创建身份矩阵，并将其存储到显存中
     iden = torch.eye(channel, device='cuda', dtype=torch.float32)
-
-    # 1D 内核启动配置，计算 grid 大小
-    grid = lambda META: (batch_size, )  # 每个批次的内核只需要一个线程
-
-    # 启动 Triton 内核
+    grid = lambda META: (batch_size, )  
     addI_kernel[grid](
         input_tensor, iden, output_tensor, channel
     )
-
     return output_tensor
 
 @triton.jit
@@ -350,25 +297,15 @@ def max_kernel(input_ptr, output_ptr, batch_size: tl.constexpr, num_elements: tl
     tl.store(output_ptrs, max_index)
 
 def compute_max(input_tensor, batch_size, num_elements):
-    """
-    输入：形状为 (batch_size, num_elements) 的输入张量
-    输出：形状为 (batch_size,) 的输出张量，存储每行的最大值
-    """
-    # 分配输出 tensor
     output_tensor = torch.empty(batch_size, device='cuda', dtype=torch.float32)
-
-    # 设置 Triton 内核启动配置
     grid = lambda META: (batch_size, )
-
-    # 启动 Triton 内核
     max_kernel[grid](input_tensor, output_tensor, batch_size, num_elements)
-
     return output_tensor.cpu()
 
 def bmm(a, b, batch_size,M,K,N):
     c = torch.empty((batch_size, M, N), device=a.device, dtype=a.dtype)
     grid = lambda META: (triton.cdiv(M, META['BLOCK_SIZE_M']) * triton.cdiv(N, META['BLOCK_SIZE_N']), batch_size,)
-    gemm1_kernel[grid](
+    gemm_br_kernel[grid](
         a, b, c,
         M, N, K,
         K,  1,
@@ -388,7 +325,7 @@ def CBR(x,prefix,idx,IC,OC,activation="relu"):
     relu = False
     if(activation == "relu"):
         relu = True
-    res = gemm1(x,params[cvw],1000,32,IC,OC,params[cvb], params[bnw], params[bnb], params[bnrm], params[bnrv],True,relu)
+    res = gbr(x,params[cvw],1000,numPoints,IC,OC,params[cvb], params[bnw], params[bnb], params[bnrm], params[bnrv],True,relu)
     return res
 
 def CBR3(x,prefix,IC,OC1,OC2,OC3):
@@ -405,7 +342,7 @@ def FBR(x,prefix,idx,IC,OC,off):
     bnb = f"{prefix}bn{bnidx}.bias"
     bnrm = f"{prefix}bn{bnidx}.running_mean"
     bnrv = f"{prefix}bn{bnidx}.running_var"
-    res = gemm1(x,params[fcw],1000,1,IC,OC,params[fcb],params[bnw], params[bnb], params[bnrm], params[bnrv],True,True)
+    res = gbr(x,params[fcw],1000,1,IC,OC,params[fcb],params[bnw], params[bnb], params[bnrm], params[bnrv],True,True)
     return res
 
 def FBR_2_F(x,prefix,IC,OC1,OC2,OC3,off):
@@ -413,12 +350,12 @@ def FBR_2_F(x,prefix,IC,OC1,OC2,OC3,off):
     res2 = FBR(res1,prefix,2,OC1,OC2,off)
     fcw = f"{prefix}fc3.weight"
     fcb = f"{prefix}fc3.bias"
-    res3 = gemm1(res2, params[fcw], 1000, 1, OC2, OC3, params[fcb], None,None,None,None,False,False)
+    res3 = gbr(res2, params[fcw], 1000, 1, OC2, OC3, params[fcb], None,None,None,None,False,False)
     return res3
 
 def stnd(x,prefix,IC,OC1,OC2,OC3,f1,f2,f3):
     CBR3_out = CBR3(x,prefix,IC,OC1,OC2,OC3)
-    max_pool_out = maxPooling(CBR3_out, 1000, OC3, 32, block_size=32)
+    max_pool_out = maxPooling(CBR3_out, 1000, OC3, numPoints, block_size=numPoints)
     fbr2f_out = FBR_2_F(max_pool_out,prefix,OC3,f1,f2,f3,off=3)
     feat = matrix_addI(fbr2f_out, 1000, IC)
     return feat
@@ -435,7 +372,7 @@ def do_inference(list_of_points,list_of_labels,params): #请在本函数下使�
     x_mul_trans_feat = bmm(feat_conv_1_out,trans_feat,batchSize,numPoints,fstn_IC,fstn_IC)
     feat_conv_2_out = CBR(x_mul_trans_feat, "feat.", 2 , fstn_IC, encoderOC2)
     feat_conv_3_out = CBR(feat_conv_2_out, "feat.", 3 , encoderOC2, encoderOC3 , "norelu")
-    feat_output = maxPooling(feat_conv_3_out, batchSize, encoderOC3, numPoints, block_size=32)
+    feat_output = maxPooling(feat_conv_3_out, batchSize, encoderOC3, numPoints, block_size=numPoints)
 
     fc_3_out = FBR_2_F(feat_output,"",encoderOC3,512,256,10,off=0)
     final_output = compute_max(fc_3_out, batchSize, 10)
@@ -449,7 +386,8 @@ def do_inference(list_of_points,list_of_labels,params): #请在本函数下使�
     return accuracy_rate
 
 if __name__ == '__main__':
-    dir = "./epoch_300_batchsize_1000/" 
+    dir = "./newparams/uniform/chfull/np128/30epoch-1000batch"
+    #"./epoch_300_batchsize_1000/" 
     
     # 读取模型参数
     params = read_params(dir, device='cuda')

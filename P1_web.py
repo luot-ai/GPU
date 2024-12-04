@@ -59,11 +59,11 @@ from tqdm import tqdm
 # import provider
 npoint = 128
 num_class = 10
-total_epoch = 25
+total_epoch = 30
 
 useWay = 0 # 1uniform 0random
 way = 'uniform' 
-chway = 'chless'
+chway = 'chfull'
 cn = 1024
 cn_half = 512
 cn_quarter = 256
@@ -463,9 +463,9 @@ def main():
 
     # 创建 DataLoader 实例
     if(useWay == 1):
-        train_dataloader = DataLoader(train_dataset, batch_size=32, shuffle=True, num_workers=10, drop_last=True, collate_fn=pad_collate_fn) #batch_size内固定长度截取
+        train_dataloader = DataLoader(train_dataset, batch_size=1000, shuffle=True, num_workers=10, drop_last=True, collate_fn=pad_collate_fn) #batch_size内固定长度截取
     else:
-        train_dataloader = DataLoader(train_dataset, batch_size=32, shuffle=True, num_workers=10, drop_last=True) #全局固定长度填充/截取
+        train_dataloader = DataLoader(train_dataset, batch_size=1000, shuffle=True, num_workers=10, drop_last=True) #全局固定长度填充/截取
     # test_dataloader = DataLoader(test_dataset, batch_size=1, shuffle=False, num_workers=10, drop_last=False)
 
     print("finish DATA LOADING")

@@ -57,33 +57,21 @@ import h5py
 import numpy as np
 
 def uniform_sample(points, num_sample):
-    # 假设每个点云是 Nx3 的矩阵 (N为点的个数，3为坐标)
     num_points = points.shape[0]
-    
     if num_points <= num_sample:
         return points
-    
-    # 计算采样间隔
     sampled_indices = np.linspace(0, num_points - 1, num_sample).astype(int)
     sampled_points = points[sampled_indices]
     return sampled_points
-
 def read_h5_file(dataPath):
     list_of_points = []
     list_of_labels = []
-    
     with h5py.File(dataPath, "r") as hf:
         for k in hf.keys():
             points = hf[k]["points"][:].astype(np.float32)
             points = uniform_sample(points, numPoints) # 均匀采样
             list_of_points.append(points)
             list_of_labels.append(hf[k].attrs["label"])
-            # points = hf[k]["points"][:].astype(np.float32)
-            # sampled_indices = np.linspace(0, points.shape[0] - 1, numPoints).astype(int)
-            # sampled_points = points[sampled_indices]
-            # list_of_points.append(sampled_points)  # 将点云数据展平为一维
-            # list_of_labels.append(hf[k].attrs["label"])
-
     return list_of_points, list_of_labels   
 
 
@@ -136,7 +124,7 @@ def gemm_br_kernel(
         RELU: tl.constexpr,
 ):
     pid = tl.program_id(axis=0)
-    pid_b = tl.program_id(axis=1)
+    batch = tl.program_id(axis=1)
     num_pid_m = tl.cdiv(M, BLOCK_SIZE_M)
     num_pid_n = tl.cdiv(N, BLOCK_SIZE_N)
     num_pid_in_group = GROUP_SIZE_M * num_pid_n
@@ -146,19 +134,27 @@ def gemm_br_kernel(
     pid_m = first_pid_m + (pid % group_size_m)
     pid_n = (pid % num_pid_in_group) // group_size_m
 
-    offs_am = (pid_m * BLOCK_SIZE_M + tl.arange(0, BLOCK_SIZE_M)) % M
-    offs_bn = (pid_n * BLOCK_SIZE_N + tl.arange(0, BLOCK_SIZE_N)) % N
+    blk_row = pid_m * BLOCK_SIZE_M
+    blk_col = pid_n * BLOCK_SIZE_N
+    blk_tuple = (BLOCK_SIZE_M, BLOCK_SIZE_N)
+    arange_M = tl.arange(0, BLOCK_SIZE_M)
+    arange_N = tl.arange(0, BLOCK_SIZE_N)
+
+    offs_am = (blk_row + arange_M) % M
+    offs_bn = (blk_col + arange_N) % N
+    offs_bn_2D = offs_bn[None, :]
+    mask_bn = offs_bn_2D < N
+
     offs_k = tl.arange(0, BLOCK_SIZE_K)
-    batch_off_b = tl.where(isCF,0,pid_b * K *N)  
-    a_ptrs = a_ptr + (offs_am[:, None] * stride_am + offs_k[None, :] * stride_ak) + pid_b * M * K
-    b_ptrs = b_ptr + (offs_k[:, None] * stride_bk + offs_bn[None, :] * stride_bn) + batch_off_b
+    batch_off_b = tl.where(isCF,0,batch * K *N)  
+    a_ptrs = a_ptr + (offs_am[:, None] * stride_am + offs_k[None, :] * stride_ak) + batch * M * K
+    b_ptrs = b_ptr + (offs_k[:, None] * stride_bk + offs_bn_2D * stride_bn) + batch_off_b
 
     accumulator = tl.zeros((BLOCK_SIZE_M, BLOCK_SIZE_N), dtype=tl.float32)
     # 初始化 accumulator
     if isCF == True :
-        offs_cvb = (pid_n * BLOCK_SIZE_N + tl.arange(0, BLOCK_SIZE_N)) % N
-        cvb_ptrs = cvb + offs_cvb[None, :]
-        cvb_line = tl.load(cvb_ptrs, mask=offs_cvb[None, :] < N)
+        cvb_ptrs = cvb + offs_bn_2D
+        cvb_line = tl.load(cvb_ptrs, mask=mask_bn)
         cvb_matrix = tl.broadcast_to(cvb_line, (BLOCK_SIZE_M, BLOCK_SIZE_N))
         accumulator += cvb_matrix
 
@@ -171,35 +167,31 @@ def gemm_br_kernel(
         b_ptrs += BLOCK_SIZE_K * stride_bk
 
     if BN == True:
-        offs_bnrm = (pid_n * BLOCK_SIZE_N + tl.arange(0, BLOCK_SIZE_N)) % N
-        bnrm_ptrs = bnrm + offs_bnrm[None, :]
-        bnrm_line = tl.load(bnrm_ptrs, mask=offs_bnrm[None, :] < N)
+        bnrm_ptrs = bnrm + offs_bn_2D
+        bnrm_line = tl.load(bnrm_ptrs, mask= mask_bn)
         bnrm_matrix = tl.broadcast_to(bnrm_line, (BLOCK_SIZE_M, BLOCK_SIZE_N))
         accumulator -= bnrm_matrix
 
-        offs_bnrv = (pid_n * BLOCK_SIZE_N + tl.arange(0, BLOCK_SIZE_N)) % N
-        bnrv_ptrs = bnrv + offs_bnrv[None, :]
-        bnrv_line = tl.load(bnrv_ptrs, mask=offs_bnrv[None, :] < N)
+        bnrv_ptrs = bnrv + offs_bn_2D
+        bnrv_line = tl.load(bnrv_ptrs, mask=mask_bn)
         bnrv_matrix = tl.broadcast_to(bnrv_line, (BLOCK_SIZE_M, BLOCK_SIZE_N))
         accumulator /= tl.sqrt(bnrv_matrix + 1e-5) 
 
-        offs_bnw = (pid_n * BLOCK_SIZE_N + tl.arange(0, BLOCK_SIZE_N)) % N
-        bnw_ptrs = bnw + offs_bnw[None, :]
-        bnw_line = tl.load(bnw_ptrs, mask=offs_bnw[None, :] < N)
+        bnw_ptrs = bnw + offs_bn_2D
+        bnw_line = tl.load(bnw_ptrs, mask=mask_bn)
         bnw_matrix = tl.broadcast_to(bnw_line, (BLOCK_SIZE_M, BLOCK_SIZE_N))
         accumulator *= bnw_matrix
 
-        offs_bnb = (pid_n * BLOCK_SIZE_N + tl.arange(0, BLOCK_SIZE_N)) % N
-        bnb_ptrs = bnb + offs_bnb[None, :]
-        bnb_line = tl.load(bnb_ptrs, mask=offs_bnb[None, :] < N)
+        bnb_ptrs = bnb + offs_bn_2D
+        bnb_line = tl.load(bnb_ptrs, mask=mask_bn)
         bnb_matrix = tl.broadcast_to(bnb_line, (BLOCK_SIZE_M, BLOCK_SIZE_N))
         accumulator += bnb_matrix
     if RELU == True:
         accumulator = relu(accumulator)
 
-    offs_cm = pid_m * BLOCK_SIZE_M + tl.arange(0, BLOCK_SIZE_M)
-    offs_cn = pid_n * BLOCK_SIZE_N + tl.arange(0, BLOCK_SIZE_N)
-    c_ptrs = c_ptr + stride_cm * offs_cm[:, None] + stride_cn * offs_cn[None, :] + pid_b * M * N
+    offs_cm = blk_row + arange_M
+    offs_cn = blk_col + arange_N
+    c_ptrs = c_ptr + stride_cm * offs_cm[:, None] + stride_cn * offs_cn[None, :] + batch * M * N
     c_mask = (offs_cm[:, None] < M) & (offs_cn[None, :] < N)
     tl.store(c_ptrs, accumulator, mask=c_mask)
 def gbr(a, b, batch_size, M, K, N, 
@@ -277,22 +269,11 @@ def matrix_addI(input_tensor, batch_size, channel):
 
 @triton.jit
 def max_kernel(input_ptr, output_ptr, batch_size: tl.constexpr, num_elements: tl.constexpr):
-    # 获取当前程序 ID，表示处理的批次
     pid_b = tl.program_id(axis=0)
-
-    # 每个线程负责计算一行的最大值
-    # 每行包含 num_elements 个元素（在此案例中为 10）
-    # 假设 input_ptr 是一个 (batch_size, num_elements) 形状的 tensor
-
-    # 读取该批次的数据
     offs =  tl.arange(0, 16)
     input_ptrs = input_ptr + offs + pid_b * num_elements
     data = tl.load(input_ptrs, mask = offs < 10, other= -sys.float_info.max)
-
-    # 使用 Triton 的 reduce_max 来求最大值
     max_index = tl.argmax(data,axis = 0)
-
-    # 将结果存储到输出 tensor 中
     output_ptrs = output_ptr + pid_b
     tl.store(output_ptrs, max_index)
 

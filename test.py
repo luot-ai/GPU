@@ -189,25 +189,19 @@ def conv_bn_ru_kernel(
 @triton.jit
 def relu(x):
     return tl.where(x >= 0, x, 0)
-# conv_bn_ru 主函数
-def conv_bn_ru(a, b, cvb, bn_weight, bnb, bnm, bnv, batch_size, M, K, N, activation="relu"):
-    # 分配输出 tensor，形状为 (width, out_channels)
-    conv_bn_ru_output = torch.empty((batch_size, M, N), device='cuda', dtype=torch.float32)
-
-    # 1D 内核启动配置，计算 grid 大小
+def conv_bn_ru(a, b, cvb, bnw, bnb, bnrm, bnrv, batch_size, M, K, N, activation="relu"):
+    output = torch.empty((batch_size, M, N), device='cuda', dtype=torch.float32)
     grid = lambda META: (triton.cdiv(M, META['BLOCK_SIZE_M']) * triton.cdiv(N, META['BLOCK_SIZE_N']), batch_size,)
-    
-    # 启动 Triton 内核
     conv_bn_ru_kernel[grid](
-        a, b, cvb, conv_bn_ru_output,
-        bn_weight, bnb, bnm, bnv,
+        a, b, cvb, output,
+        bnw, bnb, bnrm, bnrv,
         M, N, K,
         K, 1,
         1, K,
         N, 1,
         ACTIVATION=activation
     )
-    return conv_bn_ru_output
+    return output
 
 @triton.jit
 def max_along_dim_kernel(

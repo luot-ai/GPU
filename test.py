@@ -190,21 +190,21 @@ def conv_bn_ru_kernel(
 def relu(x):
     return tl.where(x >= 0, x, 0)
 # conv_bn_ru 主函数
-def conv_bn_ru(a, b, cvb, bn_weight, bnb, bnm, bnv, batch_size, width, in_channels, out_channels, activation="relu"):
+def conv_bn_ru(a, b, cvb, bn_weight, bnb, bnm, bnv, batch_size, M, K, N, activation="relu"):
     # 分配输出 tensor，形状为 (width, out_channels)
-    conv_bn_ru_output = torch.empty((batch_size, width, out_channels), device='cuda', dtype=torch.float32)
+    conv_bn_ru_output = torch.empty((batch_size, M, N), device='cuda', dtype=torch.float32)
 
     # 1D 内核启动配置，计算 grid 大小
-    grid = lambda META: (triton.cdiv(width, META['BLOCK_SIZE_M']) * triton.cdiv(out_channels, META['BLOCK_SIZE_N']), batch_size,)
+    grid = lambda META: (triton.cdiv(M, META['BLOCK_SIZE_M']) * triton.cdiv(N, META['BLOCK_SIZE_N']), batch_size,)
     
     # 启动 Triton 内核
     conv_bn_ru_kernel[grid](
         a, b, cvb, conv_bn_ru_output,
         bn_weight, bnb, bnm, bnv,
-        width, out_channels, in_channels,
-        in_channels, 1,
-        1, in_channels,
-        out_channels, 1,
+        M, N, K,
+        K, 1,
+        1, K,
+        N, 1,
         ACTIVATION=activation
     )
     return conv_bn_ru_output

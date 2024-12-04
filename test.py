@@ -190,7 +190,7 @@ def conv_bn_ru_kernel(
 def relu(x):
     return tl.where(x >= 0, x, 0)
 # conv_bn_ru 主函数
-def conv_bn_ru(x, conv_weight, conv_bias, bn_weight, bn_bias, bn_mean, bn_var, batch_size, width, in_channels, out_channels, activation="relu"):
+def conv_bn_ru(a, b, cvb, bn_weight, bnb, bnm, bnv, batch_size, width, in_channels, out_channels, activation="relu"):
     # 分配输出 tensor，形状为 (width, out_channels)
     conv_bn_ru_output = torch.empty((batch_size, width, out_channels), device='cuda', dtype=torch.float32)
 
@@ -199,8 +199,8 @@ def conv_bn_ru(x, conv_weight, conv_bias, bn_weight, bn_bias, bn_mean, bn_var, b
     
     # 启动 Triton 内核
     conv_bn_ru_kernel[grid](
-        x, conv_weight, conv_bias, conv_bn_ru_output,
-        bn_weight, bn_bias, bn_mean, bn_var,
+        a, b, cvb, conv_bn_ru_output,
+        bn_weight, bnb, bnm, bnv,
         width, out_channels, in_channels,
         in_channels, 1,
         1, in_channels,

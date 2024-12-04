@@ -36,7 +36,7 @@
 #define DARKNETBLK 512
 #define BLOCK 512
 #define EPOCH 30
-#define PRETRAIN 0
+#define PRETRAIN 1
 #define USEMATDIFF 0
 #define DROPOUT 0
 // #define DEBUG
@@ -442,6 +442,7 @@ struct TNET {
     float* relu1_output_fstn_fbr2f;
     float* relu2_output_fstn_fbr2f;
     float* stnkd_out;
+    float* stnkd_out_trans;
     //part4
     float* fstn_input_trans;
     float* fstn_bmm1_res;
@@ -524,6 +525,7 @@ long long cal_tnet_size(int batchSize, int numPoints, int inChannels){
     int fstn_5= batchSize * fstn_FC_OC1 ;
     int fstn_6= batchSize * fstn_FC_OC2 ;
     int fstn_7= transFeatSize ;
+    int fstn_8= transFeatSize ;
     //part4
     int part4_1= bn * fstn_inChannel ;
     int part4_2= batchSize*numPoints*fstn_inChannel ;
@@ -556,6 +558,8 @@ long long cal_tnet_size(int batchSize, int numPoints, int inChannels){
     totalSize += stn_234_bn + part2_3_bn + fstn_234_bn + part4_4_bn + part4_5_bn;
     totalSize += stn_67_bn  + fstn_56_bn + cla_1_bn + cla_2_bn;
     totalSize += part4_6_idx+ fstn_4_idx + stn_5_idx;
+
+    totalSize += fstn_8;
     return totalSize;
 }
 
@@ -2009,6 +2013,71 @@ CB3P &cb3p,CB3P &cb3p_up,CB3P &cb3p_mo)
     FB_update(inics,OC1,cb3p.cb1, cb3p_up.cb1, cb3p_mo.cb1);
 }
 
+__global__ void compute_frobenius_norm(
+    const float* trans_mult_transT, // 输入：形状为 (batch_size, num_features, num_features)
+    const float* transT, 
+    float* delta,         // 输出：形状为 (batch_size,)
+    int batch_size, int num_features) 
+{
+    extern __shared__ float shared_mem[]; // 每个 block 共享内存，用于中间结果
+    int batch_idx = blockIdx.x;
+    int thread_idx = threadIdx.x;
+    int feature_size = num_features * num_features;
+    int bf = batch_idx * feature_size;
+
+    // 每个线程计算一个元素的平方和
+    float sum = 0.0f;
+    for (int i = thread_idx; i < feature_size; i += blockDim.x) {
+        float value = trans_mult_transT[bf + i];
+        int row = i / num_features;
+        int col = i % num_features;
+        if (row == col) value -= 1.0f; 
+        sum += value * value; // 计算平方和
+    }
+
+    // 共享内存归约
+    shared_mem[thread_idx] = sum;
+    __syncthreads();
+
+    // 归约求和
+    for (int stride = blockDim.x / 2; stride > 0; stride /= 2) {
+        if (thread_idx < stride) {
+            shared_mem[thread_idx] += shared_mem[thread_idx + stride];
+        }
+        __syncthreads();
+    }
+
+    float frobenius_norms = sqrtf(shared_mem[0]);
+    for (int i = thread_idx; i < feature_size; i += blockDim.x) {
+        float mulres = trans_mult_transT[bf + i];
+        int row = i / num_features;
+        int col = i % num_features;
+        if (row == col) mulres -= 1.0f; 
+        mulres = 2 * 0.001f * mulres * transT[bf + i] / frobenius_norms; 
+        delta[bf+i] = mulres;
+    }
+}
+
+// 封装的函数：配置和调用 kernel
+void launch_compute_frobenius_norm(
+    const float* d_trans_mult_transT,  // 输入：GPU 上的 trans * trans^T 数据
+    const float* d_transT,
+    float* delta,          // 输出：GPU 上的 Frobenius 范数
+    int batch_size, int num_features, int block_size = 1024) 
+{
+    int shared_mem_size = block_size * sizeof(float);
+
+    // 启动 Kernel，每个批次对应一个 Block
+    compute_frobenius_norm<<<batch_size, block_size, shared_mem_size>>>(
+        d_trans_mult_transT,d_transT, delta, batch_size, num_features);
+
+    // 检查 Kernel 运行是否有错误
+    cudaError_t err = cudaGetLastError();
+    if (err != cudaSuccess) {
+        printf("CUDA Kernel launch error: %s\n", cudaGetErrorString(err));
+    }
+}
+
 __global__ void mat_diff_loss_backward(
     const float* trans_feat, // (batch_size, num_features, num_features)
     float* grad_trans_feat,  // (batch_size, num_features, num_features)
@@ -2026,7 +2095,7 @@ __global__ void mat_diff_loss_backward(
         float diff = 0.0;
         for (int k = 0; k < num_features; ++k) {
             diff += trans_feat[batch_idx * feature_size + row * num_features + k] *
-                    trans_feat[batch_idx * feature_size + col * num_features + k];
+                    trans_feat[batch_idx * feature_size + (row+k) * num_features + col];
         }
 
         // Subtract identity matrix
@@ -2035,7 +2104,7 @@ __global__ void mat_diff_loss_backward(
         }
 
         // Compute gradient for backward pass
-        grad_trans_feat[idx] = 2 * diff * 0.001f;  // Scaled by 2
+        grad_trans_feat[idx] = 2 * diff * 0.001f * trans_feat[batch_idx * feature_size + row * num_features + col];;  // Scaled by 2
     }
 }
 
@@ -2115,6 +2184,7 @@ void Train_GPU (int inChannels,int batchSize,int numPoints,
     int fstn_5= batchSize * fstn_FC_OC1 ;
     int fstn_6= batchSize * fstn_FC_OC2 ;
     int fstn_7= transFeatSize ;
+    int fstn_8= transFeatSize ;
     //part4
     int part4_1= bn * fstn_inChannel ;
     int part4_2= batchSize*numPoints*fstn_inChannel ;
@@ -2190,6 +2260,7 @@ void Train_GPU (int inChannels,int batchSize,int numPoints,
     offset = alloc_bn(net.bn2_fstn_fbr2f,device_output,offset,fstn_FC_OC2,batchSize);
     net.relu2_output_fstn_fbr2f = device_output+offset;offset += fstn_6;
     net.stnkd_out = device_output+offset;offset += fstn_7;
+    net.stnkd_out_trans = device_output+offset;offset += fstn_8;
 
     //part4
     net.fstn_input_trans = device_output+offset;offset += part4_1;
@@ -2276,6 +2347,7 @@ void Train_GPU (int inChannels,int batchSize,int numPoints,
     offset = alloc_bn(delta.bn2_fstn_fbr2f,device_delta,offset,fstn_FC_OC2,batchSize);
     delta.relu2_output_fstn_fbr2f = device_delta+offset;offset += fstn_6;
     delta.stnkd_out = device_delta+offset;offset += fstn_7;
+    delta.stnkd_out_trans = device_output+offset;offset += fstn_8;
 
     //part4
     delta.fstn_input_trans = device_delta+offset;offset += part4_1;
@@ -2390,7 +2462,10 @@ void Train_GPU (int inChannels,int batchSize,int numPoints,
     if(USEMATDIFF == 1)
     {
         mat_diff_addup = 1.0f;
-        compute_mat_diff_grad(net.stnkd_out,delta.stnkd_out,fstn_inChannel,batchSize);
+        GPU_transpose(net.stnkd_out,net.stnkd_out_trans,batchSize,fstn_inChannel,fstn_inChannel);
+        GPU_Bmm(net.stnkd_out,net.stnkd_out_trans,delta.stnkd_out_trans,64,64,64,64,batchSize);
+        launch_compute_frobenius_norm(delta.stnkd_out_trans,net.stnkd_out_trans,delta.stnkd_out,batchSize,64);
+        //compute_mat_diff_grad(net.stnkd_out,delta.stnkd_out,fstn_inChannel,batchSize);
     }
     Bmm_bp(net.fstn_input_trans,net.stnkd_out,delta.fstn_input_trans,delta.stnkd_out,delta.fstn_bmm1_res,
     numPoints,fstn_inChannel,fstn_inChannel,fstn_inChannel,batchSize,true,mat_diff_addup);
@@ -2474,12 +2549,12 @@ int main(int argc, char *argv[]) {
     read_params(dir);
 
     // 读输入：主机
-    std::string file_path = "./data/train_point_clouds.h5";
+    std::string file_path = "./data/test_point_clouds.h5";
     std::vector<std::vector<float>> list_of_points;
     std::vector<int> list_of_labels;
     read_h5_file(file_path, list_of_points, list_of_labels);
     int all_num = list_of_points.size();
-    //all_num = 32;
+    //all_num = 1000;
     //分配内存，迁移权重到device端
     int ch = 1024;
     int ch_half = 512;

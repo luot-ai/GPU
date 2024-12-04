@@ -119,10 +119,11 @@ def gemm1_kernel(
         bnb, 
         bnrm, 
         bnrv, 
+        isCF,
         BLOCK_SIZE_M: tl.constexpr, BLOCK_SIZE_N: tl.constexpr, BLOCK_SIZE_K: tl.constexpr,
         GROUP_SIZE_M: tl.constexpr,
         BN: tl.constexpr,
-        RELU: tl.constexpr
+        RELU: tl.constexpr,
 ):
     pid = tl.program_id(axis=0)
     pid_b = tl.program_id(axis=1)
@@ -138,16 +139,18 @@ def gemm1_kernel(
     offs_am = (pid_m * BLOCK_SIZE_M + tl.arange(0, BLOCK_SIZE_M)) % M
     offs_bn = (pid_n * BLOCK_SIZE_N + tl.arange(0, BLOCK_SIZE_N)) % N
     offs_k = tl.arange(0, BLOCK_SIZE_K)
+    batch_off_b = tl.where(isCF,0,pid_b * K *N)  
     a_ptrs = a_ptr + (offs_am[:, None] * stride_am + offs_k[None, :] * stride_ak) + pid_b * M * K
-    b_ptrs = b_ptr + (offs_k[:, None] * stride_bk + offs_bn[None, :] * stride_bn) #+ pid_b * K * N
+    b_ptrs = b_ptr + (offs_k[:, None] * stride_bk + offs_bn[None, :] * stride_bn) + batch_off_b
 
-    # 初始化 accumulator
-    offs_cvb = (pid_n * BLOCK_SIZE_N + tl.arange(0, BLOCK_SIZE_N)) % N
-    cvb_ptrs = cvb + offs_cvb[None, :]
-    cvb_line = tl.load(cvb_ptrs, mask=offs_cvb[None, :] < N)
-    cvb_matrix = tl.broadcast_to(cvb_line, (BLOCK_SIZE_M, BLOCK_SIZE_N))
     accumulator = tl.zeros((BLOCK_SIZE_M, BLOCK_SIZE_N), dtype=tl.float32)
-    accumulator += cvb_matrix
+    # 初始化 accumulator
+    if isCF == True :
+        offs_cvb = (pid_n * BLOCK_SIZE_N + tl.arange(0, BLOCK_SIZE_N)) % N
+        cvb_ptrs = cvb + offs_cvb[None, :]
+        cvb_line = tl.load(cvb_ptrs, mask=offs_cvb[None, :] < N)
+        cvb_matrix = tl.broadcast_to(cvb_line, (BLOCK_SIZE_M, BLOCK_SIZE_N))
+        accumulator += cvb_matrix
 
     # 迭代计算C矩阵的一个块。
     for k in range(0, tl.cdiv(K, BLOCK_SIZE_K)):
@@ -206,20 +209,19 @@ def gemm1(a, b, batch_size, M, K, N,
         K,  1,
         1,  K,
         N,  1,
-        cvb, bnw, bnb, bnrm, bnrv, BN=BN, RELU=RELU,
+        cvb, bnw, bnb, bnrm, bnrv, isCF=True, BN=BN, RELU=RELU, 
     )
     return c
 
 
 @triton.jit
-def max_along_dim_kernel(
+def maxPooling_kernel(
     x_ptr, result_ptr,
     batchsize, channel, N,
     BLOCK_SIZE: tl.constexpr,
 ):
-    # 获取当前线程的 ID
-    b = tl.program_id(axis=0)  # 批量索引
-    c = tl.program_id(axis=1)  # 通道索引
+    b = tl.program_id(axis=0)  
+    c = tl.program_id(axis=1)  
 
     # 每个线程负责 N 维度中的一个元素
     offs_n = tl.arange(0, BLOCK_SIZE)  # N 维度中的偏移量
@@ -234,14 +236,14 @@ def max_along_dim_kernel(
     tl.store(result_ptr_b_c, max_val)  
 
 # 处理数据的主函数
-def max_along_dim(x, batchsize, channel, N, block_size=32):
+def maxPooling(x, batchsize, channel, N, block_size=32):
     result = torch.zeros((batchsize, channel), device=x.device, dtype=torch.float32)
 
     # 配置 Triton 内核的 grid 和 block
     grid = (batchsize, channel)  # 批次和通道维度的网格大小
 
     # 启动 Triton 内核
-    max_along_dim_kernel[grid](
+    maxPooling_kernel[grid](
         x, result, batchsize, channel, N,
         BLOCK_SIZE=block_size,
     )
@@ -287,7 +289,7 @@ def log_softmax(input, batchsize, features):
 
 
 @triton.jit
-def add_iden_kernel(input_ptr, iden_ptr, output_ptr, channel:tl.constexpr):
+def addI_kernel(input_ptr, iden_ptr, output_ptr, channel:tl.constexpr):
     pid_b = tl.program_id(axis=0)  # 批次 ID
 
     # 计算每个线程的偏移量并读取输入矩阵
@@ -309,12 +311,7 @@ def add_iden_kernel(input_ptr, iden_ptr, output_ptr, channel:tl.constexpr):
     output_ptrs = output_ptr + pid_b * channel * channel + offs_iden
     tl.store(output_ptrs, output_matrix, mask= offs_iden < channel * channel )
 
-
-def add_iden(input_tensor, batch_size, channel):
-    """
-    输入：形状为 (batch_size, channel, channel) 的输入张量
-    输出：形状为 (batch_size, channel, channel) 的输出张量，已加上身份矩阵
-    """
+def matrix_addI(input_tensor, batch_size, channel):
     # 分配输出 tensor
     output_tensor = torch.empty_like(input_tensor)
 
@@ -325,7 +322,7 @@ def add_iden(input_tensor, batch_size, channel):
     grid = lambda META: (batch_size, )  # 每个批次的内核只需要一个线程
 
     # 启动 Triton 内核
-    add_iden_kernel[grid](
+    addI_kernel[grid](
         input_tensor, iden, output_tensor, channel
     )
 
@@ -368,61 +365,16 @@ def compute_max(input_tensor, batch_size, num_elements):
 
     return output_tensor.cpu()
 
-@triton.autotune(
-    configs=get_cuda_autotune_config(),
-    key=['M', 'N', 'K'],
-)
-@triton.jit
-def bmm_kernel(
-        a_ptr, b_ptr, c_ptr,
-        M, N, K,
-        stride_am, stride_ak,
-        stride_bk, stride_bn,
-        stride_cm, stride_cn,
-        BLOCK_SIZE_M: tl.constexpr, BLOCK_SIZE_N: tl.constexpr, BLOCK_SIZE_K: tl.constexpr,
-        GROUP_SIZE_M: tl.constexpr
-):
-    pid = tl.program_id(axis=0)
-    pid_b = tl.program_id(axis=1)
-    num_pid_m = tl.cdiv(M, BLOCK_SIZE_M)
-    num_pid_n = tl.cdiv(N, BLOCK_SIZE_N)
-    num_pid_in_group = GROUP_SIZE_M * num_pid_n
-    group_id = pid // num_pid_in_group
-    first_pid_m = group_id * GROUP_SIZE_M
-    group_size_m = min(num_pid_m - first_pid_m, GROUP_SIZE_M)
-    pid_m = first_pid_m + (pid % group_size_m)
-    pid_n = (pid % num_pid_in_group) // group_size_m
-
-    offs_am = (pid_m * BLOCK_SIZE_M + tl.arange(0, BLOCK_SIZE_M)) % M
-    offs_bn = (pid_n * BLOCK_SIZE_N + tl.arange(0, BLOCK_SIZE_N)) % N
-    offs_k = tl.arange(0, BLOCK_SIZE_K)
-    a_ptrs = a_ptr + (offs_am[:, None] * stride_am + offs_k[None, :] * stride_ak) + pid_b * M * K
-    b_ptrs = b_ptr + (offs_k[:, None] * stride_bk + offs_bn[None, :] * stride_bn) + pid_b * K * N
-
-    # 迭代计算C矩阵的一个块。
-    accumulator = tl.zeros((BLOCK_SIZE_M, BLOCK_SIZE_N), dtype=tl.float32)
-    for k in range(0, tl.cdiv(K, BLOCK_SIZE_K)):
-        a = tl.load(a_ptrs, mask=offs_k[None, :] < K - k * BLOCK_SIZE_K, other=0.0)
-        b = tl.load(b_ptrs, mask=offs_k[:, None] < K - k * BLOCK_SIZE_K, other=0.0)
-        accumulator += tl.dot(a, b)
-        a_ptrs += BLOCK_SIZE_K * stride_ak
-        b_ptrs += BLOCK_SIZE_K * stride_bk
-    c = accumulator.to(tl.float16)
-
-    offs_cm = pid_m * BLOCK_SIZE_M + tl.arange(0, BLOCK_SIZE_M)
-    offs_cn = pid_n * BLOCK_SIZE_N + tl.arange(0, BLOCK_SIZE_N)
-    c_ptrs = c_ptr + stride_cm * offs_cm[:, None] + stride_cn * offs_cn[None, :] + pid_b * M * N
-    c_mask = (offs_cm[:, None] < M) & (offs_cn[None, :] < N)
-    tl.store(c_ptrs, c, mask=c_mask)
 def bmm(a, b, batch_size,M,K,N):
     c = torch.empty((batch_size, M, N), device=a.device, dtype=a.dtype)
     grid = lambda META: (triton.cdiv(M, META['BLOCK_SIZE_M']) * triton.cdiv(N, META['BLOCK_SIZE_N']), batch_size,)
-    bmm_kernel[grid](
+    gemm1_kernel[grid](
         a, b, c,
         M, N, K,
         K,  1,
         N,  1,
         N,  1,
+        c,None,None,None,None,isCF=False, BN=False,RELU=False,
     )
     return c
 
@@ -466,9 +418,9 @@ def FBR_2_F(x,prefix,IC,OC1,OC2,OC3,off):
 
 def stnd(x,prefix,IC,OC1,OC2,OC3,f1,f2,f3):
     CBR3_out = CBR3(x,prefix,IC,OC1,OC2,OC3)
-    max_pool_out = max_along_dim(CBR3_out, 1000, OC3, 32, block_size=32)
+    max_pool_out = maxPooling(CBR3_out, 1000, OC3, 32, block_size=32)
     fbr2f_out = FBR_2_F(max_pool_out,prefix,OC3,f1,f2,f3,off=3)
-    feat = add_iden(fbr2f_out, 1000, IC)
+    feat = matrix_addI(fbr2f_out, 1000, IC)
     return feat
 
 
@@ -483,7 +435,7 @@ def do_inference(list_of_points,list_of_labels,params): #请在本函数下使�
     x_mul_trans_feat = bmm(feat_conv_1_out,trans_feat,batchSize,numPoints,fstn_IC,fstn_IC)
     feat_conv_2_out = CBR(x_mul_trans_feat, "feat.", 2 , fstn_IC, encoderOC2)
     feat_conv_3_out = CBR(feat_conv_2_out, "feat.", 3 , encoderOC2, encoderOC3 , "norelu")
-    feat_output = max_along_dim(feat_conv_3_out, batchSize, encoderOC3, numPoints, block_size=32)
+    feat_output = maxPooling(feat_conv_3_out, batchSize, encoderOC3, numPoints, block_size=32)
 
     fc_3_out = FBR_2_F(feat_output,"",encoderOC3,512,256,10,off=0)
     final_output = compute_max(fc_3_out, batchSize, 10)

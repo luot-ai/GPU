@@ -97,28 +97,35 @@ def get_cuda_autotune_config():
                       num_warps=2)
     ]
 
-# 1D 卷积+批归一化+激活内核
+
+# ReLU 激活函数实现
+@triton.jit
+def relu(x):
+    return tl.where(x >= 0, x, 0)
+
 @triton.autotune(
     configs=get_cuda_autotune_config(),
     key=['M', 'N', 'K'],
 )
 @triton.jit
-def conv_bn_ru_kernel(
-        a_ptr, b_ptr, conv_bias, c_ptr,
-        bn_weight, bn_bias, bn_mean, bn_var,
+def gemm1_kernel(
+        a_ptr, b_ptr, c_ptr,
         M, N, K,
         stride_am, stride_ak,
         stride_bk, stride_bn,
         stride_cm, stride_cn,
+        cvb,
+        bnw, 
+        bnb, 
+        bnrm, 
+        bnrv, 
         BLOCK_SIZE_M: tl.constexpr, BLOCK_SIZE_N: tl.constexpr, BLOCK_SIZE_K: tl.constexpr,
         GROUP_SIZE_M: tl.constexpr,
-        ACTIVATION: tl.constexpr
+        BN: tl.constexpr,
+        RELU: tl.constexpr
 ):
-    """计算卷积和批归一化的内核"""
-    
-    # 获取程序 ID 用于计算分配的 C 块。
-    bid = tl.program_id(axis=1)
     pid = tl.program_id(axis=0)
+    pid_b = tl.program_id(axis=1)
     num_pid_m = tl.cdiv(M, BLOCK_SIZE_M)
     num_pid_n = tl.cdiv(N, BLOCK_SIZE_N)
     num_pid_in_group = GROUP_SIZE_M * num_pid_n
@@ -128,21 +135,21 @@ def conv_bn_ru_kernel(
     pid_m = first_pid_m + (pid % group_size_m)
     pid_n = (pid % num_pid_in_group) // group_size_m
 
-    # 为 A 和 B 的第一个块创建指针
     offs_am = (pid_m * BLOCK_SIZE_M + tl.arange(0, BLOCK_SIZE_M)) % M
     offs_bn = (pid_n * BLOCK_SIZE_N + tl.arange(0, BLOCK_SIZE_N)) % N
     offs_k = tl.arange(0, BLOCK_SIZE_K)
-    a_ptrs = a_ptr + (offs_am[:, None] * stride_am + offs_k[None, :] * stride_ak) + bid * M * K
-    b_ptrs = b_ptr + (offs_k[:, None] * stride_bk + offs_bn[None, :] * stride_bn)
+    a_ptrs = a_ptr + (offs_am[:, None] * stride_am + offs_k[None, :] * stride_ak) + pid_b * M * K
+    b_ptrs = b_ptr + (offs_k[:, None] * stride_bk + offs_bn[None, :] * stride_bn) #+ pid_b * K * N
 
     # 初始化 accumulator
-    offs_conv_bias = (pid_n * BLOCK_SIZE_N + tl.arange(0, BLOCK_SIZE_N)) % N
-    conv_bias_ptrs = conv_bias + offs_conv_bias[None, :]
-    conv_bias_line = tl.load(conv_bias_ptrs, mask=offs_conv_bias[None, :] < N)
-    conv_bias_matrix = tl.broadcast_to(conv_bias_line, (BLOCK_SIZE_M, BLOCK_SIZE_N))
+    offs_cvb = (pid_n * BLOCK_SIZE_N + tl.arange(0, BLOCK_SIZE_N)) % N
+    cvb_ptrs = cvb + offs_cvb[None, :]
+    cvb_line = tl.load(cvb_ptrs, mask=offs_cvb[None, :] < N)
+    cvb_matrix = tl.broadcast_to(cvb_line, (BLOCK_SIZE_M, BLOCK_SIZE_N))
     accumulator = tl.zeros((BLOCK_SIZE_M, BLOCK_SIZE_N), dtype=tl.float32)
-    accumulator += conv_bias_matrix
+    accumulator += cvb_matrix
 
+    # 迭代计算C矩阵的一个块。
     for k in range(0, tl.cdiv(K, BLOCK_SIZE_K)):
         a = tl.load(a_ptrs, mask=offs_k[None, :] < K - k * BLOCK_SIZE_K, other=0.0)
         b = tl.load(b_ptrs, mask=offs_k[:, None] < K - k * BLOCK_SIZE_K, other=0.0)
@@ -150,58 +157,59 @@ def conv_bn_ru_kernel(
         a_ptrs += BLOCK_SIZE_K * stride_ak
         b_ptrs += BLOCK_SIZE_K * stride_bk
 
-    offs_bn_mean = (pid_n * BLOCK_SIZE_N + tl.arange(0, BLOCK_SIZE_N)) % N
-    bn_mean_ptrs = bn_mean + offs_bn_mean[None, :]
-    bn_mean_line = tl.load(bn_mean_ptrs, mask=offs_bn_mean[None, :] < N)
-    bn_mean_matrix = tl.broadcast_to(bn_mean_line, (BLOCK_SIZE_M, BLOCK_SIZE_N))
-    accumulator -= bn_mean_matrix
+    if BN == True:
+        offs_bnrm = (pid_n * BLOCK_SIZE_N + tl.arange(0, BLOCK_SIZE_N)) % N
+        bnrm_ptrs = bnrm + offs_bnrm[None, :]
+        bnrm_line = tl.load(bnrm_ptrs, mask=offs_bnrm[None, :] < N)
+        bnrm_matrix = tl.broadcast_to(bnrm_line, (BLOCK_SIZE_M, BLOCK_SIZE_N))
+        accumulator -= bnrm_matrix
 
-    offs_bn_var = (pid_n * BLOCK_SIZE_N + tl.arange(0, BLOCK_SIZE_N)) % N
-    bn_var_ptrs = bn_var + offs_bn_var[None, :]
-    bn_var_line = tl.load(bn_var_ptrs, mask=offs_bn_var[None, :] < N)
-    bn_var_matrix = tl.broadcast_to(bn_var_line, (BLOCK_SIZE_M, BLOCK_SIZE_N))
-    accumulator /= tl.sqrt(bn_var_matrix + 1e-5) 
+        offs_bnrv = (pid_n * BLOCK_SIZE_N + tl.arange(0, BLOCK_SIZE_N)) % N
+        bnrv_ptrs = bnrv + offs_bnrv[None, :]
+        bnrv_line = tl.load(bnrv_ptrs, mask=offs_bnrv[None, :] < N)
+        bnrv_matrix = tl.broadcast_to(bnrv_line, (BLOCK_SIZE_M, BLOCK_SIZE_N))
+        accumulator /= tl.sqrt(bnrv_matrix + 1e-5) 
 
-    offs_bn_weight = (pid_n * BLOCK_SIZE_N + tl.arange(0, BLOCK_SIZE_N)) % N
-    bn_weight_ptrs = bn_weight + offs_bn_weight[None, :]
-    bn_weight_line = tl.load(bn_weight_ptrs, mask=offs_bn_weight[None, :] < N)
-    bn_weight_matrix = tl.broadcast_to(bn_weight_line, (BLOCK_SIZE_M, BLOCK_SIZE_N))
-    accumulator *= bn_weight_matrix
+        offs_bnw = (pid_n * BLOCK_SIZE_N + tl.arange(0, BLOCK_SIZE_N)) % N
+        bnw_ptrs = bnw + offs_bnw[None, :]
+        bnw_line = tl.load(bnw_ptrs, mask=offs_bnw[None, :] < N)
+        bnw_matrix = tl.broadcast_to(bnw_line, (BLOCK_SIZE_M, BLOCK_SIZE_N))
+        accumulator *= bnw_matrix
 
-    offs_bn_bias = (pid_n * BLOCK_SIZE_N + tl.arange(0, BLOCK_SIZE_N)) % N
-    bn_bias_ptrs = bn_bias + offs_bn_bias[None, :]
-    bn_bias_line = tl.load(bn_bias_ptrs, mask=offs_bn_bias[None, :] < N)
-    bn_bias_matrix = tl.broadcast_to(bn_bias_line, (BLOCK_SIZE_M, BLOCK_SIZE_N))
-    accumulator += bn_bias_matrix
-
-    # 激活函数
-    if ACTIVATION == "relu":
+        offs_bnb = (pid_n * BLOCK_SIZE_N + tl.arange(0, BLOCK_SIZE_N)) % N
+        bnb_ptrs = bnb + offs_bnb[None, :]
+        bnb_line = tl.load(bnb_ptrs, mask=offs_bnb[None, :] < N)
+        bnb_matrix = tl.broadcast_to(bnb_line, (BLOCK_SIZE_M, BLOCK_SIZE_N))
+        accumulator += bnb_matrix
+    if RELU == True:
         accumulator = relu(accumulator)
 
-    # 将结果存储到输出矩阵 C 中
     offs_cm = pid_m * BLOCK_SIZE_M + tl.arange(0, BLOCK_SIZE_M)
     offs_cn = pid_n * BLOCK_SIZE_N + tl.arange(0, BLOCK_SIZE_N)
-    c_ptrs = c_ptr + stride_cm * offs_cm[:, None] + stride_cn * offs_cn[None, :] + bid * M * N
+    c_ptrs = c_ptr + stride_cm * offs_cm[:, None] + stride_cn * offs_cn[None, :] + pid_b * M * N
     c_mask = (offs_cm[:, None] < M) & (offs_cn[None, :] < N)
     tl.store(c_ptrs, accumulator, mask=c_mask)
+def gemm1(a, b, batch_size, M, K, N, 
+        cvb,
+        bnw, 
+        bnb, 
+        bnrm, 
+        bnrv, 
+        BN: tl.constexpr,
+        RELU: tl.constexpr):
+    c = torch.empty((batch_size, M, N), device=a.device, dtype=a.dtype)
 
-# ReLU 激活函数实现
-@triton.jit
-def relu(x):
-    return tl.where(x >= 0, x, 0)
-def conv_bn_ru(a, b, cvb, bnw, bnb, bnrm, bnrv, batch_size, M, K, N, activation="relu"):
-    output = torch.empty((batch_size, M, N), device='cuda', dtype=torch.float32)
     grid = lambda META: (triton.cdiv(M, META['BLOCK_SIZE_M']) * triton.cdiv(N, META['BLOCK_SIZE_N']), batch_size,)
-    conv_bn_ru_kernel[grid](
-        a, b, cvb, output,
-        bnw, bnb, bnrm, bnrv,
+    gemm1_kernel[grid](
+        a, b, c,
         M, N, K,
-        K, 1,
-        1, K,
-        N, 1,
-        ACTIVATION=activation
+        K,  1,
+        1,  K,
+        N,  1,
+        cvb, bnw, bnb, bnrm, bnrv, BN=BN, RELU=RELU,
     )
-    return output
+    return c
+
 
 @triton.jit
 def max_along_dim_kernel(
@@ -277,80 +285,6 @@ def log_softmax(input, batchsize, features):
     
     return output
 
-@triton.autotune(
-    configs=get_cuda_autotune_config(),
-    key=['M', 'N', 'K'],
-)
-@triton.jit
-def fc_kernel(
-        a_ptr, b_ptr, conv_bias, c_ptr,
-        batch_size, M, N, K,
-        stride_am, stride_ak,
-        stride_bk, stride_bn,
-        stride_cm, stride_cn,
-        BLOCK_SIZE_M: tl.constexpr, BLOCK_SIZE_N: tl.constexpr, BLOCK_SIZE_K: tl.constexpr,
-        GROUP_SIZE_M: tl.constexpr
-):
-    """计算卷积和批归一化的内核"""
-    
-    # 获取程序 ID 用于计算分配的 C 块。
-    bid = tl.program_id(axis=1)
-    pid = tl.program_id(axis=0)
-    num_pid_m = tl.cdiv(M, BLOCK_SIZE_M)
-    num_pid_n = tl.cdiv(N, BLOCK_SIZE_N)
-    num_pid_in_group = GROUP_SIZE_M * num_pid_n
-    group_id = pid // num_pid_in_group
-    first_pid_m = group_id * GROUP_SIZE_M
-    group_size_m = min(num_pid_m - first_pid_m, GROUP_SIZE_M)
-    pid_m = first_pid_m + (pid % group_size_m)
-    pid_n = (pid % num_pid_in_group) // group_size_m
-
-    # 为 A 和 B 的第一个块创建指针
-    offs_am = (pid_m * BLOCK_SIZE_M + tl.arange(0, BLOCK_SIZE_M)) % M
-    offs_bn = (pid_n * BLOCK_SIZE_N + tl.arange(0, BLOCK_SIZE_N)) % N
-    offs_k = tl.arange(0, BLOCK_SIZE_K)
-    a_ptrs = a_ptr + (offs_am[:, None] * stride_am + offs_k[None, :] * stride_ak) + bid * M * K
-    b_ptrs = b_ptr + (offs_k[:, None] * stride_bk + offs_bn[None, :] * stride_bn)
-
-    # 初始化 accumulator
-    offs_conv_bias = (pid_n * BLOCK_SIZE_N + tl.arange(0, BLOCK_SIZE_N)) % N
-    conv_bias_ptrs = conv_bias + offs_conv_bias[None, :]
-    conv_bias_line = tl.load(conv_bias_ptrs, mask=offs_conv_bias[None, :] < N)
-    conv_bias_matrix = tl.broadcast_to(conv_bias_line, (BLOCK_SIZE_M, BLOCK_SIZE_N))
-    accumulator = tl.zeros((BLOCK_SIZE_M, BLOCK_SIZE_N), dtype=tl.float32)
-    accumulator += conv_bias_matrix
-
-
-    for k in range(0, tl.cdiv(K, BLOCK_SIZE_K)):
-        a = tl.load(a_ptrs, mask=offs_k[None, :] < K - k * BLOCK_SIZE_K, other=0.0)
-        b = tl.load(b_ptrs, mask=offs_k[:, None] < K - k * BLOCK_SIZE_K, other=0.0)
-        accumulator += tl.dot(a, b)
-        a_ptrs += BLOCK_SIZE_K * stride_ak
-        b_ptrs += BLOCK_SIZE_K * stride_bk
-
-    # 将结果存储到输出矩阵 C 中
-    offs_cm = pid_m * BLOCK_SIZE_M + tl.arange(0, BLOCK_SIZE_M)
-    offs_cn = pid_n * BLOCK_SIZE_N + tl.arange(0, BLOCK_SIZE_N)
-    c_ptrs = c_ptr + stride_cm * offs_cm[:, None] + stride_cn * offs_cn[None, :] + bid * M * N
-    c_mask = (offs_cm[:, None] < M) & (offs_cn[None, :] < N)
-    tl.store(c_ptrs, accumulator, mask=c_mask)
-
-def fc(x, conv_weight, conv_bias, batch_size, width, in_channels, out_channels):
-    # 分配输出 tensor，形状为 (width, out_channels)
-    fc_output = torch.empty((batch_size, width, out_channels), device='cuda', dtype=torch.float32)
-
-    # 1D 内核启动配置，计算 grid 大小
-    grid = lambda META: (triton.cdiv(width, META['BLOCK_SIZE_M']) * triton.cdiv(out_channels, META['BLOCK_SIZE_N']), batch_size,)
-    
-    # 启动 Triton 内核
-    fc_kernel[grid](
-        x, conv_weight, conv_bias, fc_output,
-        batch_size, width, out_channels, in_channels,
-        in_channels, 1,
-        1, in_channels,
-        out_channels, 1
-    )
-    return fc_output
 
 @triton.jit
 def add_iden_kernel(input_ptr, iden_ptr, output_ptr, channel:tl.constexpr):
@@ -499,7 +433,10 @@ def CBR(x,prefix,idx,IC,OC,activation="relu"):
     bnb = f"{prefix}bn{idx}.bias"
     bnrm = f"{prefix}bn{idx}.running_mean"
     bnrv = f"{prefix}bn{idx}.running_var"
-    res = conv_bn_ru(x, params[cvw], params[cvb], params[bnw], params[bnb], params[bnrm], params[bnrv], 1000, 32, IC, OC, activation)
+    relu = False
+    if(activation == "relu"):
+        relu = True
+    res = gemm1(x,params[cvw],1000,32,IC,OC,params[cvb], params[bnw], params[bnb], params[bnrm], params[bnrv],True,relu)
     return res
 
 def CBR3(x,prefix,IC,OC1,OC2,OC3):
@@ -516,7 +453,7 @@ def FBR(x,prefix,idx,IC,OC,off):
     bnb = f"{prefix}bn{bnidx}.bias"
     bnrm = f"{prefix}bn{bnidx}.running_mean"
     bnrv = f"{prefix}bn{bnidx}.running_var"
-    res = conv_bn_ru(x, params[fcw], params[fcb], params[bnw], params[bnb], params[bnrm], params[bnrv], 1000, 1, IC, OC, activation="relu")
+    res = gemm1(x,params[fcw],1000,1,IC,OC,params[fcb],params[bnw], params[bnb], params[bnrm], params[bnrv],True,True)
     return res
 
 def FBR_2_F(x,prefix,IC,OC1,OC2,OC3,off):
@@ -524,7 +461,7 @@ def FBR_2_F(x,prefix,IC,OC1,OC2,OC3,off):
     res2 = FBR(res1,prefix,2,OC1,OC2,off)
     fcw = f"{prefix}fc3.weight"
     fcb = f"{prefix}fc3.bias"
-    res3 = fc(res2, params[fcw], params[fcb], 1000, 1, OC2, OC3)
+    res3 = gemm1(res2, params[fcw], 1000, 1, OC2, OC3, params[fcb], None,None,None,None,False,False)
     return res3
 
 def stnd(x,prefix,IC,OC1,OC2,OC3,f1,f2,f3):

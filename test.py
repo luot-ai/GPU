@@ -271,21 +271,21 @@ def matrix_addI(x, batch_size, channel):
     return res
 
 @triton.jit
-def max_kernel(input_ptr, output_ptr, batch_size: tl.constexpr, num_elements: tl.constexpr):
-    pid_b = tl.program_id(axis=0)
+def max_kernel(x, output_ptr, batch_size: tl.constexpr, N: tl.constexpr):
+    batch = tl.program_id(axis=0)
     offs =  tl.arange(0, 16)
-    input_ptrs = input_ptr + offs + pid_b * num_elements
-    data = tl.load(input_ptrs, mask = offs < 10, other= -sys.float_info.max)
-    max_index = tl.argmax(data,axis = 0)
+    input_ptrs = x + batch * N + offs 
+    data = tl.load(input_ptrs, mask = offs < N, other= -sys.float_info.max)
+    label = tl.argmax(data,axis = 0)
     #存数
-    output_ptrs = output_ptr + pid_b
-    tl.store(output_ptrs, max_index)
+    output_ptrs = output_ptr + batch
+    tl.store(output_ptrs, label)
 
 def get_label(x, batch_size, N):
-    res = torch.empty(batch_size, device='cuda', dtype=torch.float32)
+    labels = torch.empty(batch_size, device='cuda', dtype=torch.float32)
     grid = lambda META: (batch_size, )
-    max_kernel[grid](x, res, batch_size, N)
-    return res.cpu()
+    max_kernel[grid](x, labels, batch_size, N)
+    return labels.cpu()
 
 def bmm(a, b, batch_size,M,K,N):
     c = torch.empty((batch_size, M, N), device=a.device, dtype=a.dtype)

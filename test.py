@@ -218,54 +218,57 @@ def gbr(a, b, batch_size, M, K, N,
 
 @triton.jit
 def maxPooling_kernel(
-    x_ptr, result_ptr,
-    batchsize, channel, N,
+    x, res,
+    channel, N,
     BLOCK_SIZE: tl.constexpr,
 ):
-    b = tl.program_id(axis=0)  
-    c = tl.program_id(axis=1)  
-
+    curC = tl.program_id(axis=1)  
+    batch = tl.program_id(axis=0)  
+    bc = batch * channel
+    b_off = bc * N
+    #取数，这里的维度是B  N  C
     offs_n = tl.arange(0, BLOCK_SIZE) 
-    x = x_ptr + (b * channel * N + c + offs_n * channel)  
-    x_vals = tl.load(x)  
-
+    x_idx = x + (b_off + offs_n * channel +curC)  
+    x_vals = tl.load(x_idx)  
+    #计算，这里的blk_size = numpoints
     max_val = tl.max(x_vals)  
+    #存数，res的维度是B C
+    tl.store(res + (bc + curC) , max_val)  
 
-    result_ptr_b_c = result_ptr + (b * channel + c)  
-    tl.store(result_ptr_b_c, max_val)  
-
-def maxPooling(x, batchsize, channel, N, block_size=numPoints):
-    result = torch.zeros((batchsize, channel), device=x.device, dtype=torch.float32)
+def maxPooling(x, batchsize, channel, N):
+    max = torch.zeros((batchsize, channel), device=x.device, dtype=torch.float32)
     grid = (batchsize, channel)  
     maxPooling_kernel[grid](
-        x, result, batchsize, channel, N,
-        BLOCK_SIZE=block_size,
+        x, max, channel, N,
+        BLOCK_SIZE=N,
     )
-    return result
+    return max
 
 @triton.jit
-def addI_kernel(input_ptr, iden_ptr, output_ptr, channel:tl.constexpr):
-    pid_b = tl.program_id(axis=0)  # 批次 ID
+def addI_kernel(x, I, res, channel:tl.constexpr):
+    batch = tl.program_id(axis=0)  
+    f_size = channel * channel
+    b_off = batch * f_size
     if(channel == 3):
-        offs_iden = tl.arange(0, 16)
+        I_off = tl.arange(0, 16)
     else:
-        offs_iden = tl.arange(0, channel * channel)
-    input_ptrs = input_ptr + pid_b * channel * channel + offs_iden
-    input_matrix = tl.load(input_ptrs, mask= offs_iden < channel * channel)
-    iden_ptrs = iden_ptr + offs_iden
-    iden_matrix = tl.load(iden_ptrs, mask= offs_iden < channel * channel)
-    output_matrix = input_matrix + iden_matrix
-    output_ptrs = output_ptr + pid_b * channel * channel + offs_iden
-    tl.store(output_ptrs, output_matrix, mask= offs_iden < channel * channel )
+        I_off = tl.arange(0, channel * channel)
+    bi_off = b_off + I_off
+    l_mask = I_off < f_size
 
-def matrix_addI(input_tensor, batch_size, channel):
-    output_tensor = torch.empty_like(input_tensor)
-    iden = torch.eye(channel, device='cuda', dtype=torch.float32)
+    xM = tl.load(x + bi_off, mask= l_mask)
+    IM = tl.load(I + I_off, mask= l_mask)
+    resM = xM + IM
+    tl.store(res + bi_off, resM, mask= l_mask )
+
+def matrix_addI(x, batch_size, channel):
+    res = torch.empty_like(x)
+    I = torch.eye(channel, device='cuda', dtype=torch.float32)
     grid = lambda META: (batch_size, )  
     addI_kernel[grid](
-        input_tensor, iden, output_tensor, channel
+        x, I, res, channel
     )
-    return output_tensor
+    return res
 
 @triton.jit
 def max_kernel(input_ptr, output_ptr, batch_size: tl.constexpr, num_elements: tl.constexpr):
@@ -274,14 +277,15 @@ def max_kernel(input_ptr, output_ptr, batch_size: tl.constexpr, num_elements: tl
     input_ptrs = input_ptr + offs + pid_b * num_elements
     data = tl.load(input_ptrs, mask = offs < 10, other= -sys.float_info.max)
     max_index = tl.argmax(data,axis = 0)
+    #存数
     output_ptrs = output_ptr + pid_b
     tl.store(output_ptrs, max_index)
 
-def compute_max(input_tensor, batch_size, num_elements):
-    output_tensor = torch.empty(batch_size, device='cuda', dtype=torch.float32)
+def get_label(x, batch_size, N):
+    res = torch.empty(batch_size, device='cuda', dtype=torch.float32)
     grid = lambda META: (batch_size, )
-    max_kernel[grid](input_tensor, output_tensor, batch_size, num_elements)
-    return output_tensor.cpu()
+    max_kernel[grid](x, res, batch_size, N)
+    return res.cpu()
 
 def bmm(a, b, batch_size,M,K,N):
     c = torch.empty((batch_size, M, N), device=a.device, dtype=a.dtype)
@@ -336,7 +340,7 @@ def FBR_2_F(x,prefix,IC,OC1,OC2,OC3,off):
 
 def stnd(x,prefix,IC,OC1,OC2,OC3,f1,f2,f3):
     CBR3_out = CBR3(x,prefix,IC,OC1,OC2,OC3)
-    max_pool_out = maxPooling(CBR3_out, 1000, OC3, numPoints, block_size=numPoints)
+    max_pool_out = maxPooling(CBR3_out, 1000, OC3, numPoints)
     fbr2f_out = FBR_2_F(max_pool_out,prefix,OC3,f1,f2,f3,off=3)
     feat = matrix_addI(fbr2f_out, 1000, IC)
     return feat
@@ -353,10 +357,10 @@ def do_inference(list_of_points,list_of_labels,params): #请在本函数下使�
     x_mul_trans_feat = bmm(feat_conv_1_out,trans_feat,batchSize,numPoints,fstn_IC,fstn_IC)
     feat_conv_2_out = CBR(x_mul_trans_feat, "feat.", 2 , fstn_IC, encoderOC2)
     feat_conv_3_out = CBR(feat_conv_2_out, "feat.", 3 , encoderOC2, encoderOC3 , "norelu")
-    feat_output = maxPooling(feat_conv_3_out, batchSize, encoderOC3, numPoints, block_size=numPoints)
+    feat_output = maxPooling(feat_conv_3_out, batchSize, encoderOC3, numPoints)
 
     fc_3_out = FBR_2_F(feat_output,"",encoderOC3,512,256,10,off=0)
-    final_output = compute_max(fc_3_out, batchSize, 10)
+    final_output = get_label(fc_3_out, batchSize, 10)
     correct_num = 0
 
     for output, label in zip(final_output, list_of_labels):

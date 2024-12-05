@@ -39,6 +39,8 @@
 #define PRETRAIN 0
 #define USEMATDIFF 0
 #define DROPOUT 0
+#define VALIDATE 1
+#define SAVE 0
 // #define DEBUG
 // #define BACKDEBUG
 // #define USECONVMAX (SAMPLE == 0 ? 1 : (NPOINT >= 128 ? 1 : 0))
@@ -3020,7 +3022,8 @@ int main(int argc, char *argv[]) {
         std::chrono::duration<double> diff = end - start;
         std::cout << std::fixed << std::setprecision(4) << diff.count() << ":" << std::setprecision(4) << correct_rate;
     }
-
+    if(VALIDATE == 1)
+    {
     for (size_t e = 0; e < 1; e++)
     {
         printf("\nepoch%d: ", e);
@@ -3054,11 +3057,16 @@ int main(int argc, char *argv[]) {
         std::chrono::duration<double> diff = end - start;
         std::cout << std::fixed << std::setprecision(4) << diff.count() << ":" << std::setprecision(4) << correct_rate;
     }
+    }
 
-    // cudaP hParams;
-    // copyDPtoHost(hParams,dParams);
-    // save_model_params_and_buffers_to_txt("./newparams/train/30");
-    cudaDeviceSynchronize();
+    if(SAVE==1)
+    {
+        cudaP hParams;
+        copyDPtoHost(hParams,dParams);
+        save_model_params_and_buffers_to_txt("./newparams/train/30");
+        cudaDeviceSynchronize();
+    }
+    
     // 释放内存
     freeDP(dParams);//权重
     freeDP(upParams, true);//更新权重

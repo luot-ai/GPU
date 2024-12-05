@@ -25,7 +25,7 @@
 #define DIV_UP(x, y) (((x) + (y) - 1) / (y))
 #define INDEX(row, col, width) ((row) * (width) + (col))
 #define NPOINT 128
-#define SAMPLE 0
+#define SAMPLE 1
 #define USECONVMAX (SAMPLE == 0 ? 1 : (NPOINT >= 128 ? 1 : 0))
 
 __device__ __forceinline__
@@ -2431,7 +2431,7 @@ int main(int argc, char *argv[]) {
     read_params(dir);
 
     // 读取输入：主机
-    std::string file_path = "./data/test_point_clouds.h5";
+    std::string file_path = "./data/train_point_clouds.h5";
     std::vector<std::vector<float>> list_of_points;
     std::vector<int> list_of_labels;
     read_h5_file(file_path, list_of_points, list_of_labels);

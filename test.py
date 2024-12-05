@@ -215,7 +215,6 @@ def gbr(a, b, batch_size, M, K, N,
     )
     return c
 
-
 @triton.jit
 def maxPooling_kernel(
     x, res,
@@ -234,7 +233,6 @@ def maxPooling_kernel(
     max_val = tl.max(x_vals)  
     #存数，res的维度是B C
     tl.store(res + (bc + curC) , max_val)  
-
 def maxPooling(x, batchsize, channel, N):
     max = torch.zeros((batchsize, channel), device=x.device, dtype=torch.float32)
     grid = (batchsize, channel)  
@@ -260,7 +258,6 @@ def addI_kernel(x, I, res, channel:tl.constexpr):
     IM = tl.load(I + I_off, mask= l_mask)
     resM = xM + IM
     tl.store(res + bi_off, resM, mask= l_mask )
-
 def matrix_addI(x, batch_size, channel):
     res = torch.empty_like(x)
     I = torch.eye(channel, device='cuda', dtype=torch.float32)
@@ -271,20 +268,18 @@ def matrix_addI(x, batch_size, channel):
     return res
 
 @triton.jit
-def max_kernel(x, output_ptr, batch_size: tl.constexpr, N: tl.constexpr):
+def get_label_kernel(x, labels, batch_size: tl.constexpr, N: tl.constexpr):
     batch = tl.program_id(axis=0)
     offs =  tl.arange(0, 16)
-    input_ptrs = x + batch * N + offs 
-    data = tl.load(input_ptrs, mask = offs < N, other= -sys.float_info.max)
+    idx = x + batch * N + offs 
+    data = tl.load(idx, mask = offs < N, other= -sys.float_info.max)
     label = tl.argmax(data,axis = 0)
     #存数
-    output_ptrs = output_ptr + batch
-    tl.store(output_ptrs, label)
-
+    tl.store(labels + batch, label)
 def get_label(x, batch_size, N):
     labels = torch.empty(batch_size, device='cuda', dtype=torch.float32)
     grid = lambda META: (batch_size, )
-    max_kernel[grid](x, labels, batch_size, N)
+    get_label_kernel[grid](x, labels, batch_size, N)
     return labels.cpu()
 
 def bmm(a, b, batch_size,M,K,N):
@@ -346,16 +341,16 @@ def stnd(x,prefix,IC,OC1,OC2,OC3,f1,f2,f3):
     return feat
 
 
-def do_inference(list_of_points,list_of_labels,params): #请在本函数下使用triton实现推理操作
-    model_input = torch.tensor(np.array(list_of_points), dtype=torch.float32, device='cuda')
+def do_inference(list_of_points,list_of_labels): #请在本函数下使用triton实现推理操作
+    input = torch.tensor(np.array(list_of_points), dtype=torch.float32, device='cuda')
     
-    trans = stnd(model_input,"feat.stn.",IC,OC1,OC2,OC3,FC_OC1,FC_OC2,FC_OC3)
-    x_mul_trans = bmm(model_input,trans,batchSize,numPoints,IC,IC)
-    feat_conv_1_out = CBR(x_mul_trans, "feat." , 1 , encoderIC1 , fstn_IC)
+    trans = stnd(input,"feat.stn.",IC,OC1,OC2,OC3,FC_OC1,FC_OC2,FC_OC3)
+    stn3d_bmm = bmm(input,trans,batchSize,numPoints,IC,IC)
+    feat_conv_1_out = CBR(stn3d_bmm, "feat." , 1 , encoderIC1 , fstn_IC)
 
     trans_feat = stnd(feat_conv_1_out,"feat.fstn.",fstn_IC,fstn_OC1,fstn_OC2,fstn_OC3,fstn_FC_OC1,fstn_FC_OC2,fstn_FC_OC3)
-    x_mul_trans_feat = bmm(feat_conv_1_out,trans_feat,batchSize,numPoints,fstn_IC,fstn_IC)
-    feat_conv_2_out = CBR(x_mul_trans_feat, "feat.", 2 , fstn_IC, encoderOC2)
+    stnkd = bmm(feat_conv_1_out,trans_feat,batchSize,numPoints,fstn_IC,fstn_IC)
+    feat_conv_2_out = CBR(stnkd, "feat.", 2 , fstn_IC, encoderOC2)
     feat_conv_3_out = CBR(feat_conv_2_out, "feat.", 3 , encoderOC2, encoderOC3 , "norelu")
     feat_output = maxPooling(feat_conv_3_out, batchSize, encoderOC3, numPoints)
 
@@ -383,7 +378,7 @@ if __name__ == '__main__':
     
     # 开始计时
     start = time.time()
-    accuracy_rate = do_inference(list_of_points,list_of_labels,params)
+    accuracy_rate = do_inference(list_of_points,list_of_labels)
     # 结束计时
     end = time.time()
     ms = end - start

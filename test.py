@@ -136,7 +136,6 @@ def gemm_br_kernel(
 
     blk_row = pid_m * BLOCK_SIZE_M
     blk_col = pid_n * BLOCK_SIZE_N
-    blk_tuple = (BLOCK_SIZE_M, BLOCK_SIZE_N)
     arange_M = tl.arange(0, BLOCK_SIZE_M)
     arange_N = tl.arange(0, BLOCK_SIZE_N)
 
@@ -174,18 +173,19 @@ def gemm_br_kernel(
 
         bnrv_ptrs = bnrv + offs_bn_2D
         bnrv_line = tl.load(bnrv_ptrs, mask=mask_bn)
-        bnrv_matrix = tl.broadcast_to(bnrv_line, (BLOCK_SIZE_M, BLOCK_SIZE_N))
-        accumulator /= tl.sqrt(bnrv_matrix + 1e-5) 
 
         bnw_ptrs = bnw + offs_bn_2D
         bnw_line = tl.load(bnw_ptrs, mask=mask_bn)
-        bnw_matrix = tl.broadcast_to(bnw_line, (BLOCK_SIZE_M, BLOCK_SIZE_N))
-        accumulator *= bnw_matrix
+
+        gamma_line = bnw_line / tl.sqrt(bnrv_line + 1e-5)
+        gamma = tl.broadcast_to(gamma_line, (BLOCK_SIZE_M, BLOCK_SIZE_N))
+        accumulator *= gamma 
 
         bnb_ptrs = bnb + offs_bn_2D
         bnb_line = tl.load(bnb_ptrs, mask=mask_bn)
         bnb_matrix = tl.broadcast_to(bnb_line, (BLOCK_SIZE_M, BLOCK_SIZE_N))
         accumulator += bnb_matrix
+
     if RELU == True:
         accumulator = relu(accumulator)
 

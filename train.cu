@@ -36,7 +36,7 @@
 #define DARKNETBLK 512
 #define BLOCK 512
 #define EPOCH 30
-#define PRETRAIN 1
+#define PRETRAIN 0
 #define USEMATDIFF 0
 #define DROPOUT 0
 // #define DEBUG
@@ -598,6 +598,12 @@ void free_fcp(fcp& wbp){
     cudaFree(wbp.bias);
     cudaFree(wbp.weight);
 }
+void memset_fcp(const std::string& layer, fcp& wbp,int i) {
+    std::string fiStr = std::to_string(i);;
+    std::string name = layer + "fc" + fiStr;  
+    cudaMemset(wbp.weight,0, params[name + ".weight"].size() * sizeof(float));
+    cudaMemset(wbp.bias,0, params[name + ".bias"].size() * sizeof(float));
+}
 
 struct wbBnP {
     float* weight; // Conv weight
@@ -669,6 +675,17 @@ void free_wbBnP(wbBnP& wbBnP,bool update=false){
     }
     cudaFree(wbBnP.bn_weight);
 }
+void memset_wbBnP(const std::string& layer,const std::string& cf,wbBnP& wbBnP,int i,int param_offset) 
+{
+    std::string cfiStr = std::to_string(i);
+    std::string biStr = std::to_string(i+param_offset);
+    std::string name = layer + cf + cfiStr;
+    std::string bnStr = layer + "bn" + biStr;   
+    cudaMemset(wbBnP.weight, 0, params[name + ".weight"].size() * sizeof(float)); 
+    cudaMemset(wbBnP.bias, 0, params[name + ".bias"].size() * sizeof(float));
+    cudaMemset(wbBnP.bn_weight, 0,params[bnStr + ".weight"].size() * sizeof(float));
+    cudaMemset(wbBnP.bn_bias, 0, params[bnStr + ".bias"].size() * sizeof(float));
+}
 
 struct CB3P {
     wbBnP cb1;
@@ -686,7 +703,11 @@ void free_CB3P(CB3P &CB3P,bool update=false){
     free_wbBnP(CB3P.cb2,update);
     free_wbBnP(CB3P.cb3,update);
 }
-
+void memset_CB3P(const std::string& layer,CB3P& CB3P) {
+    memset_wbBnP(layer,"conv",CB3P.cb1,1,0);
+    memset_wbBnP(layer,"conv",CB3P.cb2,2,0);
+    memset_wbBnP(layer,"conv",CB3P.cb3,3,0);   
+}
 
 struct FB2FP {
     wbBnP fb1;
@@ -704,6 +725,12 @@ void free_FB2FP(FB2FP &FB2FP,bool update=false){
     free_wbBnP(FB2FP.fb2,update);
     free_fcp(FB2FP.f3);
 }
+void memset_FB2FP(const std::string& layer,FB2FP& FB2FP,int param_offset)    
+{
+    memset_wbBnP(layer,"fc",FB2FP.fb1,1,param_offset);
+    memset_wbBnP(layer,"fc",FB2FP.fb2,2,param_offset);
+    memset_fcp(layer,FB2FP.f3,3);
+}
 
 struct stndP {
     CB3P cb3;
@@ -719,6 +746,10 @@ void free_stndP(stndP& stndP,bool update=false){
     free_CB3P(stndP.cb3,update);
     free_FB2FP(stndP.fb2f,update);
 }
+void memset_stndP(const std::string& layer,stndP& stndP) {
+    memset_CB3P(layer,stndP.cb3);
+    memset_FB2FP(layer,stndP.fb2f,3);
+}
 
 struct cudaP {
     stndP stn3dp;
@@ -732,6 +763,13 @@ void freeDP(cudaP &dp,bool update=false)
     free_stndP(dp.stnkdp,update);
     free_CB3P(dp.featp,update);
     free_FB2FP(dp.nonep,update);
+}
+void memsetDP(cudaP &dp)
+{
+    memset_stndP("feat.stn.",dp.stn3dp);
+    memset_stndP("feat.fstn.",dp.stnkdp);
+    memset_CB3P("feat.",dp.featp);
+    memset_FB2FP("",dp.nonep,0);
 }
 
 cudaP dParams;
@@ -798,6 +836,155 @@ void read_h5_file(const std::string& file_path, std::vector<std::vector<float>>&
 /****************************************************************************************
  * 网络搭建
  ****************************************************************************************/
+__global__ void transpose_Kernel(float* input,float* output,int dim0,int dim1,int dim2)
+{
+    int tx = threadIdx.x;
+    int ty = threadIdx.y;
+    int bx = blockIdx.x;
+    int by = blockIdx.y;
+
+    int idx = tx + bx * blockDim.x;
+    int idy = ty + by * blockDim.y;
+    int index = idx + idy * dim1;
+
+    if (idx < dim1 && idy < dim2)
+    {
+        for (int b=0;b<dim0;b++)
+        {
+            int bdd = b*dim1*dim2;
+            output[bdd+index]=input[bdd+idx*dim2+idy];
+        }
+    }
+}
+void GPU_transpose(float* input,float* output,int dim0,int dim1,int dim2)
+{
+    const int BLK_X = 32;
+    const int BLK_Y = 32;
+
+    dim3 blockDim(BLK_X, BLK_Y);
+    dim3 gridDim((dim1 + BLK_X -1)/BLK_X,  (dim2+BLK_Y-1)/BLK_Y);
+    transpose_Kernel<<<gridDim, blockDim>>>(input,output,dim0,dim1,dim2);
+    // // 检查内核启动是否成功
+    // CUDA_CHECK(cudaGetLastError());
+
+    // // 同步设备并检查执行错误
+    // CUDA_CHECK(cudaDeviceSynchronize());
+}
+__global__ void gemm_64x64_128N_kernel(int M,int N,int K,
+float* input_A, float* input_B, float* convBias,float* output, float beta = 0.0f)
+{   
+    // param-set : variable
+    int BM = 64;
+    int BN = 64;
+    // param-set : fix
+    int BK = 8;
+    int Tsize = 4; //thread 4*4
+    // matrix
+    int tx = threadIdx.x;
+    int bx = blockIdx.x;
+    int by = blockIdx.y;
+    int b = blockIdx.z;
+    int bI = b * K * N ;
+    int bW = b * K * M ;
+    int bO = b * M * N ;
+    // output arrange
+    int warpIdx = tx / 32; // 4x8 threads per Warp
+    int twIdx = tx % 32;
+    int wx = warpIdx % 2;      // th -> 8x8  warp-> 32x64
+    int wy = warpIdx / 2;      // 4x2 warps per Block
+    int twx = (twIdx / 2) % 8; 
+    int twy = (twIdx / 16) * 2 + (twIdx % 2);
+
+    //shared memory & registers
+    __shared__ float W_shared[512];//1024*4B = 4KB
+    __shared__ float I_shared[512];//1024*4B = 4KB
+    float W_reg[4]={0};
+    float I_reg[4]={0};
+    float O_reg[4][4] = {0};
+
+    int W_grow = by * BM + tx / BK * 2; // 每BK个threads:连续2行读取1个数
+    int W_gcol = 0 + tx % BK;
+    int I_grow = 0 + tx / 32; // 32个threads读32个数，重复2次 刚好是一行:INTERLEAVE
+    int I_gcol = bx * BN + tx % 32;
+    int W_LoadG = INDEX(W_grow, W_gcol, K)+bW;
+    int I_LoadG = INDEX(I_grow, I_gcol, N)+bI;
+    // OUTERMOST PHASES: K/BK times
+    for (int phase = 0; phase < K / BK; phase++)
+    {
+        //【global -> share】
+        int W_srow = tx % BK ; //转置
+        int W_scol = tx / BK * 2 ; 
+        int I_srow = tx / 32; 
+        int I_scol = tx % 32; 
+        int W_StoreS = INDEX(W_srow,W_scol,BM);
+        int I_StoreS = INDEX(I_srow,I_scol,BN);
+        #pragma unroll
+        for (int ldg = 0; ldg < 2; ldg++)
+        {
+            W_shared[W_StoreS+ldg]=input_A[W_LoadG+ldg*K];
+        }
+        #pragma unroll
+        for (int ldg = 0; ldg < 2; ldg++)
+        {
+            I_shared[I_StoreS+ldg*32]=input_B[I_LoadG+ldg*32];
+        }
+        __syncthreads();
+        W_LoadG += BK;
+        I_LoadG += BK * N;
+        // ITERATIONS : BK times
+        for (int iter = 0; iter< BK ;iter++)
+        {
+            //【share -> registers】
+            int W_LoadS = INDEX(iter, (wy * 16 + twy * 4), BM);
+            int I_LoadS = INDEX(iter, (wx * 32 + twx * 4), BN);
+            #pragma unroll
+            for (int i = 0; i < 4; ++i)
+            {
+                W_reg[i] = W_shared[W_LoadS+i];
+            }
+            #pragma unroll
+            for (int i = 0; i < 4; ++i)
+            {
+                I_reg[i] = I_shared[I_LoadS+i];
+            }
+            // calculate
+            #pragma unroll
+            for (int i = 0; i < Tsize; ++i) {
+                #pragma unroll
+                for (int j = 0; j < Tsize; ++j) {
+                    O_reg[i][j] += W_reg[i] * I_reg[j];
+                }
+            }
+        }
+    }
+    int O_grow = by * BM + wy * 16 + twy * 4;
+    int O_gcol = bx * BN + wx * 32 + twx * 4;
+    int O_StoreG = INDEX(O_grow, O_gcol, N)+bO;
+    //store to C
+    if (beta!= 0.0f)
+    {
+        #pragma unroll
+        for (int i = 0; i<4;i++)
+        {
+            for (int j = 0 ; j<4 ;j++)
+            {
+                output[O_StoreG+ i*N+j]+=O_reg[i][j];
+            }
+        }
+    }
+    else
+    {
+        #pragma unroll
+        for (int i = 0; i<4;i++)
+        {
+            for (int j = 0 ; j<4 ;j++)
+            {
+                output[O_StoreG+ i*N+j]=O_reg[i][j];
+            }
+        }
+    }
+}
+
 __global__ void LogSoftMax_Kernel_train(int* label,float* input,float* output,float* outputDelta,int* correct_tabel,int L,int BatchSize = 32)
 {
     int bx = blockIdx.x;
@@ -1045,17 +1232,31 @@ void gemm_gpu(int TA, int TB, int M, int N, int K, float ALPHA,
         float *A_gpu, int lda, 
         float *B_gpu, int ldb,
         float BETA,
-        float *C_gpu, int ldc)
+        float *C_gpu, int ldc , int BatchSize = 32)
 {
-    cublasHandle_t handle;
-    cublasCreate(&handle);
-    cublasStatus_t status = cublasSgemm(handle, (TB ? CUBLAS_OP_T : CUBLAS_OP_N), 
+    // if (M == 64 && K == 64 && N == 64 && TB == false && BETA == 0.0f)
+    // {
+    //     dim3 grid64(DIV_UP(N, 64),DIV_UP(M, 64),BatchSize);
+    //     if (TA == true)
+    //     {
+    //         GPU_transpose(A_gpu, for_trans_mul , BatchSize, M, K);
+    //         gemm_64x64_128N_kernel<<<grid64, 256>>>(K,N,M,for_trans_mul,B_gpu,NULL,C_gpu);
+    //     }
+    //     else
+    //         gemm_64x64_128N_kernel<<<grid64, 256>>>(M,N,K,A_gpu,B_gpu,NULL,C_gpu);
+    // }
+    // else
+    // {
+        cublasHandle_t handle;
+        cublasCreate(&handle);
+        cublasStatus_t status = cublasSgemm(handle, (TB ? CUBLAS_OP_T : CUBLAS_OP_N), 
             (TA ? CUBLAS_OP_T : CUBLAS_OP_N), N, M, K, &ALPHA, B_gpu, ldb, A_gpu, lda, &BETA, C_gpu, ldc);
-    if (status != CUBLAS_STATUS_SUCCESS) {
-        printf("cublasSgemm failed with error: ");
-        checkCublasStatus(status);
-    }
-    cublasDestroy(handle);
+        if (status != CUBLAS_STATUS_SUCCESS) {
+            printf("cublasSgemm failed with error: ");
+            checkCublasStatus(status);
+        }
+        cublasDestroy(handle);
+    // }
 }
 __global__ void BMM_Kernel(float* input_A,float* input_B,float* output,int M_A,int K_A,int K_B,int N_B,int BatchSize)
 {
@@ -1082,13 +1283,21 @@ __global__ void BMM_Kernel(float* input_A,float* input_B,float* output,int M_A,i
 void GPU_Bmm(float* input_A,float* input_B,float* output,int M_A,int K_A,int K_B,int N_B,int BatchSize = 1)
 {
     //std::cout << "--------BMM" << std::endl;
-    for(int b=0;b<BatchSize;b++)
-    {
+    // if (M_A == 64 && K_A == 64 && K_B == 64 && N_B == 64)
+    // {
+    //     dim3 grid64(DIV_UP(N_B, 64),DIV_UP(M_A, 64),BatchSize);
+    //     gemm_64x64_128N_kernel<<<grid64, 256>>>(M_A,N_B,K_A,input_A,input_B,NULL,output);
+    // }
+    // else
+    // {
+        for(int b=0;b<BatchSize;b++)
+        {
         check_error(cudaPeekAtLastError());
         //cudaDeviceSynchronize();
         gemm_gpu(false,false,M_A,N_B,K_A,1.0f, input_A+b*M_A*K_A,K_A,input_B+b*K_B*N_B,N_B,0.0f,output+b*M_A*N_B,N_B);
         check_error(cudaPeekAtLastError());
-    }
+        }
+    // }
 }
 
 void Bmm_bp(float* input_A,float* input_B,float* delta_a,float* delta_b,float* delta_from,
@@ -1106,41 +1315,6 @@ int M_A,int K_A,int K_B,int N_B,int BatchSize = 1,bool genA = true,float add_b =
         }
         check_error(cudaPeekAtLastError());
     }
-}
-
-__global__ void transpose_Kernel(float* input,float* output,int dim0,int dim1,int dim2)
-{
-    int tx = threadIdx.x;
-    int ty = threadIdx.y;
-    int bx = blockIdx.x;
-    int by = blockIdx.y;
-
-    int idx = tx + bx * blockDim.x;
-    int idy = ty + by * blockDim.y;
-    int index = idx + idy * dim1;
-
-    if (idx < dim1 && idy < dim2)
-    {
-        for (int b=0;b<dim0;b++)
-        {
-            int bdd = b*dim1*dim2;
-            output[bdd+index]=input[bdd+idx*dim2+idy];
-        }
-    }
-}
-void GPU_transpose(float* input,float* output,int dim0,int dim1,int dim2)
-{
-    const int BLK_X = 32;
-    const int BLK_Y = 32;
-
-    dim3 blockDim(BLK_X, BLK_Y);
-    dim3 gridDim((dim1 + BLK_X -1)/BLK_X,  (dim2+BLK_Y-1)/BLK_Y);
-    transpose_Kernel<<<gridDim, blockDim>>>(input,output,dim0,dim1,dim2);
-    // // 检查内核启动是否成功
-    // CUDA_CHECK(cudaGetLastError());
-
-    // // 同步设备并检查执行错误
-    // CUDA_CHECK(cudaDeviceSynchronize());
 }
 
 __global__ void linear_Kernel(int M,int batchSize,int N,float* input, 
@@ -1982,6 +2156,7 @@ __global__ void BP_UPDATE_Kernal_Momentum(float *N, float *delta, float *momentu
     if (index < width) {
         //printf("index: %d\n", index);
         //printf("%f ", momentum[index]);
+        //momentum_factor = 0.0f;
         momentum[index] = momentum_factor * momentum[index] + (1-momentum_factor) * delta[index];
         N[index] = N[index] + learning_rate*momentum[index];
     }
@@ -2054,7 +2229,7 @@ __global__ void compute_frobenius_norm(
         int col = i % num_features;
         if (row == col) mulres -= 1.0f; 
         mulres = 2 * 0.001f * mulres * transT[bf + i] / frobenius_norms; 
-        delta[bf+i] = mulres;
+        delta[bf+i] = mulres / batch_size;
     }
 }
 
@@ -2549,12 +2724,12 @@ int main(int argc, char *argv[]) {
     read_params(dir);
 
     // 读输入：主机
-    std::string file_path = "./data/test_point_clouds.h5";
+    std::string file_path = "./data/train_point_clouds.h5";
     std::vector<std::vector<float>> list_of_points;
     std::vector<int> list_of_labels;
     read_h5_file(file_path, list_of_points, list_of_labels);
     int all_num = list_of_points.size();
-    //all_num = 1000;
+    all_num = 1000;
     //分配内存，迁移权重到device端
     int ch = 1024;
     int ch_half = 512;
@@ -2656,6 +2831,7 @@ int main(int argc, char *argv[]) {
     cudaMemcpy(device_labels, list_of_labels.data(), all_num * sizeof(int), cudaMemcpyHostToDevice);
 
     // 开始推理
+    //init_for_trans_mul(maxNp,ch,batchSize);
     for (size_t e = 0; e < EPOCH; e++)
     {
         printf("epoch: %d\n", e);
@@ -2672,7 +2848,10 @@ int main(int argc, char *argv[]) {
             device_all_points + inf_offset, device_output, device_delta);
             inf_offset += curB * np * ic;
             //cudaMemset(device_output, 0, cal_tnet_size(curB, np, ic) * sizeof(float));
+            //cudaMemset(device_delta, 0, cal_tnet_size(curB, np, ic) * sizeof(float));
+            //memsetDP(moParams);
         }
+        //memsetDP(moParams);
         // 计算准确率
         std::vector<int> result(all_num,0);
         cudaMemcpy(result.data(), correct_table, all_num * sizeof(int), cudaMemcpyDeviceToHost);
@@ -2696,6 +2875,7 @@ int main(int argc, char *argv[]) {
     cudaFree(device_output);//输出
     cudaFree(device_delta);//delta
     cudaFree(correct_table);//正确表
+    //cudaFree(for_trans_mul);
 
 	// cudaDeviceSynchronize();// 向主机端同步以等待所有异步调用的GPU kernel执行完毕，这句必须要有
     // auto end = std::chrono::high_resolution_clock::now();

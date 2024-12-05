@@ -540,6 +540,7 @@ def main():
     
     print("finish TRANING")
     param_dir = os.path.join(script_dir,'newparams',way,chway,'np'+str(npoint),str(total_epoch)+'epoch')
+    print(param_dir)
     save_model_params_and_buffers_to_txt(classifier, param_dir)
 
     # print("finish TRANING")

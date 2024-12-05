@@ -36,12 +36,14 @@
 #define CLASSNUM 10
 #define DARKNETBLK 512
 #define BLOCK 512
-#define EPOCH 5
+#define EPOCH 1
 #define PRETRAIN 0
 #define USEMATDIFF 0
 #define DROPOUT 0
-#define VALIDATE 1
+#define VALIDATE 0
 #define SAVE 0
+#define USELESSNUM 0
+#define LESSNUM 32
 // #define DEBUG
 // #define BACKDEBUG
 // #define USECONVMAX (SAMPLE == 0 ? 1 : (NPOINT >= 128 ? 1 : 0))
@@ -1360,6 +1362,28 @@ void GPU_MaxPooling(int ics, int batchSize, int numPoints,float* input, float* o
     // // 同步设备并检查执行错误
     // CUDA_CHECK(cudaDeviceSynchronize());
 }
+__global__ void BMM_Kernel(float* input_A,float* input_B,float* output,int M_A,int K_A,int K_B,int N_B,int BatchSize)
+{
+    int tx = threadIdx.x;
+    int ty = threadIdx.y;
+    int bx = blockIdx.x;
+    int by = blockIdx.y;
+    //int bz = blockIdx.z;
+
+    int col = tx + bx * blockDim.x;
+    int row = ty + by * blockDim.y;
+    int batch = blockIdx.z;
+
+    if (row < M_A && col < N_B)
+    {
+        float tmp = 0.0f;
+        for (int k =0;k<K_A;k++)
+        {
+            tmp += input_A[batch * M_A * K_A + row * K_A + k] * input_B[batch * K_B * N_B + k * N_B + col];
+        }
+        output[batch*M_A*N_B+row*N_B+col] = tmp;
+    }
+}
 
 void gemm_gpu(int TA, int TB, int M, int N, int K, float ALPHA, 
         float *A_gpu, int lda, 
@@ -1391,28 +1415,24 @@ void gemm_gpu(int TA, int TB, int M, int N, int K, float ALPHA,
         cublasDestroy(handle);
     // }
 }
-__global__ void BMM_Kernel(float* input_A,float* input_B,float* output,int M_A,int K_A,int K_B,int N_B,int BatchSize)
+
+void new_gemm_gpu(int TA, int TB, int M, int N, int K, float ALPHA, 
+        float *A_gpu, int lda, 
+        float *B_gpu, int ldb,
+        float BETA,
+        float *C_gpu, int ldc , int BatchSize = 32)
 {
-    int tx = threadIdx.x;
-    int ty = threadIdx.y;
-    int bx = blockIdx.x;
-    int by = blockIdx.y;
-    //int bz = blockIdx.z;
-
-    int col = tx + bx * blockDim.x;
-    int row = ty + by * blockDim.y;
-    int batch = blockIdx.z;
-
-    if (row < M_A && col < N_B)
+    if (TA == false && TB == false && BETA == 0.0f)
     {
-        float tmp = 0.0f;
-        for (int k =0;k<K_A;k++)
-        {
-            tmp += input_A[batch * M_A * K_A + row * K_A + k] * input_B[batch * K_B * N_B + k * N_B + col];
-        }
-        output[batch*M_A*N_B+row*N_B+col] = tmp;
+        const int BLK_X = 32;
+        const int BLK_Y = 32;
+        dim3 blockDim(BLK_X, BLK_Y);
+        dim3 gridDim((N + BLK_X - 1) / BLK_X, (M + BLK_Y - 1) / BLK_Y,BatchSize);//X:宽度 Y：高度
+        BMM_Kernel<<<gridDim, blockDim>>>(A_gpu, B_gpu, C_gpu, M, K, K, N, BatchSize);
     }
 }
+
+
 void GPU_Bmm(float* input_A,float* input_B,float* output,int M_A,int K_A,int K_B,int N_B,int BatchSize = 1)
 {
     //std::cout << "--------BMM" << std::endl;
@@ -1423,15 +1443,17 @@ void GPU_Bmm(float* input_A,float* input_B,float* output,int M_A,int K_A,int K_B
     // }
     // else
     // {
-        for(int b=0;b<BatchSize;b++)
-        {
-        check_error(cudaPeekAtLastError());
-        //cudaDeviceSynchronize();
-        gemm_gpu(false,false,M_A,N_B,K_A,1.0f, input_A+b*M_A*K_A,K_A,input_B+b*K_B*N_B,N_B,0.0f,output+b*M_A*N_B,N_B);
-        check_error(cudaPeekAtLastError());
-        }
+    new_gemm_gpu(false,false,M_A,N_B,K_A,1.0f, input_A,K_A,input_B,N_B,0.0f,output,N_B,BatchSize);
+        // for(int b=0;b<BatchSize;b++)
+        // {
+        // check_error(cudaPeekAtLastError());
+        // //cudaDeviceSynchronize();
+        // gemm_gpu(false,false,M_A,N_B,K_A,1.0f, input_A+b*M_A*K_A,K_A,input_B+b*K_B*N_B,N_B,0.0f,output+b*M_A*N_B,N_B);
+        // check_error(cudaPeekAtLastError());
+        // }
     // }
 }
+
 
 void Bmm_bp(float* input_A,float* input_B,float* delta_a,float* delta_b,float* delta_from,
 int M_A,int K_A,int K_B,int N_B,int BatchSize = 1,bool genA = true,float add_b = 0.0f)
@@ -3206,7 +3228,10 @@ int main(int argc, char *argv[]) {
     std::vector<int> list_of_labels;
     read_h5_file(file_path, list_of_points, list_of_labels);
     int all_num = list_of_points.size();
-    //all_num = 1000;
+    if (USELESSNUM)
+    {
+        all_num = LESSNUM;
+    }
     //分配内存，迁移权重到device端
     int ch = 1024;
     int ch_half = 512;

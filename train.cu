@@ -267,6 +267,32 @@ void printVector_GPU(float* vec, int size) {
 /****************************************************************************************
  * 读取模型参数
  ****************************************************************************************/
+struct LayerParams {
+    int ic;  // input channels
+    int oc;  // output channels
+};
+std::map<std::string, LayerParams> paramsp = {
+    {"fc1", {1024, 512}},
+    {"fc2", {512,256}}, 
+    {"fc3", {256,10}}, 
+    {"feat.conv1", {3, 64}}, 
+    {"feat.conv2", {64,128}},
+    {"feat.conv3", {128,1024}}, 
+    {"feat.stn.conv1",  {3, 64}},  
+    {"feat.stn.conv2",  {64,128}},
+    {"feat.stn.conv3",  {128,1024}},
+    {"feat.stn.fc1", {1024, 512}}, 
+    {"feat.stn.fc2", {512,256}},
+    {"feat.stn.fc3", {256,9}},
+    {"feat.fstn.conv1",  {64, 64}}, 
+    {"feat.fstn.conv2",  {64,128}},
+    {"feat.fstn.conv3",  {128,1024}},
+    {"feat.fstn.fc1", {1024, 512}}, 
+    {"feat.fstn.fc2", {512,256}},
+    {"feat.fstn.fc3", {256,64*64}}
+};
+
+
 // 获取目录中的所有 .txt 文件
 std::vector<std::string> get_files_in_directory(const std::string& dir) {
     std::vector<std::string> files;
@@ -567,21 +593,23 @@ struct fcp {
     float* weight; // Conv weight
     float* bias;   // Conv bias
 };
-void read_fcp(const std::string& layer, fcp& wbp,int i,bool update=false,float IC=0) {
+void read_fcp(const std::string& layer, fcp& wbp,int i,bool update=false,int IC=0) {
     std::string fiStr = std::to_string(i);;
     std::string name = layer + "fc" + fiStr;  
+    int ic = paramsp[name].ic;
+    int oc = paramsp[name].oc;
+    int wcnt = ic * oc;
+    int bcnt = oc;
     //std::cout << name << std::endl;
-    cudaMalloc((void**)&wbp.weight, params[name + ".weight"].size() * sizeof(float));
-    cudaMalloc((void**)&wbp.bias, params[name + ".bias"].size() * sizeof(float));
+    cudaMalloc((void**)&wbp.weight, wcnt * sizeof(float));
+    cudaMalloc((void**)&wbp.bias, bcnt * sizeof(float));
     if(update == true)
     {
-        cudaMemset(wbp.weight,0, params[name + ".weight"].size() * sizeof(float));
-        cudaMemset(wbp.bias,0, params[name + ".bias"].size() * sizeof(float));
+        cudaMemset(wbp.weight,0, wcnt * sizeof(float));
+        cudaMemset(wbp.bias,0, bcnt * sizeof(float));
     }
     if(update == false)
     {
-        int wcnt = params[name + ".weight"].size();
-        int bcnt = params[name + ".bias"].size();
         if (PRETRAIN == 1)
         {
             cudaMemcpy(wbp.weight, params[name + ".weight"].data(), wcnt*sizeof(float), cudaMemcpyHostToDevice);
@@ -601,8 +629,10 @@ void free_fcp(fcp& wbp){
 void memset_fcp(const std::string& layer, fcp& wbp,int i) {
     std::string fiStr = std::to_string(i);;
     std::string name = layer + "fc" + fiStr;  
-    cudaMemset(wbp.weight,0, params[name + ".weight"].size() * sizeof(float));
-    cudaMemset(wbp.bias,0, params[name + ".bias"].size() * sizeof(float));
+    int ic = paramsp[name].ic;
+    int oc = paramsp[name].oc;
+    cudaMemset(wbp.weight,0, ic*oc * sizeof(float));
+    cudaMemset(wbp.bias,0, oc * sizeof(float));
 }
 
 struct wbBnP {
@@ -622,45 +652,42 @@ float IC=0) {
     std::string bnStr = layer + "bn" + biStr;   
     //std::cout << name << std::endl;
     //std::cout << bnStr << std::endl;
-    cudaMalloc((void**)&wbBnP.weight, params[name + ".weight"].size() * sizeof(float));
-    cudaMalloc((void**)&wbBnP.bias, params[name + ".bias"].size() * sizeof(float));
-    cudaMalloc((void**)&wbBnP.bn_weight, params[bnStr + ".weight"].size() * sizeof(float));
-    cudaMalloc((void**)&wbBnP.bn_bias, params[bnStr + ".bias"].size() * sizeof(float));
+    int ic = paramsp[name].ic;
+    int oc = paramsp[name].oc;
+    int wcnt = ic * oc;
+    cudaMalloc((void**)&wbBnP.weight, wcnt * sizeof(float));
+    cudaMalloc((void**)&wbBnP.bias, oc* sizeof(float));
+    cudaMalloc((void**)&wbBnP.bn_weight, oc * sizeof(float));
+    cudaMalloc((void**)&wbBnP.bn_bias, oc * sizeof(float));
     if(update == true)
     {
         //printf("memset\n");
-        cudaMemset(wbBnP.weight, 0, params[name + ".weight"].size() * sizeof(float)); 
-        cudaMemset(wbBnP.bias, 0, params[name + ".bias"].size() * sizeof(float));
-        cudaMemset(wbBnP.bn_weight, 0,params[bnStr + ".weight"].size() * sizeof(float));
-        cudaMemset(wbBnP.bn_bias, 0, params[bnStr + ".bias"].size() * sizeof(float));
+        cudaMemset(wbBnP.weight, 0, wcnt * sizeof(float)); 
+        cudaMemset(wbBnP.bias, 0, oc * sizeof(float));
+        cudaMemset(wbBnP.bn_weight, 0,oc * sizeof(float));
+        cudaMemset(wbBnP.bn_bias, 0, oc * sizeof(float));
     }
     if(update == false)
     {
-        int wcnt = params[name + ".weight"].size();
-        int bcnt = params[name + ".bias"].size();
-        int bn_wcnt = params[bnStr + ".weight"].size();
-        int bn_bcnt = params[bnStr + ".bias"].size();
-        int bn_mcnt = params[bnStr + ".running_mean"].size();
-        int bn_vcnt = params[bnStr + ".running_var"].size();
-        cudaMalloc((void**)&wbBnP.bn_mean, bn_mcnt * sizeof(float));
-        cudaMalloc((void**)&wbBnP.bn_var, bn_vcnt * sizeof(float));
+        cudaMalloc((void**)&wbBnP.bn_mean, oc * sizeof(float));
+        cudaMalloc((void**)&wbBnP.bn_var, oc * sizeof(float));
         if(PRETRAIN == 1)
         {
             cudaMemcpy(wbBnP.weight, params[name + ".weight"].data(), wcnt * sizeof(float), cudaMemcpyHostToDevice);
-            cudaMemcpy(wbBnP.bias, params[name + ".bias"].data(), bcnt * sizeof(float), cudaMemcpyHostToDevice);
-            cudaMemcpy(wbBnP.bn_weight, params[bnStr + ".weight"].data(), bn_wcnt * sizeof(float), cudaMemcpyHostToDevice);
-            cudaMemcpy(wbBnP.bn_bias, params[bnStr + ".bias"].data(), bn_bcnt * sizeof(float), cudaMemcpyHostToDevice);
-            cudaMemcpy(wbBnP.bn_mean, params[bnStr + ".running_mean"].data(), bn_mcnt * sizeof(float), cudaMemcpyHostToDevice);
-            cudaMemcpy(wbBnP.bn_var, params[bnStr + ".running_var"].data(), bn_vcnt * sizeof(float), cudaMemcpyHostToDevice);
+            cudaMemcpy(wbBnP.bias, params[name + ".bias"].data(), oc * sizeof(float), cudaMemcpyHostToDevice);
+            cudaMemcpy(wbBnP.bn_weight, params[bnStr + ".weight"].data(), oc * sizeof(float), cudaMemcpyHostToDevice);
+            cudaMemcpy(wbBnP.bn_bias, params[bnStr + ".bias"].data(), oc * sizeof(float), cudaMemcpyHostToDevice);
+            cudaMemcpy(wbBnP.bn_mean, params[bnStr + ".running_mean"].data(), oc * sizeof(float), cudaMemcpyHostToDevice);
+            cudaMemcpy(wbBnP.bn_var, params[bnStr + ".running_var"].data(), oc * sizeof(float), cudaMemcpyHostToDevice);
         }
         else 
         {
             para_init_he(wbBnP.weight,wcnt,IC);
-            cudaMemset(wbBnP.bias, 0, bcnt * sizeof(float));
-            para_init_val(wbBnP.bn_weight,bn_wcnt,1.0f);
-            cudaMemset(wbBnP.bn_bias, 0, bn_bcnt * sizeof(float));
-            cudaMemset(wbBnP.bn_mean, 0, bn_mcnt * sizeof(float));
-            para_init_val(wbBnP.bn_var, bn_vcnt, 1.0f);
+            cudaMemset(wbBnP.bias, 0, oc * sizeof(float));
+            para_init_val(wbBnP.bn_weight,oc,1.0f);
+            cudaMemset(wbBnP.bn_bias, 0, oc * sizeof(float));
+            cudaMemset(wbBnP.bn_mean, 0, oc * sizeof(float));
+            para_init_val(wbBnP.bn_var, oc, 1.0f);
         }
     }
 }
@@ -681,10 +708,12 @@ void memset_wbBnP(const std::string& layer,const std::string& cf,wbBnP& wbBnP,in
     std::string biStr = std::to_string(i+param_offset);
     std::string name = layer + cf + cfiStr;
     std::string bnStr = layer + "bn" + biStr;   
-    cudaMemset(wbBnP.weight, 0, params[name + ".weight"].size() * sizeof(float)); 
-    cudaMemset(wbBnP.bias, 0, params[name + ".bias"].size() * sizeof(float));
-    cudaMemset(wbBnP.bn_weight, 0,params[bnStr + ".weight"].size() * sizeof(float));
-    cudaMemset(wbBnP.bn_bias, 0, params[bnStr + ".bias"].size() * sizeof(float));
+    int ic = paramsp[name].ic;
+    int oc = paramsp[name].oc;
+    cudaMemset(wbBnP.weight, 0, ic*oc * sizeof(float)); 
+    cudaMemset(wbBnP.bias, 0, oc * sizeof(float));
+    cudaMemset(wbBnP.bn_weight, 0,oc* sizeof(float));
+    cudaMemset(wbBnP.bn_bias, 0, oc * sizeof(float));
 }
 
 struct CB3P {
@@ -2721,7 +2750,7 @@ int main(int argc, char *argv[]) {
 
     // 读权重：主机
     std::string dir = argv[1]; 
-    read_params(dir);
+    //read_params(dir);
 
     // 读输入：主机
     std::string file_path = "./data/train_point_clouds.h5";
@@ -2865,6 +2894,10 @@ int main(int argc, char *argv[]) {
         std::chrono::duration<double> diff = end - start;
         std::cout << std::fixed << std::setprecision(4) << diff.count() << ":" << std::setprecision(4) << correct_rate;
     }
+
+    cudaP hParams;
+
+
 
     // 释放内存
     freeDP(dParams);//权重

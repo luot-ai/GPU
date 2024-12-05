@@ -35,7 +35,7 @@
 #define CLASSNUM 10
 #define DARKNETBLK 512
 #define BLOCK 512
-#define EPOCH 8
+#define EPOCH 5
 #define PRETRAIN 0
 #define USEMATDIFF 0
 #define DROPOUT 0
@@ -1977,11 +1977,11 @@ __global__ void backward_bias_kernel(float *bias_updates, float *delta, int batc
     __syncthreads();
     if (p == 0) {
         float res = 0.0f;
-        for(i = 0; i < BLOCK; ++i) 
+        for(i = 0; i < DARKNETBLK; ++i) 
         {
-            res += part[i]; //TODO:+= part[i];
+            res += part[i];
         }
-        scale_updates[filter] = res;
+        bias_updates[filter] =res;//TODO:
     }
 }
 void backward_bias_gpu(float *bias_updates, float *delta, int batch, int n, int size)
@@ -2008,7 +2008,12 @@ __global__ void backward_scale_kernel(float *x_norm, float *delta, int batch, in
     part[p] = sum;
     __syncthreads();
     if (p == 0) {
-        for(i = 0; i < BLOCK; ++i) scale_updates[filter]= part[i]; //TODO:+= part[i];
+        float res = 0.0f;
+        for(i = 0; i < BLOCK; ++i) 
+        {
+            res += part[i]; //TODO:+= part[i];
+        }
+        scale_updates[filter] = res;
     }
 }
 void backward_scale_gpu(float *x_norm, float *delta, int batch, int n, int size, float *scale_updates)
@@ -2144,6 +2149,7 @@ float* weight_up, float* bias_up,float esp = 1e-5)
     if(relu){relu_detla_gpu(output,delta_from,batchSize*numPoints*numFeatures);}
     backward_bias_gpu(bias_up, delta_from, batchSize, numFeatures, numPoints);
     backward_scale_gpu(norm, delta_from, batchSize, numFeatures, numPoints, weight_up);
+    //printVector_GPU(weight_up,numFeatures);
 
     scale_bias_gpu(delta_from, weight, batchSize, numFeatures, numPoints);
 
@@ -2758,106 +2764,106 @@ void Train_GPU (int inChannels,int batchSize,int numPoints,
 
     //printVector_GPU(delta.softmax_input,10*batchSize);
 
-// #ifdef BACKDEBUG
-//     std::cout << "BACKWARDING" << std::endl;
-// #endif
-//     FBR2F_bp(512,256,10, batchSize, encoderOC3, dParams.nonep, upParams.nonep,
-//     net.encoder_output,net.relu1_output_part5_fbr2f,net.relu2_output_part5_fbr2f,
-//     net.fc1_output_part5_fbr2f,net.fc2_output_part5_fbr2f,
-//     delta.fc1_output_part5_fbr2f,delta.fc2_output_part5_fbr2f,delta.softmax_input,
-//     delta.relu1_output_part5_fbr2f,delta.relu2_output_part5_fbr2f,
-//     delta.encoder_output,
-//     net.bn1_part5_fbr2f,delta.bn1_part5_fbr2f,
-//     net.bn2_part5_fbr2f,delta.bn2_part5_fbr2f, drop_rate
-//     );
+#ifdef BACKDEBUG
+    std::cout << "BACKWARDING" << std::endl;
+#endif
+    FBR2F_bp(512,256,10, batchSize, encoderOC3, dParams.nonep, upParams.nonep,
+    net.encoder_output,net.relu1_output_part5_fbr2f,net.relu2_output_part5_fbr2f,
+    net.fc1_output_part5_fbr2f,net.fc2_output_part5_fbr2f,
+    delta.fc1_output_part5_fbr2f,delta.fc2_output_part5_fbr2f,delta.softmax_input,
+    delta.relu1_output_part5_fbr2f,delta.relu2_output_part5_fbr2f,
+    delta.encoder_output,
+    net.bn1_part5_fbr2f,delta.bn1_part5_fbr2f,
+    net.bn2_part5_fbr2f,delta.bn2_part5_fbr2f, drop_rate
+    );
 
-// #ifdef BACKDEBUG
-//     std::cout << "PART4, BACKWARDING" << std::endl;
-// #endif
-//     MaxPooling_bp(encoderOC3, batchSize, maxnp, net.encoder_output_idx, delta.encoder_output, delta.feat_bn3 );
-//     CBR_bp(false,batchSize,numPoints,encoderOC2,encoderOC3,
-//     dParams.featp.cb3, upParams.featp.cb3, net.cbr2_output, net.feat_bn3, net.feat_bn3_conv,
-//     delta.feat_bn3, delta.feat_bn3_conv, delta.cbr2_output, net.feat_bn3_bn, delta.feat_bn3_bn);
-//     CBR_bp(true,batchSize,numPoints,fstn_inChannel,encoderOC2,
-//     dParams.featp.cb2, upParams.featp.cb2, net.fstn_bmm1_res_trans,net.cbr2_output,net.cbr2_output_conv,
-//     delta.cbr2_output,delta.cbr2_output_conv, delta.fstn_bmm1_res_trans, net.cbr2_output_bn, delta.cbr2_output_bn);
-//     GPU_transpose(delta.fstn_bmm1_res_trans,delta.fstn_bmm1_res,batchSize,fstn_inChannel,numPoints);
-//     float mat_diff_addup = 0.0f;
-//     if(USEMATDIFF == 1)
-//     {
-//         mat_diff_addup = 1.0f;
-//         GPU_transpose(net.stnkd_out,net.stnkd_out_trans,batchSize,fstn_inChannel,fstn_inChannel);
-//         GPU_Bmm(net.stnkd_out,net.stnkd_out_trans,delta.stnkd_out_trans,64,64,64,64,batchSize);
-//         launch_compute_frobenius_norm(delta.stnkd_out_trans,net.stnkd_out_trans,delta.stnkd_out,batchSize,64);
-//         //compute_mat_diff_grad(net.stnkd_out,delta.stnkd_out,fstn_inChannel,batchSize);
-//     }
-//     Bmm_bp(net.fstn_input_trans,net.stnkd_out,delta.fstn_input_trans,delta.stnkd_out,delta.fstn_bmm1_res,
-//     numPoints,fstn_inChannel,fstn_inChannel,fstn_inChannel,batchSize,true,mat_diff_addup);
-//     GPU_transpose(delta.fstn_input_trans, delta.fstn_input, batchSize,numPoints,fstn_inChannel);
+#ifdef BACKDEBUG
+    std::cout << "PART4, BACKWARDING" << std::endl;
+#endif
+    MaxPooling_bp(encoderOC3, batchSize, maxnp, net.encoder_output_idx, delta.encoder_output, delta.feat_bn3 );
+    CBR_bp(false,batchSize,numPoints,encoderOC2,encoderOC3,
+    dParams.featp.cb3, upParams.featp.cb3, net.cbr2_output, net.feat_bn3, net.feat_bn3_conv,
+    delta.feat_bn3, delta.feat_bn3_conv, delta.cbr2_output, net.feat_bn3_bn, delta.feat_bn3_bn);
+    CBR_bp(true,batchSize,numPoints,fstn_inChannel,encoderOC2,
+    dParams.featp.cb2, upParams.featp.cb2, net.fstn_bmm1_res_trans,net.cbr2_output,net.cbr2_output_conv,
+    delta.cbr2_output,delta.cbr2_output_conv, delta.fstn_bmm1_res_trans, net.cbr2_output_bn, delta.cbr2_output_bn);
+    GPU_transpose(delta.fstn_bmm1_res_trans,delta.fstn_bmm1_res,batchSize,fstn_inChannel,numPoints);
+    float mat_diff_addup = 0.0f;
+    if(USEMATDIFF == 1)
+    {
+        mat_diff_addup = 1.0f;
+        GPU_transpose(net.stnkd_out,net.stnkd_out_trans,batchSize,fstn_inChannel,fstn_inChannel);
+        GPU_Bmm(net.stnkd_out,net.stnkd_out_trans,delta.stnkd_out_trans,64,64,64,64,batchSize);
+        launch_compute_frobenius_norm(delta.stnkd_out_trans,net.stnkd_out_trans,delta.stnkd_out,batchSize,64);
+        //compute_mat_diff_grad(net.stnkd_out,delta.stnkd_out,fstn_inChannel,batchSize);
+    }
+    Bmm_bp(net.fstn_input_trans,net.stnkd_out,delta.fstn_input_trans,delta.stnkd_out,delta.fstn_bmm1_res,
+    numPoints,fstn_inChannel,fstn_inChannel,fstn_inChannel,batchSize,true,mat_diff_addup);
+    GPU_transpose(delta.fstn_input_trans, delta.fstn_input, batchSize,numPoints,fstn_inChannel);
 
-// #ifdef BACKDEBUG
-//     std::cout << "PART3:STNkd, backwarding" << std::endl;
-// #endif
-//     FBR2F_bp(fstn_FC_OC1,fstn_FC_OC2,fstn_FC_OC3,batchSize,fstn_OC3, dParams.stnkdp.fb2f, upParams.stnkdp.fb2f,
-//     net.fstn_maxp_output,net.relu1_output_fstn_fbr2f,net.relu2_output_fstn_fbr2f,
-//     net.fc1_output_fstn_fbr2f,net.fc2_output_fstn_fbr2f,
-//     delta.fc1_output_fstn_fbr2f,delta.fc2_output_fstn_fbr2f,delta.stnkd_out,
-//     delta.relu1_output_fstn_fbr2f,delta.relu2_output_fstn_fbr2f,delta.fstn_maxp_output,
-//     net.bn1_fstn_fbr2f,delta.bn1_fstn_fbr2f,
-//     net.bn2_fstn_fbr2f,delta.bn2_fstn_fbr2f
-//     );
-//     MaxPooling_bp(fstn_OC3, batchSize, maxnp, net.fstn_maxp_output_idx, delta.fstn_maxp_output, delta.fstn_CBR3_output);
-//     CBR3_bp(true,fstn_OC1,fstn_OC2,fstn_OC3, batchSize, numPoints,fstn_inChannel,
-//     dParams.stnkdp.cb3, upParams.stnkdp.cb3, net.fstn_input, 
-//     net.fstn_CBR3_output,net.relu1_output_fstn_cbr,net.relu2_output_fstn_cbr,
-//     net.conv1_output_fstn_cbr,net.conv2_output_fstn_cbr,net.conv3_output_fstn_cbr,
-//     delta.conv1_output_fstn_cbr,delta.conv2_output_fstn_cbr,delta.conv3_output_fstn_cbr,
-//     delta.fstn_CBR3_output,delta.relu1_output_fstn_cbr,delta.relu2_output_fstn_cbr,delta.fstn_input, 
-//     net.bn1_fstn_cbr,net.bn2_fstn_cbr,net.bn3_fstn_cbr,
-//     delta.bn1_fstn_cbr,delta.bn2_fstn_cbr,delta.bn3_fstn_cbr,1.0f
-//     );
+#ifdef BACKDEBUG
+    std::cout << "PART3:STNkd, backwarding" << std::endl;
+#endif
+    FBR2F_bp(fstn_FC_OC1,fstn_FC_OC2,fstn_FC_OC3,batchSize,fstn_OC3, dParams.stnkdp.fb2f, upParams.stnkdp.fb2f,
+    net.fstn_maxp_output,net.relu1_output_fstn_fbr2f,net.relu2_output_fstn_fbr2f,
+    net.fc1_output_fstn_fbr2f,net.fc2_output_fstn_fbr2f,
+    delta.fc1_output_fstn_fbr2f,delta.fc2_output_fstn_fbr2f,delta.stnkd_out,
+    delta.relu1_output_fstn_fbr2f,delta.relu2_output_fstn_fbr2f,delta.fstn_maxp_output,
+    net.bn1_fstn_fbr2f,delta.bn1_fstn_fbr2f,
+    net.bn2_fstn_fbr2f,delta.bn2_fstn_fbr2f
+    );
+    MaxPooling_bp(fstn_OC3, batchSize, maxnp, net.fstn_maxp_output_idx, delta.fstn_maxp_output, delta.fstn_CBR3_output);
+    CBR3_bp(true,fstn_OC1,fstn_OC2,fstn_OC3, batchSize, numPoints,fstn_inChannel,
+    dParams.stnkdp.cb3, upParams.stnkdp.cb3, net.fstn_input, 
+    net.fstn_CBR3_output,net.relu1_output_fstn_cbr,net.relu2_output_fstn_cbr,
+    net.conv1_output_fstn_cbr,net.conv2_output_fstn_cbr,net.conv3_output_fstn_cbr,
+    delta.conv1_output_fstn_cbr,delta.conv2_output_fstn_cbr,delta.conv3_output_fstn_cbr,
+    delta.fstn_CBR3_output,delta.relu1_output_fstn_cbr,delta.relu2_output_fstn_cbr,delta.fstn_input, 
+    net.bn1_fstn_cbr,net.bn2_fstn_cbr,net.bn3_fstn_cbr,
+    delta.bn1_fstn_cbr,delta.bn2_fstn_cbr,delta.bn3_fstn_cbr,1.0f
+    );
 
-// #ifdef DEBUG
-//     std::cout << "PART2:backwarding" << std::endl;
-// #endif
-//     CBR_bp(true,batchSize,numPoints,encoderIC1,fstn_inChannel,
-//     dParams.featp.cb1, upParams.featp.cb1, net.bmm1_res_trans, net.fstn_input, net.fstn_input_conv,
-//     delta.fstn_input, delta.fstn_input_conv, delta.bmm1_res_trans,
-//     net.fstn_input_bn,delta.fstn_input_bn);
-//     GPU_transpose(delta.bmm1_res_trans, delta.bmm1_res, batchSize, encoderIC1, numPoints);
-//     Bmm_bp(input,net.stn3d_out,NULL,delta.stn3d_out,delta.bmm1_res,
-//     numPoints,inChannels,inChannels,encoderIC1,batchSize,false);
+#ifdef DEBUG
+    std::cout << "PART2:backwarding" << std::endl;
+#endif
+    CBR_bp(true,batchSize,numPoints,encoderIC1,fstn_inChannel,
+    dParams.featp.cb1, upParams.featp.cb1, net.bmm1_res_trans, net.fstn_input, net.fstn_input_conv,
+    delta.fstn_input, delta.fstn_input_conv, delta.bmm1_res_trans,
+    net.fstn_input_bn,delta.fstn_input_bn);
+    GPU_transpose(delta.bmm1_res_trans, delta.bmm1_res, batchSize, encoderIC1, numPoints);
+    Bmm_bp(input,net.stn3d_out,NULL,delta.stn3d_out,delta.bmm1_res,
+    numPoints,inChannels,inChannels,encoderIC1,batchSize,false);
 
-// #ifdef BACKDEBUG
-//     std::cout << "PART1:STN3d, backwarding" << std::endl;
-// #endif
-//     FBR2F_bp(FC_OC1,FC_OC2,FC_OC3,batchSize,OC3, dParams.stn3dp.fb2f, upParams.stn3dp.fb2f,
-//     net.maxp_output,net.relu1_output_stn_fbr2f,net.relu2_output_stn_fbr2f,
-//     net.fc1_output_stn_cbr,net.fc2_output_stn_cbr,
-//     delta.fc1_output_stn_cbr,delta.fc2_output_stn_cbr,delta.stn3d_out,
-//     delta.relu1_output_stn_fbr2f,delta.relu2_output_stn_fbr2f,delta.maxp_output,
-//     net.bn1_stn_fbr2f,delta.bn1_stn_fbr2f,
-//     net.bn2_stn_fbr2f,delta.bn2_stn_fbr2f
-//     );
-//     MaxPooling_bp(OC3, batchSize, maxnp, net.maxp_output_idx, delta.maxp_output, delta.CBR3_output);
-//     CBR3_bp(true,OC1,OC2,OC3, batchSize, numPoints,inChannels,
-//     dParams.stn3dp.cb3, upParams.stn3dp.cb3, net.input_trans, 
-//     net.CBR3_output,net.relu1_output_stn_cbr,net.relu2_output_stn_cbr,
-//     net.conv1_output_stn_cbr,net.conv2_output_stn_cbr,net.conv3_output_stn_cbr,
-//     delta.conv1_output_stn_cbr,delta.conv2_output_stn_cbr,delta.conv3_output_stn_cbr,
-//     delta.CBR3_output,delta.relu1_output_stn_cbr,delta.relu2_output_stn_cbr,delta.input_trans, 
-//     net.bn1_stn_cbr,net.bn2_stn_cbr,net.bn3_stn_cbr,
-//     delta.bn1_stn_cbr,delta.bn2_stn_cbr,delta.bn3_stn_cbr
-//     );//这里的delta.input_trans, 没必要生成TODO:
+#ifdef BACKDEBUG
+    std::cout << "PART1:STN3d, backwarding" << std::endl;
+#endif
+    FBR2F_bp(FC_OC1,FC_OC2,FC_OC3,batchSize,OC3, dParams.stn3dp.fb2f, upParams.stn3dp.fb2f,
+    net.maxp_output,net.relu1_output_stn_fbr2f,net.relu2_output_stn_fbr2f,
+    net.fc1_output_stn_cbr,net.fc2_output_stn_cbr,
+    delta.fc1_output_stn_cbr,delta.fc2_output_stn_cbr,delta.stn3d_out,
+    delta.relu1_output_stn_fbr2f,delta.relu2_output_stn_fbr2f,delta.maxp_output,
+    net.bn1_stn_fbr2f,delta.bn1_stn_fbr2f,
+    net.bn2_stn_fbr2f,delta.bn2_stn_fbr2f
+    );
+    MaxPooling_bp(OC3, batchSize, maxnp, net.maxp_output_idx, delta.maxp_output, delta.CBR3_output);
+    CBR3_bp(true,OC1,OC2,OC3, batchSize, numPoints,inChannels,
+    dParams.stn3dp.cb3, upParams.stn3dp.cb3, net.input_trans, 
+    net.CBR3_output,net.relu1_output_stn_cbr,net.relu2_output_stn_cbr,
+    net.conv1_output_stn_cbr,net.conv2_output_stn_cbr,net.conv3_output_stn_cbr,
+    delta.conv1_output_stn_cbr,delta.conv2_output_stn_cbr,delta.conv3_output_stn_cbr,
+    delta.CBR3_output,delta.relu1_output_stn_cbr,delta.relu2_output_stn_cbr,delta.input_trans, 
+    net.bn1_stn_cbr,net.bn2_stn_cbr,net.bn3_stn_cbr,
+    delta.bn1_stn_cbr,delta.bn2_stn_cbr,delta.bn3_stn_cbr
+    );//这里的delta.input_trans, 没必要生成TODO:
 
-//     FBR2F_update(512,256,10,encoderOC3,dParams.nonep,upParams.nonep,moParams.nonep);
-//     FB_update(encoderOC2,encoderOC3,dParams.featp.cb3, upParams.featp.cb3, moParams.featp.cb3);//CB
-//     FB_update(fstn_inChannel,encoderOC2,dParams.featp.cb2, upParams.featp.cb2, moParams.featp.cb2);//CB
-//     FBR2F_update(fstn_FC_OC1,fstn_FC_OC2,fstn_FC_OC3,fstn_OC3,dParams.stnkdp.fb2f,upParams.stnkdp.fb2f,moParams.stnkdp.fb2f);
-//     CBR3_update(fstn_OC1,fstn_OC2,fstn_OC3,fstn_inChannel,dParams.stnkdp.cb3, upParams.stnkdp.cb3, moParams.stnkdp.cb3);
-//     FB_update(encoderIC1,fstn_inChannel,dParams.featp.cb1, upParams.featp.cb1, moParams.featp.cb1);//CB
-//     FBR2F_update(FC_OC1,FC_OC2,FC_OC3,OC3,dParams.stn3dp.fb2f,upParams.stn3dp.fb2f,moParams.stn3dp.fb2f);
-//     CBR3_update(OC1,OC2,OC3,inChannels,dParams.stn3dp.cb3, upParams.stn3dp.cb3, moParams.stn3dp.cb3);
+    FBR2F_update(512,256,10,encoderOC3,dParams.nonep,upParams.nonep,moParams.nonep);
+    FB_update(encoderOC2,encoderOC3,dParams.featp.cb3, upParams.featp.cb3, moParams.featp.cb3);//CB
+    FB_update(fstn_inChannel,encoderOC2,dParams.featp.cb2, upParams.featp.cb2, moParams.featp.cb2);//CB
+    FBR2F_update(fstn_FC_OC1,fstn_FC_OC2,fstn_FC_OC3,fstn_OC3,dParams.stnkdp.fb2f,upParams.stnkdp.fb2f,moParams.stnkdp.fb2f);
+    CBR3_update(fstn_OC1,fstn_OC2,fstn_OC3,fstn_inChannel,dParams.stnkdp.cb3, upParams.stnkdp.cb3, moParams.stnkdp.cb3);
+    FB_update(encoderIC1,fstn_inChannel,dParams.featp.cb1, upParams.featp.cb1, moParams.featp.cb1);//CB
+    FBR2F_update(FC_OC1,FC_OC2,FC_OC3,OC3,dParams.stn3dp.fb2f,upParams.stn3dp.fb2f,moParams.stn3dp.fb2f);
+    CBR3_update(OC1,OC2,OC3,inChannels,dParams.stn3dp.cb3, upParams.stn3dp.cb3, moParams.stn3dp.cb3);
 }
 
 int main(int argc, char *argv[]) {
@@ -2869,8 +2875,8 @@ int main(int argc, char *argv[]) {
     int npoint = NPOINT;
 
     // 读权重：主机
-    std::string dir = "params/60epoch";//"./newparams/train/2";//argv[1]; 
-    read_params(dir);
+    std::string dir = argv[1]; 
+    //read_params(dir);
 
     // 读输入：主机
     std::string file_path = "./data/train_point_clouds.h5";
@@ -2878,7 +2884,7 @@ int main(int argc, char *argv[]) {
     std::vector<int> list_of_labels;
     read_h5_file(file_path, list_of_points, list_of_labels);
     int all_num = list_of_points.size();
-    all_num = 1000;
+    //all_num = 1000;
     //分配内存，迁移权重到device端
     int ch = 1024;
     int ch_half = 512;
@@ -3048,11 +3054,10 @@ int main(int argc, char *argv[]) {
         std::chrono::duration<double> diff = end - start;
         std::cout << std::fixed << std::setprecision(4) << diff.count() << ":" << std::setprecision(4) << correct_rate;
     }
-    
 
-    //cudaP hParams;
-    //copyDPtoHost(hParams,dParams);
-    //save_model_params_and_buffers_to_txt("./newparams/train/1");
+    // cudaP hParams;
+    // copyDPtoHost(hParams,dParams);
+    // save_model_params_and_buffers_to_txt("./newparams/train/30");
     cudaDeviceSynchronize();
     // 释放内存
     freeDP(dParams);//权重

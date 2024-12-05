@@ -40,7 +40,7 @@
 #define USEMATDIFF 0
 #define DROPOUT 0
 // #define DEBUG
-// #define BACKDEBUG
+#define BACKDEBUG
 // #define USECONVMAX (SAMPLE == 0 ? 1 : (NPOINT >= 128 ? 1 : 0))
 
 void checkCublasStatus(cublasStatus_t status) {
@@ -2003,7 +2003,12 @@ __global__ void backward_scale_kernel(float *x_norm, float *delta, int batch, in
     part[p] = sum;
     __syncthreads();
     if (p == 0) {
-        for(i = 0; i < BLOCK; ++i) scale_updates[filter]= part[i]; //TODO:+= part[i];
+        float res = 0.0f;
+        for(i = 0; i < BLOCK; ++i) 
+        {
+            res += part[i]; //TODO:+= part[i];
+        }
+        scale_updates[filter] = res;
     }
 }
 void backward_scale_gpu(float *x_norm, float *delta, int batch, int n, int size, float *scale_updates)
@@ -2139,6 +2144,7 @@ float* weight_up, float* bias_up,float esp = 1e-5)
     if(relu){relu_detla_gpu(output,delta_from,batchSize*numPoints*numFeatures);}
     backward_bias_gpu(bias_up, delta_from, batchSize, numFeatures, numPoints);
     backward_scale_gpu(norm, delta_from, batchSize, numFeatures, numPoints, weight_up);
+    //printVector_GPU(weight_up,numFeatures);
 
     scale_bias_gpu(delta_from, weight, batchSize, numFeatures, numPoints);
 
@@ -2873,7 +2879,7 @@ int main(int argc, char *argv[]) {
     std::vector<int> list_of_labels;
     read_h5_file(file_path, list_of_points, list_of_labels);
     int all_num = list_of_points.size();
-    //all_num = 5000;
+    //all_num = 32;
     //分配内存，迁移权重到device端
     int ch = 1024;
     int ch_half = 512;
@@ -3012,7 +3018,7 @@ int main(int argc, char *argv[]) {
 
     cudaP hParams;
     copyDPtoHost(hParams,dParams);
-    save_model_params_and_buffers_to_txt("./newparams/train/2");
+    save_model_params_and_buffers_to_txt("./newparams/train/30");
     cudaDeviceSynchronize();
     // 释放内存
     freeDP(dParams);//权重

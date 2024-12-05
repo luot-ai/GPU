@@ -346,16 +346,16 @@ def do_inference(list_of_points,list_of_labels): #请在本函数下使用triton
     
     trans = stnd(input,"feat.stn.",IC,OC1,OC2,OC3,FC_OC1,FC_OC2,FC_OC3)
     stn3d_bmm = bmm(input,trans,batchSize,numPoints,IC,IC)
-    feat_conv_1_out = CBR(stn3d_bmm, "feat." , 1 , encoderIC1 , fstn_IC)
+    cbr1_output = CBR(stn3d_bmm, "feat." , 1 , encoderIC1 , fstn_IC)
 
-    trans_feat = stnd(feat_conv_1_out,"feat.fstn.",fstn_IC,fstn_OC1,fstn_OC2,fstn_OC3,fstn_FC_OC1,fstn_FC_OC2,fstn_FC_OC3)
-    stnkd = bmm(feat_conv_1_out,trans_feat,batchSize,numPoints,fstn_IC,fstn_IC)
-    feat_conv_2_out = CBR(stnkd, "feat.", 2 , fstn_IC, encoderOC2)
-    feat_conv_3_out = CBR(feat_conv_2_out, "feat.", 3 , encoderOC2, encoderOC3 , "norelu")
-    feat_output = maxPooling(feat_conv_3_out, batchSize, encoderOC3, numPoints)
+    trans_feat = stnd(cbr1_output,"feat.fstn.",fstn_IC,fstn_OC1,fstn_OC2,fstn_OC3,fstn_FC_OC1,fstn_FC_OC2,fstn_FC_OC3)
+    stnkd = bmm(cbr1_output,trans_feat,batchSize,numPoints,fstn_IC,fstn_IC)
+    cbr2_output = CBR(stnkd, "feat.", 2 , fstn_IC, encoderOC2)
+    cbr3_output = CBR(cbr2_output, "feat.", 3 , encoderOC2, encoderOC3 , "norelu")
+    feat_output = maxPooling(cbr3_output, batchSize, encoderOC3, numPoints)
 
-    fc_3_out = FBR_2_F(feat_output,"",encoderOC3,512,256,10,off=0)
-    final_output = get_label(fc_3_out, batchSize, 10)
+    label_input = FBR_2_F(feat_output,"",encoderOC3,512,256,10,off=0)
+    final_output = get_label(label_input, batchSize, 10)
     correct_num = 0
 
     for output, label in zip(final_output, list_of_labels):
@@ -366,11 +366,14 @@ def do_inference(list_of_points,list_of_labels): #请在本函数下使用triton
     return accuracy_rate
 
 if __name__ == '__main__':
-    dir = "./newparams/uniform/chfull/np128/30epoch-1000batch"
-    #"./epoch_300_batchsize_1000/" 
-    
+    # dir = "./newparams/uniform/chfull/np128/30epoch-1000batch"
+    # # 读取模型参数
+    # params = read_params(dir, device='cuda')
+
+    dir = os.path.dirname(__file__) # 保存模型参数文件(.txt)的文件夹路径
+
     # 读取模型参数
-    params = read_params(dir, device='cuda')
+    params = read_params(dir,device='cuda')
 
     # 读取训练集数据
     dataPath = "./data/test_point_clouds.h5"

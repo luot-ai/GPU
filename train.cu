@@ -35,12 +35,14 @@
 #define CLASSNUM 10
 #define DARKNETBLK 512
 #define BLOCK 512
-#define EPOCH 30
+#define EPOCH 5
 #define PRETRAIN 0
 #define USEMATDIFF 0
 #define DROPOUT 0
+#define VALIDATE 1
+#define SAVE 0
 // #define DEBUG
-#define BACKDEBUG
+// #define BACKDEBUG
 // #define USECONVMAX (SAMPLE == 0 ? 1 : (NPOINT >= 128 ? 1 : 0))
 
 void checkCublasStatus(cublasStatus_t status) {
@@ -2884,7 +2886,7 @@ int main(int argc, char *argv[]) {
     std::vector<int> list_of_labels;
     read_h5_file(file_path, list_of_points, list_of_labels);
     int all_num = list_of_points.size();
-    //all_num = 32;
+    //all_num = 1000;
     //分配内存，迁移权重到device端
     int ch = 1024;
     int ch_half = 512;
@@ -3020,11 +3022,51 @@ int main(int argc, char *argv[]) {
         std::chrono::duration<double> diff = end - start;
         std::cout << std::fixed << std::setprecision(4) << diff.count() << ":" << std::setprecision(4) << correct_rate;
     }
+    if(VALIDATE == 1)
+    {
+    for (size_t e = 0; e < 1; e++)
+    {
+        printf("\nepoch%d: ", e);
+        auto start = std::chrono::high_resolution_clock::now();//STRAT
+        int correct_num =0;
+        int inf_offset = 0;
+        for (size_t i = 0; i < all_num; i+=batchSize) {
+            size_t curB = std::min(batchSize, all_num - i);
+            size_t np = list_of_points[i].size() / ic;
+            for (int j = 0; j < curB; j++) {np = std::min(np, list_of_points[i + j].size() / ic);}
+            np = ALIGN_DOWN(np, GEMMBLKMAX);
+            if (use_sample == 1) np = npoint;
+            Train_GPU(ic, curB, np, correct_table + i, device_labels + i, 
+            device_all_points + inf_offset, device_output, device_delta);
+            inf_offset += curB * np * ic;
+            //cudaMemset(device_output, 0, cal_tnet_size(curB, np, ic) * sizeof(float));
+            //cudaMemset(device_delta, 0, cal_tnet_size(curB, np, ic) * sizeof(float));
+            //memsetDP(moParams);
+        }
+        //memsetDP(moParams);
+        // 计算准确率
+        std::vector<int> result(all_num,0);
+        cudaMemcpy(result.data(), correct_table, all_num * sizeof(int), cudaMemcpyDeviceToHost);
+        for (size_t i = 0; i < all_num; i++) {
+            correct_num += result[i];
+        }
+	    float correct_rate = (float)correct_num/all_num; 
+        //END
+        cudaDeviceSynchronize();// 向主机端同步以等待所有异步调用的GPU kernel执行完毕，这句必须要有
+        auto end = std::chrono::high_resolution_clock::now();
+        std::chrono::duration<double> diff = end - start;
+        std::cout << std::fixed << std::setprecision(4) << diff.count() << ":" << std::setprecision(4) << correct_rate;
+    }
+    }
 
-    cudaP hParams;
-    copyDPtoHost(hParams,dParams);
-    save_model_params_and_buffers_to_txt("./newparams/train/30");
-    cudaDeviceSynchronize();
+    if(SAVE==1)
+    {
+        cudaP hParams;
+        copyDPtoHost(hParams,dParams);
+        save_model_params_and_buffers_to_txt("./newparams/train/30");
+        cudaDeviceSynchronize();
+    }
+    
     // 释放内存
     freeDP(dParams);//权重
     freeDP(upParams, true);//更新权重

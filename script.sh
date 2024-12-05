@@ -14,7 +14,7 @@ mode=$1
 
 # Step 1: Build the CUDA program if necessary using Makefile
 echo "Checking if recompilation is necessary..."
-make
+make -j
 
 if [ $? -ne 0 ]; then
     echo "Compilation failed!"
@@ -38,7 +38,7 @@ while true; do
                 ;;
             2)
                 echo "Running with nvprof"
-                nvprof ./train ./params/60epoch
+                nvprof ./train ./params/60epoch > test.txt
                 ;;
             3)
                 echo "Running with nvprof --profile-from-start off"

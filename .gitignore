@@ -10,3 +10,5 @@ id_rsa
 id_rsa.pub
 newparams/*
 epoch_300_batchsize_1000/*
+*.txt
+*.o

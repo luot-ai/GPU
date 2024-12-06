@@ -37,15 +37,15 @@
 #define DARKNETBLK 512
 #define BLOCK 512
 #define EPOCH 1
-#define PRETRAIN 0
+#define PRETRAIN 1
 #define USEMATDIFF 0
 #define DROPOUT 0
 #define VALIDATE 0
 #define SAVE 0
 #define USELESSNUM 0
 #define LESSNUM 32
-// #define DEBUG
-// #define BACKDEBUG
+#define DEBUG
+#define BACKDEBUG
 // #define USECONVMAX (SAMPLE == 0 ? 1 : (NPOINT >= 128 ? 1 : 0))
 
 void checkCublasStatus(cublasStatus_t status) {
@@ -1362,7 +1362,7 @@ void GPU_MaxPooling(int ics, int batchSize, int numPoints,float* input, float* o
     // // 同步设备并检查执行错误
     // CUDA_CHECK(cudaDeviceSynchronize());
 }
-__global__ void BMM_Kernel(float* input_A,float* input_B,float* output,int M_A,int K_A,int K_B,int N_B,int BatchSize)
+__global__ void BMM_Kernel(int TA,int TB,float* input_A,float* input_B,float* output,int M_A,int K_A,int K_B,int N_B,int BatchSize)
 {
     int tx = threadIdx.x;
     int ty = threadIdx.y;
@@ -1379,7 +1379,18 @@ __global__ void BMM_Kernel(float* input_A,float* input_B,float* output,int M_A,i
         float tmp = 0.0f;
         for (int k =0;k<K_A;k++)
         {
-            tmp += input_A[batch * M_A * K_A + row * K_A + k] * input_B[batch * K_B * N_B + k * N_B + col];
+            if (TB == true)
+            {
+                tmp += input_A[batch * M_A * K_A + row * K_A + k] * input_B[batch * K_B * N_B + col * K_B + k];
+            }
+            else if (TA == true)
+            {
+                tmp += input_A[batch * M_A * K_A + k * M_A + row] * input_B[batch * K_B * N_B + k * N_B + col];
+            }
+            else 
+            {
+                tmp += input_A[batch * M_A * K_A + row * K_A + k] * input_B[batch * K_B * N_B + k * N_B + col];//默认为false
+            }
         }
         output[batch*M_A*N_B+row*N_B+col] = tmp;
     }
@@ -1428,7 +1439,7 @@ void new_gemm_gpu(int TA, int TB, int M, int N, int K, float ALPHA,
         const int BLK_Y = 32;
         dim3 blockDim(BLK_X, BLK_Y);
         dim3 gridDim((N + BLK_X - 1) / BLK_X, (M + BLK_Y - 1) / BLK_Y,BatchSize);//X:宽度 Y：高度
-        BMM_Kernel<<<gridDim, blockDim>>>(A_gpu, B_gpu, C_gpu, M, K, K, N, BatchSize);
+        BMM_Kernel<<<gridDim, blockDim>>>(false,false,A_gpu, B_gpu, C_gpu, M, K, K, N, BatchSize);
     }
 }
 

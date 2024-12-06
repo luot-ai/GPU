@@ -37,12 +37,12 @@
 #define DARKNETBLK 512
 #define BLOCK 512
 #define EPOCH 5
-#define PRETRAIN 0
+#define PRETRAIN 1
 #define USEMATDIFF 0
 #define DROPOUT 0
 #define VALIDATE 0
-#define SAVE 1
-#define USELESSNUM 0
+#define SAVE 0
+#define USELESSNUM 1
 #define LESSNUM 32
 // #define DEBUG
 // #define BACKDEBUG
@@ -1507,14 +1507,14 @@ void GPU_Bmm(float* input_A,float* input_B,float* output,int M_A,int K_A,int K_B
     // }
     // else
     // {
-    //new_gemm_gpu(false,false,M_A,N_B,K_A,1.0f, input_A,K_A,input_B,N_B,0.0f,output,N_B,BatchSize);
-        for(int b=0;b<BatchSize;b++)
-        {
-        check_error(cudaPeekAtLastError());
-        //cudaDeviceSynchronize();
-        gemm_gpu(false,false,M_A,N_B,K_A,1.0f, input_A+b*M_A*K_A,K_A,input_B+b*K_B*N_B,N_B,0.0f,output+b*M_A*N_B,N_B);
-        check_error(cudaPeekAtLastError());
-        }
+    new_gemm_gpu(false,false,M_A,N_B,K_A,1.0f, input_A,K_A,input_B,N_B,0.0f,output,N_B,BatchSize);
+        // for(int b=0;b<BatchSize;b++)
+        // {
+        // check_error(cudaPeekAtLastError());
+        // //cudaDeviceSynchronize();
+        // gemm_gpu(false,false,M_A,N_B,K_A,1.0f, input_A+b*M_A*K_A,K_A,input_B+b*K_B*N_B,N_B,0.0f,output+b*M_A*N_B,N_B);
+        // check_error(cudaPeekAtLastError());
+        // }
     // }
 }
 
@@ -1523,17 +1523,24 @@ void Bmm_bp(float* input_A,float* input_B,float* delta_a,float* delta_b,float* d
 int M_A,int K_A,int K_B,int N_B,int BatchSize = 1,bool genA = true,float add_b = 0.0f)
 {
     //std::cout << "--------BMM" << std::endl;
-    for(int b=0;b<BatchSize;b++)
+    new_gemm_gpu(true,false,K_A,N_B,M_A,1.0f, input_A,K_A,  delta_from, N_B, add_b, delta_b,N_B);
+    if(genA)
     {
-        check_error(cudaPeekAtLastError());
-        //cudaDeviceSynchronize();
-        gemm_gpu(true,false,K_A,N_B,M_A,1.0f,  input_A+b*M_A*K_A,K_A,  delta_from+b*M_A*N_B, N_B, add_b, delta_b+b*K_B*N_B,N_B);
-        if(genA)
-        {
-            gemm_gpu(false,true,M_A,K_A,N_B,1.0f,  delta_from+b*M_A*N_B, N_B,  input_B+b*K_B*N_B,N_B, 0.0f, delta_a+b*M_A*K_A,K_A);
-        }
-        check_error(cudaPeekAtLastError());
+        new_gemm_gpu(false,true,M_A,K_A,N_B,1.0f,  delta_from, N_B,  input_B,N_B, 0.0f, delta_a,K_A);
     }
+    check_error(cudaPeekAtLastError());
+    
+    // for(int b=0;b<BatchSize;b++)
+    // {
+    //     check_error(cudaPeekAtLastError());
+    //     //cudaDeviceSynchronize();
+    //     gemm_gpu(true,false,K_A,N_B,M_A,1.0f,  input_A+b*M_A*K_A,K_A,  delta_from+b*M_A*N_B, N_B, add_b, delta_b+b*K_B*N_B,N_B);
+    //     if(genA)
+    //     {
+    //         gemm_gpu(false,true,M_A,K_A,N_B,1.0f,  delta_from+b*M_A*N_B, N_B,  input_B+b*K_B*N_B,N_B, 0.0f, delta_a+b*M_A*K_A,K_A);
+    //     }
+    //     check_error(cudaPeekAtLastError());
+    // }
 }
 
 __global__ void linear_Kernel(int M,int batchSize,int N,float* input, 
@@ -3504,7 +3511,7 @@ int main(int argc, char *argv[]) {
     {
         cudaP hParams;
         copyDPtoHost(hParams,dParams,params);
-        save_model_params_and_buffers_to_txt(params,"./newparams/train/8");
+        save_model_params_and_buffers_to_txt(params,"./newparams/train/V1");
         cudaDeviceSynchronize();
     }
     //printVector(params["feat.stn.conv3.weight"]);

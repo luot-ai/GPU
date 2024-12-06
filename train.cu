@@ -1415,7 +1415,7 @@ void GPU_MaxPooling(int ics, int batchSize, int numPoints,float* input, float* o
     // // 同步设备并检查执行错误
     // CUDA_CHECK(cudaDeviceSynchronize());
 }
-__global__ void BMM_Kernel(int TA,int TB,float* input_A,float* input_B,float* output,int M_A,int K_A,int K_B,int N_B,int BatchSize)
+__global__ void BMM_Kernel_FF(float* input_A,float* input_B,float* output,int M_A,int K_A,int K_B,int N_B,int BatchSize)
 {
     int tx = threadIdx.x;
     int ty = threadIdx.y;
@@ -1432,22 +1432,58 @@ __global__ void BMM_Kernel(int TA,int TB,float* input_A,float* input_B,float* ou
         float tmp = 0.0f;
         for (int k =0;k<K_A;k++)
         {
-            if (TB == true)
-            {
-                tmp += input_A[batch * M_A * K_A + row * K_A + k] * input_B[batch * K_B * N_B + col * K_B + k];
-            }
-            else if (TA == true)
-            {
-                tmp += input_A[batch * M_A * K_A + k * M_A + row] * input_B[batch * K_B * N_B + k * N_B + col];
-            }
-            else 
-            {
-                tmp += input_A[batch * M_A * K_A + row * K_A + k] * input_B[batch * K_B * N_B + k * N_B + col];//默认为false
-            }
+            tmp += input_A[batch * M_A * K_A + row * K_A + k] * input_B[batch * K_B * N_B + k * N_B + col];//默认为false
         }
         output[batch*M_A*N_B+row*N_B+col] = tmp;
     }
 }
+
+__global__ void BMM_Kernel_TF(float* input_A,float* input_B,float* output,int M_A,int K_A,int K_B,int N_B,int BatchSize)
+{
+    int tx = threadIdx.x;
+    int ty = threadIdx.y;
+    int bx = blockIdx.x;
+    int by = blockIdx.y;
+    //int bz = blockIdx.z;
+
+    int col = tx + bx * blockDim.x;
+    int row = ty + by * blockDim.y;
+    int batch = blockIdx.z;
+
+    if (row < M_A && col < N_B)
+    {
+        float tmp = 0.0f;
+        for (int k =0;k<K_A;k++)
+        {
+            tmp += input_A[batch * M_A * K_A + k * M_A + row] * input_B[batch * K_B * N_B + k * N_B + col];
+        }
+        output[batch*M_A*N_B+row*N_B+col] = tmp;
+    }
+}
+
+__global__ void BMM_Kernel_FT(float* input_A,float* input_B,float* output,int M_A,int K_A,int K_B,int N_B,int BatchSize)
+{
+    int tx = threadIdx.x;
+    int ty = threadIdx.y;
+    int bx = blockIdx.x;
+    int by = blockIdx.y;
+    //int bz = blockIdx.z;
+
+    int col = tx + bx * blockDim.x;
+    int row = ty + by * blockDim.y;
+    int batch = blockIdx.z;
+
+    if (row < M_A && col < N_B)
+    {
+        float tmp = 0.0f;
+        for (int k =0;k<K_A;k++)
+        {
+            tmp += input_A[batch * M_A * K_A + row * K_A + k] * input_B[batch * K_B * N_B + col * K_B + k];
+        }
+        output[batch*M_A*N_B+row*N_B+col] = tmp;
+    }
+}
+
 
 void gemm_gpu(int TA, int TB, int M, int N, int K, float ALPHA, 
         float *A_gpu, int lda, 
@@ -1486,13 +1522,21 @@ void new_gemm_gpu(int TA, int TB, int M, int N, int K, float ALPHA,
         float BETA,
         float *C_gpu, int ldc , int BatchSize = 32)
 {
+    const int BLK_X = 32;
+    const int BLK_Y = 32;
+    dim3 blockDim(BLK_X, BLK_Y);
+    dim3 gridDim((N + BLK_X - 1) / BLK_X, (M + BLK_Y - 1) / BLK_Y,BatchSize);//X:宽度 Y：高度
     if (TA == false && TB == false && BETA == 0.0f)
     {
-        const int BLK_X = 32;
-        const int BLK_Y = 32;
-        dim3 blockDim(BLK_X, BLK_Y);
-        dim3 gridDim((N + BLK_X - 1) / BLK_X, (M + BLK_Y - 1) / BLK_Y,BatchSize);//X:宽度 Y：高度
-        BMM_Kernel<<<gridDim, blockDim>>>(false,false,A_gpu, B_gpu, C_gpu, M, K, K, N, BatchSize);
+        BMM_Kernel_FF<<<gridDim, blockDim>>>(A_gpu, B_gpu, C_gpu, M, K, K, N, BatchSize);
+    }
+    if (TA == true && TB == false && BETA == 0.0f)
+    {
+        BMM_Kernel_TF<<<gridDim, blockDim>>>(A_gpu, B_gpu, C_gpu, M, K, K, N, BatchSize);
+    }
+    if (TA == false && TB == true && BETA == 0.0f)
+    {
+        BMM_Kernel_FT<<<gridDim, blockDim>>>(A_gpu, B_gpu, C_gpu, M, K, K, N, BatchSize);
     }
 }
 
@@ -1523,6 +1567,7 @@ void Bmm_bp(float* input_A,float* input_B,float* delta_a,float* delta_b,float* d
 int M_A,int K_A,int K_B,int N_B,int BatchSize = 1,bool genA = true,float add_b = 0.0f)
 {
     //std::cout << "--------BMM" << std::endl;
+    //printf("--------BMM_BP: add_b=%f\n",add_b);
     new_gemm_gpu(true,false,K_A,N_B,M_A,1.0f, input_A,K_A,  delta_from, N_B, add_b, delta_b,N_B);
     if(genA)
     {
@@ -1532,9 +1577,9 @@ int M_A,int K_A,int K_B,int N_B,int BatchSize = 1,bool genA = true,float add_b =
     
     // for(int b=0;b<BatchSize;b++)
     // {
-    //     check_error(cudaPeekAtLastError());
-    //     //cudaDeviceSynchronize();
-    //     gemm_gpu(true,false,K_A,N_B,M_A,1.0f,  input_A+b*M_A*K_A,K_A,  delta_from+b*M_A*N_B, N_B, add_b, delta_b+b*K_B*N_B,N_B);
+    //     // check_error(cudaPeekAtLastError());
+    //     // //cudaDeviceSynchronize();
+    //     // gemm_gpu(true,false,K_A,N_B,M_A,1.0f,  input_A+b*M_A*K_A,K_A,  delta_from+b*M_A*N_B, N_B, add_b, delta_b+b*K_B*N_B,N_B);
     //     if(genA)
     //     {
     //         gemm_gpu(false,true,M_A,K_A,N_B,1.0f,  delta_from+b*M_A*N_B, N_B,  input_B+b*K_B*N_B,N_B, 0.0f, delta_a+b*M_A*K_A,K_A);
@@ -2283,12 +2328,14 @@ float * delta_from, float * delta_gen, float* weight_up, float* bias_up,float dp
     int N = inFeatures;
     int K = outFeatures;
     if(dp != 0.0f){dp_detla_gpu(output,delta_from,batchSize*outFeatures,dp);}
-    gemm_gpu(false, false, M, N, K, 1.0, delta_from,K , weight,N, 0.0, delta_gen,N);
+    //gemm_gpu(false, false, M, N, K, 1.0, delta_from,K , weight,N, 0.0, delta_gen,N);
+    new_gemm_gpu(false, false, M, N, K, 1.0, delta_from,K , weight,N, 0.0, delta_gen,N,1);
     //WEIGHT UP: outf,batchsize * batchsize,inf
     M = outFeatures;
     N = inFeatures;
     K = batchSize;
-    gemm_gpu(true, false, M, N, K, 1.0, delta_from,M,input,N,0.0,weight_up,N);
+    //gemm_gpu(true, false, M, N, K, 1.0, delta_from,M,input,N,0.0,weight_up,N);
+    new_gemm_gpu(true, false, M, N, K, 1.0, delta_from,M,input,N,0.0,weight_up,N,1);
     //BIAS UP: outf,batchsize
     //printVector_GPU(delta_from,batchSize*outFeatures);
     //printVector_GPU(bias_up,outFeatures);

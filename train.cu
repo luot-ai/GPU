@@ -36,16 +36,16 @@
 #define CLASSNUM 10
 #define DARKNETBLK 512
 #define BLOCK 512
-#define EPOCH 1
-#define PRETRAIN 1
+#define EPOCH 5
+#define PRETRAIN 0
 #define USEMATDIFF 0
 #define DROPOUT 0
 #define VALIDATE 0
-#define SAVE 0
+#define SAVE 1
 #define USELESSNUM 0
 #define LESSNUM 32
-#define DEBUG
-#define BACKDEBUG
+// #define DEBUG
+// #define BACKDEBUG
 // #define USECONVMAX (SAMPLE == 0 ? 1 : (NPOINT >= 128 ? 1 : 0))
 
 void checkCublasStatus(cublasStatus_t status) {
@@ -249,6 +249,14 @@ void C_tile_wb(StgFrag C_frag,
               i < m_guard && n_idx < n);
     }
 }
+
+void printVector(const std::vector<float>& vec) {
+    printf("host params:\n");
+    for (const auto& value : vec) {
+        std::cout << value << " ";
+    }
+    std::cout << std::endl; // 输出换行
+}
 void printVector_GPU(float* vec, int size) {
     printf("size:%d\n",size);
     // 在主机端创建一个标准向量以存储从设备复制的数据
@@ -367,8 +375,10 @@ void write_param(const std::vector<float>& data, const std::string& filepath) {
     }
 }
 
-void save_model_params_and_buffers_to_txt(std::string dir){
-    for (const auto& pair : params) {
+void save_model_params_and_buffers_to_txt(
+    const std::map<std::string, std::vector<float>> &wparams,
+    std::string dir){
+    for (const auto& pair : wparams) {
         // std::cout << "name: " << name << std::endl;
         const std::string& name = pair.first;
         const std::vector<float>& values = pair.second;
@@ -640,6 +650,11 @@ void read_fcp(const std::string& layer, fcp& wbp,int i,bool update=false,int IC=
     {
         if (PRETRAIN == 1)
         {
+
+#ifdef DEBUG
+    std::cout << name << std::endl;
+    printf("wcnt is %d,bcnt is %d\n",wcnt,bcnt);
+#endif
             cudaMemcpy(wbp.weight, params[name + ".weight"].data(), wcnt*sizeof(float), cudaMemcpyHostToDevice);
             cudaMemcpy(wbp.bias, params[name + ".bias"].data(), bcnt* sizeof(float), cudaMemcpyHostToDevice);
         }
@@ -662,7 +677,7 @@ void memset_fcp(const std::string& layer, fcp& wbp,int i) {
     cudaMemset(wbp.weight,0, ic*oc * sizeof(float));
     cudaMemset(wbp.bias,0, oc * sizeof(float));
 }
-void copy_fcp(const std::string& layer, fcp& wbp,fcp& dwbp,int i) {
+void copy_fcp(const std::string& layer, fcp& wbp,fcp& dwbp,int i,std::map<std::string, std::vector<float>> &tmp_params) {
     std::string fiStr = std::to_string(i);;
     std::string name = layer + "fc" + fiStr;  
     int ic = paramsp[name].ic;
@@ -671,14 +686,17 @@ void copy_fcp(const std::string& layer, fcp& wbp,fcp& dwbp,int i) {
     int bcnt = oc;
     std::cout << name << std::endl;
     printf("copying--->wcnt is %d,bcnt is %d\n\n",wcnt,bcnt);
-    wbp.weight = new float[wcnt];
-    wbp.bias   = new float[bcnt];
-    cudaMemcpy(wbp.weight, dwbp.weight, wcnt*sizeof(float), cudaMemcpyDeviceToHost);
-    cudaMemcpy(wbp.bias, dwbp.bias, bcnt* sizeof(float), cudaMemcpyDeviceToHost);
-    params[name + ".weight"] = std::vector<float>(wbp.weight, wbp.weight + wcnt);
-    params[name + ".bias"] = std::vector<float>(wbp.bias, wbp.bias + bcnt);
-    delete[] wbp.weight; 
-    delete[] wbp.bias; 
+    // wbp.weight = new float[wcnt];
+    // wbp.bias   = new float[bcnt];
+    tmp_params[name + ".weight"].resize(wcnt);
+    tmp_params[name + ".bias"].resize(bcnt);
+    cudaMemcpy(tmp_params[name + ".weight"].data(), dwbp.weight, wcnt*sizeof(float), cudaMemcpyDeviceToHost);
+    cudaMemcpy(tmp_params[name + ".bias"].data(), dwbp.bias, bcnt* sizeof(float), cudaMemcpyDeviceToHost);
+    check_error(cudaPeekAtLastError());
+    // tmp_params[name + ".weight"] = std::vector<float>(wbp.weight, wbp.weight + wcnt);
+    // tmp_params[name + ".bias"] = std::vector<float>(wbp.bias, wbp.bias + bcnt);
+    // delete[] wbp.weight; 
+    // delete[] wbp.bias; 
 }
 
 struct wbBnP {
@@ -721,12 +739,23 @@ float IC=0) {
         cudaMalloc((void**)&wbBnP.bn_var, oc * sizeof(float));
         if(PRETRAIN == 1)
         {
+#ifdef DEBUG
+    std::cout << name << bnStr << std::endl;
+    printf("wcnt is %d,ic is %d,oc is %d\n",wcnt,ic,oc);
+#endif
             cudaMemcpy(wbBnP.weight, params[name + ".weight"].data(), wcnt * sizeof(float), cudaMemcpyHostToDevice);
             cudaMemcpy(wbBnP.bias, params[name + ".bias"].data(), oc * sizeof(float), cudaMemcpyHostToDevice);
             cudaMemcpy(wbBnP.bn_weight, params[bnStr + ".weight"].data(), oc * sizeof(float), cudaMemcpyHostToDevice);
             cudaMemcpy(wbBnP.bn_bias, params[bnStr + ".bias"].data(), oc * sizeof(float), cudaMemcpyHostToDevice);
             cudaMemcpy(wbBnP.bn_mean, params[bnStr + ".running_mean"].data(), oc * sizeof(float), cudaMemcpyHostToDevice);
             cudaMemcpy(wbBnP.bn_var, params[bnStr + ".running_var"].data(), oc * sizeof(float), cudaMemcpyHostToDevice);
+            // cudaMemcpy(wbBnP.weight, params[name + ".weight"].data(), params[name + ".weight"].size() * sizeof(float), cudaMemcpyHostToDevice);
+            // cudaMemcpy(wbBnP.bias, params[name + ".bias"].data(), params[name + ".bias"].size() * sizeof(float), cudaMemcpyHostToDevice);
+            // cudaMemcpy(wbBnP.bn_weight, params[bnStr + ".weight"].data(), params[bnStr + ".weight"].size() * sizeof(float), cudaMemcpyHostToDevice);
+            // cudaMemcpy(wbBnP.bn_bias, params[bnStr + ".bias"].data(), params[bnStr + ".bias"].size() * sizeof(float), cudaMemcpyHostToDevice);
+            // cudaMemcpy(wbBnP.bn_mean, params[bnStr + ".running_mean"].data(), params[bnStr + ".running_mean"].size() * sizeof(float), cudaMemcpyHostToDevice);
+            // cudaMemcpy(wbBnP.bn_var, params[bnStr + ".running_var"].data(), params[bnStr + ".running_var"].size() * sizeof(float), cudaMemcpyHostToDevice);
+            // check_error(cudaPeekAtLastError());
         }
         else 
         {
@@ -763,7 +792,7 @@ void memset_wbBnP(const std::string& layer,const std::string& cf,wbBnP& wbBnP,in
     cudaMemset(wbBnP.bn_weight, 0,oc* sizeof(float));
     cudaMemset(wbBnP.bn_bias, 0, oc * sizeof(float));
 }
-void copy_wbBnP(const std::string& layer,const std::string& cf,wbBnP& wbBnP1,wbBnP& dwbBnP,int i,int param_offset=0) {
+void copy_wbBnP(const std::string& layer,const std::string& cf,wbBnP& wbBnP1,wbBnP& dwbBnP,int i,std::map<std::string, std::vector<float>> &tmp_params,int param_offset=0) {
 
     std::string cfiStr = std::to_string(i);
     std::string biStr = std::to_string(i+param_offset);
@@ -775,30 +804,54 @@ void copy_wbBnP(const std::string& layer,const std::string& cf,wbBnP& wbBnP1,wbB
 
     std::cout << name << std::endl;
     printf("copying--->wcnt is %d,oc is %d\n",wcnt,oc);    
-    wbBnP1.weight = new float[wcnt];
-    wbBnP1.bias   = new float[oc];
-    wbBnP1.bn_weight   = new float[oc];
-    wbBnP1.bn_bias   = new float[oc];
-    wbBnP1.bn_mean   = new float[oc];
-    wbBnP1.bn_var   = new float[oc];
-    cudaMemcpy(wbBnP1.weight, dwbBnP.weight, wcnt * sizeof(float), cudaMemcpyDeviceToHost);
-    cudaMemcpy(wbBnP1.bias, dwbBnP.bias, oc * sizeof(float), cudaMemcpyDeviceToHost);
-    cudaMemcpy(wbBnP1.bn_weight, dwbBnP.bn_weight, oc * sizeof(float), cudaMemcpyDeviceToHost);
-    cudaMemcpy(wbBnP1.bn_bias, dwbBnP.bn_bias, oc * sizeof(float), cudaMemcpyDeviceToHost);
-    cudaMemcpy(wbBnP1.bn_mean, dwbBnP.bn_mean, oc * sizeof(float), cudaMemcpyDeviceToHost);
-    cudaMemcpy(wbBnP1.bn_var, dwbBnP.bn_var, oc * sizeof(float), cudaMemcpyDeviceToHost);
-    params[name + ".weight"] = std::vector<float>(wbBnP1.weight, wbBnP1.weight + wcnt);
-    params[name + ".bias"] = std::vector<float>(wbBnP1.bias, wbBnP1.bias + oc);
-    params[bnStr + ".weight"] = std::vector<float>(wbBnP1.bn_weight, wbBnP1.bn_weight + oc);
-    params[bnStr + ".bias"] = std::vector<float>(wbBnP1.bn_bias, wbBnP1.bn_bias + oc);
-    params[bnStr + ".running_mean"] = std::vector<float>(wbBnP1.bn_mean, wbBnP1.bn_mean + oc);
-    params[bnStr + ".running_var"] = std::vector<float>(wbBnP1.bn_var, wbBnP1.bn_var + oc);
-    delete[] wbBnP1.weight; 
-    delete[] wbBnP1.bias; 
-    delete[] wbBnP1.bn_weight; 
-    delete[] wbBnP1.bn_bias; 
-    delete[] wbBnP1.bn_mean; 
-    delete[] wbBnP1.bn_var; 
+    // wbBnP1.weight = new float[wcnt];
+    // wbBnP1.bias   = new float[oc];
+    // wbBnP1.bn_weight   = new float[oc];
+    // wbBnP1.bn_bias   = new float[oc];
+    // wbBnP1.bn_mean   = new float[oc];
+    // wbBnP1.bn_var   = new float[oc];
+    tmp_params[name + ".weight"].resize(wcnt);
+    tmp_params[name + ".bias"].resize(oc);
+    tmp_params[bnStr + ".weight"].resize(oc);
+    tmp_params[bnStr + ".bias"].resize(oc);
+    tmp_params[bnStr + ".running_mean"].resize(oc);
+    tmp_params[bnStr + ".running_var"].resize(oc);
+    std::cout << "dwbBnP.weight address: " << dwbBnP.weight << std::endl;
+    std::cout << "dwbBnP.bias address: " << dwbBnP.bias << std::endl;
+    cudaError_t err = cudaMemcpy(tmp_params[name + ".weight"].data(), dwbBnP.weight, wcnt * sizeof(float), cudaMemcpyDeviceToHost);
+    if (err != cudaSuccess) {
+    std::cerr << "cudaMemcpy error: " << cudaGetErrorString(err) << std::endl;
+    }
+    cudaError_t err1 =  cudaMemcpy(tmp_params[name + ".bias"].data(), dwbBnP.bias, oc * sizeof(float), cudaMemcpyDeviceToHost);
+    if (err1 != cudaSuccess) {
+    std::cerr << "cudaMemcpy error1: " << cudaGetErrorString(err) << std::endl;
+    }
+    //cudaMemcpy(tmp_params[name + ".bias"].data(), dwbBnP.bias, oc * sizeof(float), cudaMemcpyDeviceToHost);
+    cudaMemcpy(tmp_params[bnStr + ".weight"].data(), dwbBnP.bn_weight, oc * sizeof(float), cudaMemcpyDeviceToHost);
+    cudaMemcpy(tmp_params[bnStr + ".bias"].data(), dwbBnP.bn_bias, oc * sizeof(float), cudaMemcpyDeviceToHost);
+    cudaMemcpy(tmp_params[bnStr + ".running_mean"].data(), dwbBnP.bn_mean, oc * sizeof(float), cudaMemcpyDeviceToHost);
+    cudaMemcpy(tmp_params[bnStr + ".running_var"].data(), dwbBnP.bn_var, oc * sizeof(float), cudaMemcpyDeviceToHost);
+    // tmp_params[name + ".weight"] = std::vector<float>(wbBnP1.weight, wbBnP1.weight + wcnt);
+    // tmp_params[name + ".bias"] = std::vector<float>(wbBnP1.bias, wbBnP1.bias + oc);
+    // tmp_params[bnStr + ".weight"] = std::vector<float>(wbBnP1.bn_weight, wbBnP1.bn_weight + oc);
+    // tmp_params[bnStr + ".bias"] = std::vector<float>(wbBnP1.bn_bias, wbBnP1.bn_bias + oc);
+    // tmp_params[bnStr + ".running_mean"] = std::vector<float>(wbBnP1.bn_mean, wbBnP1.bn_mean + oc);
+    // tmp_params[bnStr + ".running_var"] = std::vector<float>(wbBnP1.bn_var, wbBnP1.bn_var + oc);
+    check_error(cudaPeekAtLastError());
+    // if (name == "feat.stn.conv3") {
+    //     std::cout << "Processing special layer: " << name << std::endl;
+    //     // cudaDeviceSynchronize(); 
+    //     printVector_GPU(dwbBnP.weight, wcnt);
+    //     // cudaDeviceSynchronize(); 
+    //     printVector(tmp_params[name + ".weight"] );
+    // }
+
+    // delete[] wbBnP1.weight; 
+    // delete[] wbBnP1.bias; 
+    // delete[] wbBnP1.bn_weight; 
+    // delete[] wbBnP1.bn_bias; 
+    // delete[] wbBnP1.bn_mean; 
+    // delete[] wbBnP1.bn_var; 
 }
 
 struct CB3P {
@@ -812,10 +865,10 @@ float IC1=0,float IC2=0,float IC3=0) {
     read_wbBnP(layer,"conv",CB3P.cb2,2,0,update,IC2);
     read_wbBnP(layer,"conv",CB3P.cb3,3,0,update,IC3);   
 }
-void copy_CB3P(const std::string& layer,CB3P& CB3P1,CB3P& DCB3P) {
-    copy_wbBnP(layer,"conv",CB3P1.cb1,DCB3P.cb1,1);
-    copy_wbBnP(layer,"conv",CB3P1.cb2,DCB3P.cb1,2);
-    copy_wbBnP(layer,"conv",CB3P1.cb3,DCB3P.cb1,3);   
+void copy_CB3P(const std::string& layer,CB3P& CB3P1,CB3P& DCB3P,std::map<std::string, std::vector<float>> &tmp_params) {
+    copy_wbBnP(layer,"conv",CB3P1.cb1,DCB3P.cb1,1,tmp_params);
+    copy_wbBnP(layer,"conv",CB3P1.cb2,DCB3P.cb2,2,tmp_params);
+    copy_wbBnP(layer,"conv",CB3P1.cb3,DCB3P.cb3,3,tmp_params);   
 }
 void free_CB3P(CB3P &CB3P,bool update=false){
     free_wbBnP(CB3P.cb1,update);
@@ -839,10 +892,10 @@ float IC1=0,float IC2=0,float IC3=0)    {
     read_wbBnP(layer,"fc",FB2FP.fb2,2,param_offset,update,IC2);
     read_fcp(layer,FB2FP.f3,3,update,IC3);
 }
-void copy_FB2FP(const std::string& layer,FB2FP& FB2FP1,FB2FP& DFB2FP,int param_off = 3) {
-    copy_wbBnP(layer,"fc",FB2FP1.fb1,DFB2FP.fb1,1,param_off);
-    copy_wbBnP(layer,"fc",FB2FP1.fb2,DFB2FP.fb2,2,param_off);
-    copy_fcp(layer,FB2FP1.f3,DFB2FP.f3,3); 
+void copy_FB2FP(const std::string& layer,FB2FP& FB2FP1,FB2FP& DFB2FP,std::map<std::string, std::vector<float>> &tmp_params,int param_off = 3) {
+    copy_wbBnP(layer,"fc",FB2FP1.fb1,DFB2FP.fb1,1,tmp_params,param_off);
+    copy_wbBnP(layer,"fc",FB2FP1.fb2,DFB2FP.fb2,2,tmp_params,param_off);
+    copy_fcp(layer,FB2FP1.f3,DFB2FP.f3,3,tmp_params); 
 }
 void free_FB2FP(FB2FP &FB2FP,bool update=false){
     free_wbBnP(FB2FP.fb1,update);
@@ -866,9 +919,9 @@ float fIC1=0,float fIC2=0,float fIC3=0) {
     read_CB3P(layer,stndP.cb3,update,IC1,IC2,IC3);
     read_FB2FP(layer,stndP.fb2f,3,update,fIC1,fIC2,fIC3);
 }
-void copy_stndP(const std::string& layer,stndP& stndP1,stndP& DstndP) {
-    copy_CB3P(layer,stndP1.cb3,DstndP.cb3);
-    copy_FB2FP(layer,stndP1.fb2f,DstndP.fb2f);
+void copy_stndP(const std::string& layer,stndP& stndP1,stndP& DstndP,std::map<std::string, std::vector<float>> &tmp_params) {
+    copy_CB3P(layer,stndP1.cb3,DstndP.cb3,tmp_params);
+    copy_FB2FP(layer,stndP1.fb2f,DstndP.fb2f,tmp_params);
 }
 void free_stndP(stndP& stndP,bool update=false){
     free_CB3P(stndP.cb3,update);
@@ -892,12 +945,12 @@ void freeDP(cudaP &dp,bool update=false)
     free_CB3P(dp.featp,update);
     free_FB2FP(dp.nonep,update);
 }
-void copyDPtoHost(cudaP &dp,cudaP &Ddp)
+void copyDPtoHost(cudaP &dp,cudaP &Ddp,std::map<std::string, std::vector<float>> &tmp_params)
 {
-    copy_stndP("feat.stn.",dp.stn3dp,Ddp.stn3dp);
-    copy_stndP("feat.fstn.",dp.stnkdp,Ddp.stnkdp);
-    copy_CB3P("feat.",dp.featp,Ddp.featp);
-    copy_FB2FP("",dp.nonep,Ddp.nonep,0);
+    copy_stndP("feat.stn.",dp.stn3dp,Ddp.stn3dp,tmp_params);
+    copy_stndP("feat.fstn.",dp.stnkdp,Ddp.stnkdp,tmp_params);
+    copy_CB3P("feat.",dp.featp,Ddp.featp,tmp_params);
+    copy_FB2FP("",dp.nonep,Ddp.nonep,tmp_params,0);
 }
 void memsetDP(cudaP &dp)
 {
@@ -1454,14 +1507,14 @@ void GPU_Bmm(float* input_A,float* input_B,float* output,int M_A,int K_A,int K_B
     // }
     // else
     // {
-    new_gemm_gpu(false,false,M_A,N_B,K_A,1.0f, input_A,K_A,input_B,N_B,0.0f,output,N_B,BatchSize);
-        // for(int b=0;b<BatchSize;b++)
-        // {
-        // check_error(cudaPeekAtLastError());
-        // //cudaDeviceSynchronize();
-        // gemm_gpu(false,false,M_A,N_B,K_A,1.0f, input_A+b*M_A*K_A,K_A,input_B+b*K_B*N_B,N_B,0.0f,output+b*M_A*N_B,N_B);
-        // check_error(cudaPeekAtLastError());
-        // }
+    //new_gemm_gpu(false,false,M_A,N_B,K_A,1.0f, input_A,K_A,input_B,N_B,0.0f,output,N_B,BatchSize);
+        for(int b=0;b<BatchSize;b++)
+        {
+        check_error(cudaPeekAtLastError());
+        //cudaDeviceSynchronize();
+        gemm_gpu(false,false,M_A,N_B,K_A,1.0f, input_A+b*M_A*K_A,K_A,input_B+b*K_B*N_B,N_B,0.0f,output+b*M_A*N_B,N_B);
+        check_error(cudaPeekAtLastError());
+        }
     // }
 }
 
@@ -1834,12 +1887,27 @@ void BR_train(bool relu, int batchSize,int numPoints,int outChannels,
 float* weight,float* bias,float* mean,float* var,float* norm,
 float* running_mean,float* running_var,float* input,float* output,float esp = 1e-5)
 {
+#ifdef DEBUG
+    std::cout << "----fast_mean_gpu" << std::endl;
+    // printVector_GPU(input,batchSize*numPoints*outChannels);
+    // printVector_GPU(mean,outChannels);
+#endif
+check_error(cudaPeekAtLastError());
     fast_mean_gpu(input,batchSize,outChannels,numPoints,mean);
+#ifdef DEBUG
+    std::cout << "----fast_variance_gpu" << std::endl;
+#endif
     fast_variance_gpu(input,mean,batchSize,outChannels,numPoints,var);
+#ifdef DEBUG
+    std::cout << "----scal_gpu" << std::endl;
+#endif
     scal_gpu(outChannels, .99,running_mean,1);
     axpy_gpu(outChannels, .01, mean, 1, running_mean, 1);
     scal_gpu(outChannels, .99, running_var, 1);
     axpy_gpu(outChannels, .01, var, 1, running_var, 1);
+#ifdef DEBUG
+    std::cout << "----normalize_gpu" << std::endl;
+#endif
     normalize_gpu(input,norm,mean,var,batchSize,outChannels,numPoints);
     madd_relu(relu,norm,output,weight,bias,batchSize,outChannels,numPoints);
 }
@@ -1848,6 +1916,9 @@ void CBRWRAP_GPU_train(bool relu,int batchSize,int numPoints,int inChannels,int 
 float* cudaConvWeights, float* cudaConvBias, 
 float* cudaBnWeights,float* cudaBnBias,float* cudaBnRM,float* cudaBnRV,float* output,float* convOutput,bn_layer& bn,float esp = 1e-5
 ){
+#ifdef DEBUG
+    std::cout << "----START CONV TRAIN" << std::endl;
+#endif
     const int BLK_X = 32;
     const int BLK_Y = 32;
     dim3 blockDim(BLK_X,BLK_Y);
@@ -1866,7 +1937,9 @@ float* cudaBnWeights,float* cudaBnBias,float* cudaBnRM,float* cudaBnRV,float* ou
     //BR_Kernel<<<batchSize, outChannels>>>(relu,numPoints,cudaBnWeights,cudaBnBias,cudaBnRM,cudaBnRV,convOutput,output);
     //normalize_gpu(convOutput,output,cudaBnRM,cudaBnRV,batchSize,outChannels,numPoints);
     //madd_relu(relu,output,output,cudaBnWeights,cudaBnBias,batchSize,outChannels,numPoints);
-    
+#ifdef DEBUG
+    std::cout << "----START BR TRAIN" << std::endl;
+#endif 
     BR_train(relu,batchSize,numPoints,outChannels,cudaBnWeights,cudaBnBias,bn.mean,bn.var,bn.norm,cudaBnRM,cudaBnRV,convOutput,output);
 }
 void GPU_CBR_train(bool relu,int batchSize, int numPoints, int inics, int OC,wbBnP& wbBnP, float* input, float* reluOutput, float* convOutput,bn_layer& bn)
@@ -1988,13 +2061,16 @@ __global__ void backward_bias_conn_kernel(float *bias_updates, float *delta, int
     int index = (blockIdx.x + blockIdx.y*gridDim.x) * blockDim.x + threadIdx.x;
     if (index >= n) return;
     int b;
-    float sum = 0;
+    float sum = 0.0f;
     for(b = 0; b < batch; ++b){
         int i = b*n + index;
         sum += delta[i];
+        // if(index == 1)
+        // printf("batch is %d, delta is %f,sum is %f \n",b,delta[i],sum);
     }
     //bias_updates[index] += sum;//TODO:
     bias_updates[index] = sum;
+    //printf("delta is %f,index is %d \n",bias_updates[index],index);
 }
 __global__ void backward_bias_kernel(float *bias_updates, float *delta, int batch, int n, int size)
 {
@@ -2002,7 +2078,7 @@ __global__ void backward_bias_kernel(float *bias_updates, float *delta, int batc
     int i,b;
     int filter = blockIdx.x;
     int p = threadIdx.x;
-    float sum = 0;
+    float sum = 0.0f;
     for(b = 0; b < batch; ++b){
         for(i = 0; i < size; i += DARKNETBLK){
             int index = p + i + size*(filter + n*b);
@@ -2207,8 +2283,10 @@ float * delta_from, float * delta_gen, float* weight_up, float* bias_up,float dp
     K = batchSize;
     gemm_gpu(true, false, M, N, K, 1.0, delta_from,M,input,N,0.0,weight_up,N);
     //BIAS UP: outf,batchsize
-    
+    //printVector_GPU(delta_from,batchSize*outFeatures);
+    //printVector_GPU(bias_up,outFeatures);
     backward_bias_gpu(bias_up,delta_from,batchSize,outFeatures,1);
+    //printVector_GPU(bias_up,outFeatures);
 }
 void FBR_bp(int batchSize, int inFeatures, int outFeatures,
 wbBnP& fbp, wbBnP& fbp_up, float* input, float* reluOutput, float* fcOutput,
@@ -2247,7 +2325,7 @@ bn_layer& bn1,bn_layer& bn1_delta,bn_layer& bn2,bn_layer& bn2_delta,float dp = 0
     delta_relu2, delta_fc2, delta_relu1, bn2, bn2_delta,dp);
 
     // printVector_GPU(delta_relu1,OC1*batchSize);
-    // printVector_GPU(fb2f_up.fb2.bias,OC2);
+    //printVector_GPU(fb2f_up.fb2.bias,OC2);
 
     FBR_bp(batchSize,inics,OC1,
     fb2f.fb1, fb2f_up.fb1,  input, relu1_output, fc1_output,
@@ -2812,7 +2890,6 @@ void Train_GPU (int inChannels,int batchSize,int numPoints,
     net.bn1_part5_fbr2f,delta.bn1_part5_fbr2f,
     net.bn2_part5_fbr2f,delta.bn2_part5_fbr2f, drop_rate
     );
-
 #ifdef BACKDEBUG
     std::cout << "PART4, BACKWARDING" << std::endl;
 #endif
@@ -2882,6 +2959,7 @@ void Train_GPU (int inChannels,int batchSize,int numPoints,
     net.bn2_stn_fbr2f,delta.bn2_stn_fbr2f
     );
     MaxPooling_bp(OC3, batchSize, maxnp, net.maxp_output_idx, delta.maxp_output, delta.CBR3_output);
+    //printVector_GPU(delta.CBR3_output,batchSize*OC3*numPoints);
     CBR3_bp(true,OC1,OC2,OC3, batchSize, numPoints,inChannels,
     dParams.stn3dp.cb3, upParams.stn3dp.cb3, net.input_trans, 
     net.CBR3_output,net.relu1_output_stn_cbr,net.relu2_output_stn_cbr,
@@ -2891,6 +2969,7 @@ void Train_GPU (int inChannels,int batchSize,int numPoints,
     net.bn1_stn_cbr,net.bn2_stn_cbr,net.bn3_stn_cbr,
     delta.bn1_stn_cbr,delta.bn2_stn_cbr,delta.bn3_stn_cbr
     );//这里的delta.input_trans, 没必要生成TODO:
+    //printVector_GPU(upParams.stn3dp.cb3.cb3.weight,OC3*OC2);
 
     FBR2F_update(512,256,10,encoderOC3,dParams.nonep,upParams.nonep,moParams.nonep);
     FB_update(encoderOC2,encoderOC3,dParams.featp.cb3, upParams.featp.cb3, moParams.featp.cb3);//CB
@@ -3231,6 +3310,10 @@ int main(int argc, char *argv[]) {
 
     // 读权重：主机
     std::string dir = argv[1]; 
+    if(PRETRAIN==1)
+    {
+        read_params(dir);
+    }
     //read_params(dir);
 
     // 读输入：主机
@@ -3416,14 +3499,15 @@ int main(int argc, char *argv[]) {
     }
     }
 
+    //printVector_GPU(dParams.stn3dp.cb3.cb3.weight,8192);
     if(SAVE==1)
     {
         cudaP hParams;
-        copyDPtoHost(hParams,dParams);
-        save_model_params_and_buffers_to_txt("./newparams/train/30");
+        copyDPtoHost(hParams,dParams,params);
+        save_model_params_and_buffers_to_txt(params,"./newparams/train/8");
         cudaDeviceSynchronize();
     }
-    
+    //printVector(params["feat.stn.conv3.weight"]);
     // 释放内存
     freeDP(dParams);//权重
     freeDP(upParams, true);//更新权重

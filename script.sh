@@ -21,6 +21,8 @@ if [ $? -ne 0 ]; then
     exit 1
 fi
 
+#nvprof ./train ./params/60epoch > train.txt
+#nvprof ./train ./newparams/train/30 > test.txt
 # Step 2: Poll nvidia-smi until GPU utilization is at 0%
 while true; do
     # Get GPU utilization percentage using nvidia-smi
@@ -37,13 +39,18 @@ while true; do
                 ./test ./params/30epoch
                 ;;
             2)
-                echo "Running with nvprof"
-                nvprof ./train ./params/60epoch > test.txt
+                echo "Running with nvprof,training"
+                nvprof ./train ./params/60epoch > train.txt
                 ;;
             3)
                 echo "Running with nvprof --profile-from-start off"
                 nvprof --profile-from-start off ./test ./params/30epoch
                 ;;
+            4)
+                echo "Running with nvprof,testing"
+                nvprof ./train ./newparams/train/30 > test.txt
+                ;;
+
             *)
                 echo "Invalid mode. Exiting."
                 exit 1

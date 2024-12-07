@@ -40,7 +40,7 @@ while true; do
                 ;;
             2)
                 echo "Running with nvprof,training"
-                nvprof ./train ./params/60epoch > train.txt
+                nvprof ./train ./newparams/train/my
                 ;;
             3)
                 echo "Running with nvprof --profile-from-start off"
@@ -48,7 +48,7 @@ while true; do
                 ;;
             4)
                 echo "Running with nvprof,testing"
-                nvprof ./train ./newparams/train/30 > test.txt
+                nvprof ./train ./newparams/train/my > test.txt
                 ;;
 
             *)

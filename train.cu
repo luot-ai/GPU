@@ -16,7 +16,6 @@
 #include <dirent.h>
 #include <cstring>
 #include <hdf5/serial/H5Cpp.h>
-#include <cublas_v2.h>
 #include <cuda_profiler_api.h>
 #include <cuda_runtime.h>
 #include <cassert>
@@ -48,34 +47,6 @@
 // #define BACKDEBUG
 // #define USECONVMAX (SAMPLE == 0 ? 1 : (NPOINT >= 128 ? 1 : 0))
 
-void checkCublasStatus(cublasStatus_t status) {
-    switch (status) {
-        case CUBLAS_STATUS_SUCCESS:
-            printf("CUBLAS_STATUS_SUCCESS\n");
-            break;
-        case CUBLAS_STATUS_NOT_INITIALIZED:
-            printf("CUBLAS_STATUS_NOT_INITIALIZED: The handle was not initialized properly.\n");
-            break;
-        case CUBLAS_STATUS_ALLOC_FAILED:
-            printf("CUBLAS_STATUS_ALLOC_FAILED: Resource allocation failed.\n");
-            break;
-        case CUBLAS_STATUS_INVALID_VALUE:
-            printf("CUBLAS_STATUS_INVALID_VALUE: Invalid parameters were passed to the function.\n");
-            break;
-        case CUBLAS_STATUS_ARCH_MISMATCH:
-            printf("CUBLAS_STATUS_ARCH_MISMATCH: The device architecture is not supported.\n");
-            break;
-        case CUBLAS_STATUS_EXECUTION_FAILED:
-            printf("CUBLAS_STATUS_EXECUTION_FAILED: Execution failed, possibly due to a previous CUDA error.\n");
-            break;
-        case CUBLAS_STATUS_INTERNAL_ERROR:
-            printf("CUBLAS_STATUS_INTERNAL_ERROR: An internal operation failed.\n");
-            break;
-        default:
-            printf("Unknown CUBLAS error.\n");
-            break;
-    }
-}
 dim3 cuda_gridsize(size_t n){
     size_t k = (n-1) / DARKNETBLK + 1;
     size_t x = k;
@@ -116,138 +87,6 @@ void check_error(cudaError_t status)
         snprintf(buffer, 256, "CUDA Error Prev: %s", s);
         error(buffer);
     } 
-}
-
-__device__ __forceinline__
-uint32_t smem_u32addr(const void *smem_ptr) {
-    uint32_t addr;
-    asm ("{.reg .u64 u64addr;\n"
-         " cvta.to.shared.u64 u64addr, %1;\n"
-         " cvt.u32.u64 %0, u64addr;}\n"
-         : "=r"(addr)
-         : "l"(smem_ptr)
-    );
-
-    return addr;
-}
-
-__device__ __forceinline__
-void ldg32_nc(float &reg, const void *ptr, bool guard) {
-    asm volatile (
-        "{.reg .pred p;\n"
-        " setp.ne.b32 p, %2, 0;\n"
-#if __CUDACC_VER_MAJOR__ >= 11 && __CUDACC_VER_MINOR__ >= 4 && \
-    __CUDA_ARCH__ >= 750
-        " @p ld.global.nc.L2::128B.f32 %0, [%1];}\n"
-#else
-        " @p ld.global.nc.f32 %0, [%1];}\n"
-#endif
-        : "=f"(reg)
-        : "l"(ptr), "r"((int)guard)
-    );
-}
-
-__device__ __forceinline__
-void ldg32_nc_0(float &reg, const void *ptr, bool guard) {
-    asm volatile (
-        "{.reg .pred p;\n"
-        " setp.ne.b32 p, %2, 0;\n"
-        " @!p mov.b32 %0, 0;\n"
-#if __CUDACC_VER_MAJOR__ >= 11 && __CUDACC_VER_MINOR__ >= 4 && \
-    __CUDA_ARCH__ >= 750
-        " @p ld.global.nc.L2::128B.f32 %0, [%1];}\n"
-#else
-        " @p ld.global.nc.f32 %0, [%1];}\n"
-#endif
-        : "=f"(reg)
-        : "l"(ptr), "r"((int)guard)
-    );
-}
-
-__device__ __forceinline__
-void stg32(const float &reg, void *ptr, bool guard) {
-    asm volatile (
-        "{.reg .pred p;\n"
-        " setp.ne.b32 p, %2, 0;\n"
-        " @p st.global.f32 [%0], %1;}\n"
-        : : "l"(ptr), "f"(reg), "r"((int)guard)
-    );
-}
-
-__device__ __forceinline__
-void lds128(float &reg0, float &reg1,
-            float &reg2, float &reg3,
-            const uint32_t &addr) {
-    asm volatile (
-        "ld.shared.v4.f32 {%0, %1, %2, %3}, [%4];\n"
-        : "=f"(reg0), "=f"(reg1), "=f"(reg2), "=f"(reg3)
-        : "r"(addr)
-    );
-}
-
-__device__ __forceinline__
-void sts32(const float &reg, const uint32_t &addr) {
-    asm volatile (
-        "st.shared.f32 [%0], %1;\n"
-        : : "r"(addr), "f"(reg)
-    );
-}
-
-__device__ __forceinline__
-void sts128(const float &reg0, const float &reg1,
-            const float &reg2, const float &reg3,
-            const uint32_t &addr) {
-    asm volatile (
-        "st.shared.v4.f32 [%0], {%1, %2, %3, %4};\n"
-        : : "r"(addr), "f"(reg0), "f"(reg1), "f"(reg2), "f"(reg3)
-    );
-}
-
-struct StgFrag {
-    float data[4][4];
-
-    __device__ __forceinline__
-    StgFrag(const float (&C_frag)[8][8], int tile_x, int tile_y) {
-        #pragma unroll
-        for (int i = 0; i < 4; ++i) {
-            #pragma unroll
-            for (int j = 0; j < 4; ++j) {
-                data[i][j] = C_frag[tile_y * 4 + i][tile_x * 4 + j];
-            }
-        }
-    }
-};
-
-__device__ __noinline__
-void C_tile_wb(StgFrag C_frag,
-               float *C_stg_ptr,
-               const float *C_lds_ptr,
-               uint32_t C_sts_addr,
-               uint32_t m,
-               uint32_t n,
-               uint32_t m_idx,
-               uint32_t n_idx) {
-    __syncthreads();
-
-    #pragma unroll
-    for (int i = 0; i < 4; ++i) {
-        sts128(C_frag.data[i][0],
-               C_frag.data[i][1],
-               C_frag.data[i][2],
-               C_frag.data[i][3],
-               C_sts_addr + i * 8 * sizeof(float4));
-    }
-
-    __syncthreads();
-
-    uint32_t m_guard = m < m_idx ? 0 : m - m_idx;
-
-    #pragma unroll
-    for (int i = 0; i < 16; ++i) {
-        stg32(C_lds_ptr[i * 32],
-              C_stg_ptr + i * n,
-              i < m_guard && n_idx < n);
-    }
 }
 
 void printVector(const std::vector<float>& vec) {
@@ -684,19 +523,11 @@ void copy_fcp(const std::string& layer, fcp& wbp,fcp& dwbp,int i,std::map<std::s
     int oc = paramsp[name].oc;
     int wcnt = ic * oc;
     int bcnt = oc;
-    std::cout << name << std::endl;
-    printf("copying--->wcnt is %d,bcnt is %d\n\n",wcnt,bcnt);
-    // wbp.weight = new float[wcnt];
-    // wbp.bias   = new float[bcnt];
     tmp_params[name + ".weight"].resize(wcnt);
     tmp_params[name + ".bias"].resize(bcnt);
     cudaMemcpy(tmp_params[name + ".weight"].data(), dwbp.weight, wcnt*sizeof(float), cudaMemcpyDeviceToHost);
     cudaMemcpy(tmp_params[name + ".bias"].data(), dwbp.bias, bcnt* sizeof(float), cudaMemcpyDeviceToHost);
     check_error(cudaPeekAtLastError());
-    // tmp_params[name + ".weight"] = std::vector<float>(wbp.weight, wbp.weight + wcnt);
-    // tmp_params[name + ".bias"] = std::vector<float>(wbp.bias, wbp.bias + bcnt);
-    // delete[] wbp.weight; 
-    // delete[] wbp.bias; 
 }
 
 struct wbBnP {
@@ -739,23 +570,12 @@ float IC=0) {
         cudaMalloc((void**)&wbBnP.bn_var, oc * sizeof(float));
         if(PRETRAIN == 1)
         {
-#ifdef DEBUG
-    std::cout << name << bnStr << std::endl;
-    printf("wcnt is %d,ic is %d,oc is %d\n",wcnt,ic,oc);
-#endif
             cudaMemcpy(wbBnP.weight, params[name + ".weight"].data(), wcnt * sizeof(float), cudaMemcpyHostToDevice);
             cudaMemcpy(wbBnP.bias, params[name + ".bias"].data(), oc * sizeof(float), cudaMemcpyHostToDevice);
             cudaMemcpy(wbBnP.bn_weight, params[bnStr + ".weight"].data(), oc * sizeof(float), cudaMemcpyHostToDevice);
             cudaMemcpy(wbBnP.bn_bias, params[bnStr + ".bias"].data(), oc * sizeof(float), cudaMemcpyHostToDevice);
             cudaMemcpy(wbBnP.bn_mean, params[bnStr + ".running_mean"].data(), oc * sizeof(float), cudaMemcpyHostToDevice);
             cudaMemcpy(wbBnP.bn_var, params[bnStr + ".running_var"].data(), oc * sizeof(float), cudaMemcpyHostToDevice);
-            // cudaMemcpy(wbBnP.weight, params[name + ".weight"].data(), params[name + ".weight"].size() * sizeof(float), cudaMemcpyHostToDevice);
-            // cudaMemcpy(wbBnP.bias, params[name + ".bias"].data(), params[name + ".bias"].size() * sizeof(float), cudaMemcpyHostToDevice);
-            // cudaMemcpy(wbBnP.bn_weight, params[bnStr + ".weight"].data(), params[bnStr + ".weight"].size() * sizeof(float), cudaMemcpyHostToDevice);
-            // cudaMemcpy(wbBnP.bn_bias, params[bnStr + ".bias"].data(), params[bnStr + ".bias"].size() * sizeof(float), cudaMemcpyHostToDevice);
-            // cudaMemcpy(wbBnP.bn_mean, params[bnStr + ".running_mean"].data(), params[bnStr + ".running_mean"].size() * sizeof(float), cudaMemcpyHostToDevice);
-            // cudaMemcpy(wbBnP.bn_var, params[bnStr + ".running_var"].data(), params[bnStr + ".running_var"].size() * sizeof(float), cudaMemcpyHostToDevice);
-            // check_error(cudaPeekAtLastError());
         }
         else 
         {
@@ -802,22 +622,12 @@ void copy_wbBnP(const std::string& layer,const std::string& cf,wbBnP& wbBnP1,wbB
     int oc = paramsp[name].oc;
     int wcnt = ic * oc;
 
-    std::cout << name << std::endl;
-    printf("copying--->wcnt is %d,oc is %d\n",wcnt,oc);    
-    // wbBnP1.weight = new float[wcnt];
-    // wbBnP1.bias   = new float[oc];
-    // wbBnP1.bn_weight   = new float[oc];
-    // wbBnP1.bn_bias   = new float[oc];
-    // wbBnP1.bn_mean   = new float[oc];
-    // wbBnP1.bn_var   = new float[oc];
     tmp_params[name + ".weight"].resize(wcnt);
     tmp_params[name + ".bias"].resize(oc);
     tmp_params[bnStr + ".weight"].resize(oc);
     tmp_params[bnStr + ".bias"].resize(oc);
     tmp_params[bnStr + ".running_mean"].resize(oc);
     tmp_params[bnStr + ".running_var"].resize(oc);
-    std::cout << "dwbBnP.weight address: " << dwbBnP.weight << std::endl;
-    std::cout << "dwbBnP.bias address: " << dwbBnP.bias << std::endl;
     cudaError_t err = cudaMemcpy(tmp_params[name + ".weight"].data(), dwbBnP.weight, wcnt * sizeof(float), cudaMemcpyDeviceToHost);
     if (err != cudaSuccess) {
     std::cerr << "cudaMemcpy error: " << cudaGetErrorString(err) << std::endl;
@@ -826,32 +636,11 @@ void copy_wbBnP(const std::string& layer,const std::string& cf,wbBnP& wbBnP1,wbB
     if (err1 != cudaSuccess) {
     std::cerr << "cudaMemcpy error1: " << cudaGetErrorString(err) << std::endl;
     }
-    //cudaMemcpy(tmp_params[name + ".bias"].data(), dwbBnP.bias, oc * sizeof(float), cudaMemcpyDeviceToHost);
     cudaMemcpy(tmp_params[bnStr + ".weight"].data(), dwbBnP.bn_weight, oc * sizeof(float), cudaMemcpyDeviceToHost);
     cudaMemcpy(tmp_params[bnStr + ".bias"].data(), dwbBnP.bn_bias, oc * sizeof(float), cudaMemcpyDeviceToHost);
     cudaMemcpy(tmp_params[bnStr + ".running_mean"].data(), dwbBnP.bn_mean, oc * sizeof(float), cudaMemcpyDeviceToHost);
     cudaMemcpy(tmp_params[bnStr + ".running_var"].data(), dwbBnP.bn_var, oc * sizeof(float), cudaMemcpyDeviceToHost);
-    // tmp_params[name + ".weight"] = std::vector<float>(wbBnP1.weight, wbBnP1.weight + wcnt);
-    // tmp_params[name + ".bias"] = std::vector<float>(wbBnP1.bias, wbBnP1.bias + oc);
-    // tmp_params[bnStr + ".weight"] = std::vector<float>(wbBnP1.bn_weight, wbBnP1.bn_weight + oc);
-    // tmp_params[bnStr + ".bias"] = std::vector<float>(wbBnP1.bn_bias, wbBnP1.bn_bias + oc);
-    // tmp_params[bnStr + ".running_mean"] = std::vector<float>(wbBnP1.bn_mean, wbBnP1.bn_mean + oc);
-    // tmp_params[bnStr + ".running_var"] = std::vector<float>(wbBnP1.bn_var, wbBnP1.bn_var + oc);
     check_error(cudaPeekAtLastError());
-    // if (name == "feat.stn.conv3") {
-    //     std::cout << "Processing special layer: " << name << std::endl;
-    //     // cudaDeviceSynchronize(); 
-    //     printVector_GPU(dwbBnP.weight, wcnt);
-    //     // cudaDeviceSynchronize(); 
-    //     printVector(tmp_params[name + ".weight"] );
-    // }
-
-    // delete[] wbBnP1.weight; 
-    // delete[] wbBnP1.bias; 
-    // delete[] wbBnP1.bn_weight; 
-    // delete[] wbBnP1.bn_bias; 
-    // delete[] wbBnP1.bn_mean; 
-    // delete[] wbBnP1.bn_var; 
 }
 
 struct CB3P {
@@ -1057,120 +846,6 @@ void GPU_transpose(float* input,float* output,int dim0,int dim1,int dim2)
 
     // // 同步设备并检查执行错误
     // CUDA_CHECK(cudaDeviceSynchronize());
-}
-__global__ void gemm_64x64_128N_kernel(int M,int N,int K,
-float* input_A, float* input_B, float* convBias,float* output, float beta = 0.0f)
-{   
-    // param-set : variable
-    int BM = 64;
-    int BN = 64;
-    // param-set : fix
-    int BK = 8;
-    int Tsize = 4; //thread 4*4
-    // matrix
-    int tx = threadIdx.x;
-    int bx = blockIdx.x;
-    int by = blockIdx.y;
-    int b = blockIdx.z;
-    int bI = b * K * N ;
-    int bW = b * K * M ;
-    int bO = b * M * N ;
-    // output arrange
-    int warpIdx = tx / 32; // 4x8 threads per Warp
-    int twIdx = tx % 32;
-    int wx = warpIdx % 2;      // th -> 8x8  warp-> 32x64
-    int wy = warpIdx / 2;      // 4x2 warps per Block
-    int twx = (twIdx / 2) % 8; 
-    int twy = (twIdx / 16) * 2 + (twIdx % 2);
-
-    //shared memory & registers
-    __shared__ float W_shared[512];//1024*4B = 4KB
-    __shared__ float I_shared[512];//1024*4B = 4KB
-    float W_reg[4]={0};
-    float I_reg[4]={0};
-    float O_reg[4][4] = {0};
-
-    int W_grow = by * BM + tx / BK * 2; // 每BK个threads:连续2行读取1个数
-    int W_gcol = 0 + tx % BK;
-    int I_grow = 0 + tx / 32; // 32个threads读32个数，重复2次 刚好是一行:INTERLEAVE
-    int I_gcol = bx * BN + tx % 32;
-    int W_LoadG = INDEX(W_grow, W_gcol, K)+bW;
-    int I_LoadG = INDEX(I_grow, I_gcol, N)+bI;
-    // OUTERMOST PHASES: K/BK times
-    for (int phase = 0; phase < K / BK; phase++)
-    {
-        //【global -> share】
-        int W_srow = tx % BK ; //转置
-        int W_scol = tx / BK * 2 ; 
-        int I_srow = tx / 32; 
-        int I_scol = tx % 32; 
-        int W_StoreS = INDEX(W_srow,W_scol,BM);
-        int I_StoreS = INDEX(I_srow,I_scol,BN);
-        #pragma unroll
-        for (int ldg = 0; ldg < 2; ldg++)
-        {
-            W_shared[W_StoreS+ldg]=input_A[W_LoadG+ldg*K];
-        }
-        #pragma unroll
-        for (int ldg = 0; ldg < 2; ldg++)
-        {
-            I_shared[I_StoreS+ldg*32]=input_B[I_LoadG+ldg*32];
-        }
-        __syncthreads();
-        W_LoadG += BK;
-        I_LoadG += BK * N;
-        // ITERATIONS : BK times
-        for (int iter = 0; iter< BK ;iter++)
-        {
-            //【share -> registers】
-            int W_LoadS = INDEX(iter, (wy * 16 + twy * 4), BM);
-            int I_LoadS = INDEX(iter, (wx * 32 + twx * 4), BN);
-            #pragma unroll
-            for (int i = 0; i < 4; ++i)
-            {
-                W_reg[i] = W_shared[W_LoadS+i];
-            }
-            #pragma unroll
-            for (int i = 0; i < 4; ++i)
-            {
-                I_reg[i] = I_shared[I_LoadS+i];
-            }
-            // calculate
-            #pragma unroll
-            for (int i = 0; i < Tsize; ++i) {
-                #pragma unroll
-                for (int j = 0; j < Tsize; ++j) {
-                    O_reg[i][j] += W_reg[i] * I_reg[j];
-                }
-            }
-        }
-    }
-    int O_grow = by * BM + wy * 16 + twy * 4;
-    int O_gcol = bx * BN + wx * 32 + twx * 4;
-    int O_StoreG = INDEX(O_grow, O_gcol, N)+bO;
-    //store to C
-    if (beta!= 0.0f)
-    {
-        #pragma unroll
-        for (int i = 0; i<4;i++)
-        {
-            for (int j = 0 ; j<4 ;j++)
-            {
-                output[O_StoreG+ i*N+j]+=O_reg[i][j];
-            }
-        }
-    }
-    else
-    {
-        #pragma unroll
-        for (int i = 0; i<4;i++)
-        {
-            for (int j = 0 ; j<4 ;j++)
-            {
-                output[O_StoreG+ i*N+j]=O_reg[i][j];
-            }
-        }
-    }
 }
 
 __global__ void LogSoftMax_Kernel_train(int* label,float* input,float* output,float* outputDelta,int* correct_tabel,int L,int BatchSize = 32)
@@ -1409,11 +1084,6 @@ void GPU_MaxPooling(int ics, int batchSize, int numPoints,float* input, float* o
     {
         Maxpooling_Kernel0<<<gridDim, numPoints>>>(input, output,numPoints);
     }
-    // // 检查内核启动是否成功
-    // CUDA_CHECK(cudaGetLastError());
-
-    // // 同步设备并检查执行错误
-    // CUDA_CHECK(cudaDeviceSynchronize());
 }
 __global__ void BMM_Kernel_FF(float* input_A,float* input_B,float* output,int M_A,int K_A,int K_B,int N_B,int BatchSize)
 {
@@ -1437,7 +1107,6 @@ __global__ void BMM_Kernel_FF(float* input_A,float* input_B,float* output,int M_
         output[batch*M_A*N_B+row*N_B+col] = tmp;
     }
 }
-
 __global__ void BMM_Kernel_TF(float* input_A,float* input_B,float* output,int M_A,int K_A,int K_B,int N_B,int BatchSize)
 {
     int tx = threadIdx.x;
@@ -1460,7 +1129,6 @@ __global__ void BMM_Kernel_TF(float* input_A,float* input_B,float* output,int M_
         output[batch*M_A*N_B+row*N_B+col] = tmp;
     }
 }
-
 __global__ void conv_deltagen_kernel(float* input_A,float* input_B,float* output,int M_A,int K_A,int K_B,int N_B,int BatchSize,float beta)
 {
     int tx = threadIdx.x;
@@ -1483,7 +1151,6 @@ __global__ void conv_deltagen_kernel(float* input_A,float* input_B,float* output
         output[batch*M_A*N_B+row*N_B+col] = tmp + beta*output[batch*M_A*N_B+row*N_B+col];
     }
 }
-
 __global__ void BMM_Kernel_FT(float* input_A,float* input_B,float* output,int M_A,int K_A,int K_B,int N_B,int BatchSize)
 {
     int tx = threadIdx.x;
@@ -1506,7 +1173,6 @@ __global__ void BMM_Kernel_FT(float* input_A,float* input_B,float* output,int M_
         output[batch*M_A*N_B+row*N_B+col] = tmp;
     }
 }
-
 __global__ void conv_weightup_kernel(float* input_A,float* input_B,float* output,int M_A,int K_A,int K_B,int N_B,int BatchSize)
 {
     int tx = threadIdx.x;
@@ -1528,38 +1194,6 @@ __global__ void conv_weightup_kernel(float* input_A,float* input_B,float* output
         }
         atomicAdd(&output[row*N_B+col], tmp);
     }
-}
-
-
-void gemm_gpu(int TA, int TB, int M, int N, int K, float ALPHA, 
-        float *A_gpu, int lda, 
-        float *B_gpu, int ldb,
-        float BETA,
-        float *C_gpu, int ldc , int BatchSize = 32)
-{
-    // if (M == 64 && K == 64 && N == 64 && TB == false && BETA == 0.0f)
-    // {
-    //     dim3 grid64(DIV_UP(N, 64),DIV_UP(M, 64),BatchSize);
-    //     if (TA == true)
-    //     {
-    //         GPU_transpose(A_gpu, for_trans_mul , BatchSize, M, K);
-    //         gemm_64x64_128N_kernel<<<grid64, 256>>>(K,N,M,for_trans_mul,B_gpu,NULL,C_gpu);
-    //     }
-    //     else
-    //         gemm_64x64_128N_kernel<<<grid64, 256>>>(M,N,K,A_gpu,B_gpu,NULL,C_gpu);
-    // }
-    // else
-    // {
-        cublasHandle_t handle;
-        cublasCreate(&handle);
-        cublasStatus_t status = cublasSgemm(handle, (TB ? CUBLAS_OP_T : CUBLAS_OP_N), 
-            (TA ? CUBLAS_OP_T : CUBLAS_OP_N), N, M, K, &ALPHA, B_gpu, ldb, A_gpu, lda, &BETA, C_gpu, ldc);
-        if (status != CUBLAS_STATUS_SUCCESS) {
-            printf("cublasSgemm failed with error: ");
-            checkCublasStatus(status);
-        }
-        cublasDestroy(handle);
-    // }
 }
 
 void new_gemm_gpu(int TA, int TB, int M, int N, int K, float ALPHA, 
@@ -1599,53 +1233,19 @@ void new_gemm_gpu(int TA, int TB, int M, int N, int K, float ALPHA,
         BMM_Kernel_FT<<<gridDim, blockDim>>>(A_gpu, B_gpu, C_gpu, M, K, K, N, BatchSize);
     }
 }
-
-
 void GPU_Bmm(float* input_A,float* input_B,float* output,int M_A,int K_A,int K_B,int N_B,int BatchSize)
 {
-    //std::cout << "--------BMM" << std::endl;
-    // if (M_A == 64 && K_A == 64 && K_B == 64 && N_B == 64)
-    // {
-    //     dim3 grid64(DIV_UP(N_B, 64),DIV_UP(M_A, 64),BatchSize);
-    //     gemm_64x64_128N_kernel<<<grid64, 256>>>(M_A,N_B,K_A,input_A,input_B,NULL,output);
-    // }
-    // else
-    // {
     new_gemm_gpu(false,false,M_A,N_B,K_A,1.0f, input_A,K_A,input_B,N_B,0.0f,output,N_B,BatchSize);
-        // for(int b=0;b<BatchSize;b++)
-        // {
-        // check_error(cudaPeekAtLastError());
-        // //cudaDeviceSynchronize();
-        // gemm_gpu(false,false,M_A,N_B,K_A,1.0f, input_A+b*M_A*K_A,K_A,input_B+b*K_B*N_B,N_B,0.0f,output+b*M_A*N_B,N_B);
-        // check_error(cudaPeekAtLastError());
-        // }
-    // }
 }
-
-
 void Bmm_bp(float* input_A,float* input_B,float* delta_a,float* delta_b,float* delta_from,
 int M_A,int K_A,int K_B,int N_B,int BatchSize,bool genA = true,float add_b = 0.0f)
 {
-    //std::cout << "--------BMM" << std::endl;
-    //printf("--------BMM_BP: add_b=%f\n",add_b);
     new_gemm_gpu(true,false,K_A,N_B,M_A,1.0f, input_A,K_A,  delta_from, N_B, add_b, delta_b,N_B,BatchSize);
     if(genA)
     {
         new_gemm_gpu(false,true,M_A,K_A,N_B,1.0f,  delta_from, N_B,  input_B,N_B, 0.0f, delta_a,K_A,BatchSize);
     }
     check_error(cudaPeekAtLastError());
-    
-    // for(int b=0;b<BatchSize;b++)
-    // {
-    //     // check_error(cudaPeekAtLastError());
-    //     // //cudaDeviceSynchronize();
-    //     // gemm_gpu(true,false,K_A,N_B,M_A,1.0f,  input_A+b*M_A*K_A,K_A,  delta_from+b*M_A*N_B, N_B, add_b, delta_b+b*K_B*N_B,N_B);
-    //     if(genA)
-    //     {
-    //         gemm_gpu(false,true,M_A,K_A,N_B,1.0f,  delta_from+b*M_A*N_B, N_B,  input_B+b*K_B*N_B,N_B, 0.0f, delta_a+b*M_A*K_A,K_A);
-    //     }
-    //     check_error(cudaPeekAtLastError());
-    // }
 }
 
 __global__ void linear_Kernel(int M,int batchSize,int N,float* input, 
@@ -1700,13 +1300,8 @@ void Linear_GPU(int batchSize,int inFeatures, int outFeatures,float* cudaWeights
 dim3 blockDim(32,4);
 dim3 gridDim((outFeatures + 4 - 1) / 4,batchSize);//X:宽度 Y：高度
 linear_Kernel<<<gridDim,blockDim>>>(outFeatures,batchSize,inFeatures,input,cudaWeights,cudaBias,output);
-    // // 检查内核启动是否成功
-    // CUDA_CHECK(cudaGetLastError());
-    // // 同步设备并检查执行错误
-    // CUDA_CHECK(cudaDeviceSynchronize());
 }
 
-//from darknet:TODO:
 __global__ void  fast_mean_kernel(float *x, int batch, int filters, int spatial, float *mean)
 {
     const int threads = BLOCK;
@@ -1835,26 +1430,6 @@ void madd_relu(bool relu,float* input,float *output,float* weights, float *biase
 }
 
 //TRAIN
-__global__ void BR_Kernel(bool relu, int numPoints,float* weight,float* bias,float* running_mean,float* running_var,float* input,float* output,float esp = 1e-5)
-{
-    int tx = threadIdx.x;
-    int bx = blockIdx.x;
-    int idx = tx + bx * blockDim.x;
-    int index = idx;
-
-    if (idx < blockDim.x * gridDim.x)
-    {
-        float mean = running_mean[tx];
-        float var = running_var[tx];
-        for (int n = 0; n < numPoints; n++)
-        {
-            float res;
-            int iIdx = index * numPoints + n;
-            res = (input[iIdx] - mean) / sqrt(var + esp) * weight[tx] + bias[tx];
-            output[iIdx] = relu ? (res> 0 ? res : 0) : res;
-        }
-    }
-}
 __global__ void CONV_64x128N_kernel(int M,int batchSize,int N,int K,float* input, 
 float* convWeights, float* convBias,float* output,float esp = 1e-5 )
 {   
@@ -1999,27 +1574,12 @@ void BR_train(bool relu, int batchSize,int numPoints,int outChannels,
 float* weight,float* bias,float* mean,float* var,float* norm,
 float* running_mean,float* running_var,float* input,float* output,float esp = 1e-5)
 {
-#ifdef DEBUG
-    std::cout << "----fast_mean_gpu" << std::endl;
-    // printVector_GPU(input,batchSize*numPoints*outChannels);
-    // printVector_GPU(mean,outChannels);
-#endif
-check_error(cudaPeekAtLastError());
     fast_mean_gpu(input,batchSize,outChannels,numPoints,mean);
-#ifdef DEBUG
-    std::cout << "----fast_variance_gpu" << std::endl;
-#endif
     fast_variance_gpu(input,mean,batchSize,outChannels,numPoints,var);
-#ifdef DEBUG
-    std::cout << "----scal_gpu" << std::endl;
-#endif
     scal_gpu(outChannels, .99,running_mean,1);
     axpy_gpu(outChannels, .01, mean, 1, running_mean, 1);
     scal_gpu(outChannels, .99, running_var, 1);
     axpy_gpu(outChannels, .01, var, 1, running_var, 1);
-#ifdef DEBUG
-    std::cout << "----normalize_gpu" << std::endl;
-#endif
     normalize_gpu(input,norm,mean,var,batchSize,outChannels,numPoints);
     madd_relu(relu,norm,output,weight,bias,batchSize,outChannels,numPoints);
 }
@@ -2045,10 +1605,6 @@ float* cudaBnWeights,float* cudaBnBias,float* cudaBnRM,float* cudaBnRV,float* ou
     {
         CONV_64x128N_kernel<<<grid64, 256>>>(outChannels, batchSize, numPoints, inChannels, input, cudaConvWeights, cudaConvBias, convOutput);
     }
-    //define batchnorm and relu forward
-    //BR_Kernel<<<batchSize, outChannels>>>(relu,numPoints,cudaBnWeights,cudaBnBias,cudaBnRM,cudaBnRV,convOutput,output);
-    //normalize_gpu(convOutput,output,cudaBnRM,cudaBnRV,batchSize,outChannels,numPoints);
-    //madd_relu(relu,output,output,cudaBnWeights,cudaBnBias,batchSize,outChannels,numPoints);
 #ifdef DEBUG
     std::cout << "----START BR TRAIN" << std::endl;
 #endif 
@@ -2140,10 +1696,6 @@ float* output,float* fcOutput,bn_layer& bn,float dropout = 0.0f)
     dim3 gridDim((outFeatures + 4 - 1) / 4,batchSize);//X:宽度 Y：高度
     unsigned int seed = time(0); 
     FC_Kernel_gemv<<<gridDim,blockDim>>>(outFeatures,batchSize,inFeatures,input,cudaFcWeights,cudaFcBias,fcOutput,dropout,seed);
-    //BR_Kernel<<<batchSize, outFeatures>>>(true,1,cudaBnWeights,cudaBnBias,cudaBnRM,cudaBnRV,fcOutput,output);
-    //TODO:这里用上面的会更快
-    // normalize_gpu(fcOutput,output,cudaBnRM,cudaBnRV,batchSize,outFeatures,1);
-    // madd_relu(true,output,output,cudaBnWeights,cudaBnBias,batchSize,outFeatures,1);
     BR_train(true,batchSize,1,outFeatures,cudaBnWeights,cudaBnBias,
     bn.mean,bn.var,bn.norm,cudaBnRM,cudaBnRV,fcOutput,output);
 }
@@ -2177,12 +1729,9 @@ __global__ void backward_bias_conn_kernel(float *bias_updates, float *delta, int
     for(b = 0; b < batch; ++b){
         int i = b*n + index;
         sum += delta[i];
-        // if(index == 1)
-        // printf("batch is %d, delta is %f,sum is %f \n",b,delta[i],sum);
     }
     //bias_updates[index] += sum;//TODO:
     bias_updates[index] = sum;
-    //printf("delta is %f,index is %d \n",bias_updates[index],index);
 }
 __global__ void backward_bias_kernel(float *bias_updates, float *delta, int batch, int n, int size)
 {
@@ -2342,6 +1891,7 @@ void normalize_delta_gpu(float *x, float *mean, float *variance, float *mean_del
     normalize_delta_kernel<<<cuda_gridsize(N), BLOCK>>>(N, x, mean, variance, mean_delta, variance_delta, batch, filters, spatial, delta_from, delta_gen);
     check_error(cudaPeekAtLastError());
 }
+
 __global__ void relu_detla_kernel(float *output,float *delta,int N)
 {
     int i = (blockIdx.x + blockIdx.y*gridDim.x) * blockDim.x + threadIdx.x;
@@ -2352,7 +1902,6 @@ void relu_detla_gpu(float *output,float *delta,int N)
     relu_detla_kernel<<<cuda_gridsize(N), BLOCK>>>(output,delta,N);
     check_error(cudaPeekAtLastError());
 }
-
 __global__ void dp_detla_kernel(float *output,float *delta,int N,float dp = 0.4f)
 {
     int i = (blockIdx.x + blockIdx.y*gridDim.x) * blockDim.x + threadIdx.x;
@@ -2373,7 +1922,6 @@ float* weight_up, float* bias_up,float esp = 1e-5)
     if(relu){relu_detla_gpu(output,delta_from,batchSize*numPoints*numFeatures);}
     backward_bias_gpu(bias_up, delta_from, batchSize, numFeatures, numPoints);
     backward_scale_gpu(norm, delta_from, batchSize, numFeatures, numPoints, weight_up);
-    //printVector_GPU(weight_up,numFeatures);
 
     scale_bias_gpu(delta_from, weight, batchSize, numFeatures, numPoints);
 
@@ -2388,19 +1936,14 @@ float * delta_from, float * delta_gen, float* weight_up, float* bias_up,float dp
     int N = inFeatures;
     int K = outFeatures;
     if(dp != 0.0f){dp_detla_gpu(output,delta_from,batchSize*outFeatures,dp);}
-    //gemm_gpu(false, false, M, N, K, 1.0, delta_from,K , weight,N, 0.0, delta_gen,N);
     new_gemm_gpu(false, false, M, N, K, 1.0, delta_from,K , weight,N, 0.0, delta_gen,N,1);
     //WEIGHT UP: outf,batchsize * batchsize,inf
     M = outFeatures;
     N = inFeatures;
     K = batchSize;
-    //gemm_gpu(true, false, M, N, K, 1.0, delta_from,M,input,N,0.0,weight_up,N);
     new_gemm_gpu(true, false, M, N, K, 1.0, delta_from,M,input,N,0.0,weight_up,N,1);
     //BIAS UP: outf,batchsize
-    //printVector_GPU(delta_from,batchSize*outFeatures);
-    //printVector_GPU(bias_up,outFeatures);
     backward_bias_gpu(bias_up,delta_from,batchSize,outFeatures,1);
-    //printVector_GPU(bias_up,outFeatures);
 }
 void FBR_bp(int batchSize, int inFeatures, int outFeatures,
 wbBnP& fbp, wbBnP& fbp_up, float* input, float* reluOutput, float* fcOutput,
@@ -2412,9 +1955,6 @@ bn_layer& bn,bn_layer& bn_delta,float dp = 0.0f)
     bn.mean,bn.var,bn.norm,
     delta_from,delta_fc,bn_delta.mean,bn_delta.var,
     fbp_up.bn_weight, fbp_up.bn_bias);
-
-    //printVector_GPU(delta_fc,outFeatures*batchSize);
-
     F_bp(batchSize,inFeatures,outFeatures,input,fbp.weight,
     delta_fc, delta_gen, fbp_up.weight, fbp_up.bias, dp, fcOutput);
 }
@@ -2431,22 +1971,13 @@ bn_layer& bn1,bn_layer& bn1_delta,bn_layer& bn2,bn_layer& bn2_delta,float dp = 0
     F_bp(batchSize,OC2,OC3,relu2_output,fb2f.f3.weight,
     delta_from,delta_relu2,fb2f_up.f3.weight,fb2f_up.f3.bias);
 
-    // printVector_GPU(delta_relu2,OC2*batchSize);
-    // printVector_GPU(fb2f_up.f3.bias,OC3);
-
     FBR_bp(batchSize,OC1,OC2,
     fb2f.fb2, fb2f_up.fb2, relu1_output, relu2_output, fc2_output,
     delta_relu2, delta_fc2, delta_relu1, bn2, bn2_delta,dp);
 
-    // printVector_GPU(delta_relu1,OC1*batchSize);
-    //printVector_GPU(fb2f_up.fb2.bias,OC2);
-
     FBR_bp(batchSize,inics,OC1,
     fb2f.fb1, fb2f_up.fb1,  input, relu1_output, fc1_output,
     delta_relu1, delta_fc1, delta_gen, bn1, bn1_delta);
-
-    // printVector_GPU(delta_gen,inics*batchSize);
-    // printVector_GPU(fb2f_up.fb1.bias,OC1);
 }
 
 __global__ void Maxpooling_bp_Kernel(float* delta_from,float* delta_gen,float* idx,int numPoints)
@@ -2468,45 +1999,8 @@ void MaxPooling_bp(int ics, int batchSize, int numPoints, float* idx, float* del
     Maxpooling_bp_Kernel<<<gridDim, blockDim>>>(delta_from, delta_gen, idx, numPoints);
 }
 
-
-__global__ void backward_delta_weight_conv(const float *input, const float *weights,
-                                       const float *output_grad,
-                                       float *input_grad, float *weights_grad,
-                                        int in_channels,
-                                       int out_channels, int batch_size,
-                                       int num_points) {
-  int sample_idx = blockIdx.x;
-  int point_idx = threadIdx.x;
-  int in_c = blockIdx.y;
-
-  if (sample_idx < batch_size && in_c < in_channels && point_idx < num_points) {
-    float input_val = input[sample_idx * in_channels * num_points +
-                            in_c * num_points + point_idx];
-    float grad_input = 0.0f;
-
-    for (int out_c = 0; out_c < out_channels; ++out_c) {
-      float grad_output = output_grad[sample_idx * out_channels * num_points +
-                                      out_c * num_points + point_idx];
-      float weight = weights[out_c * in_channels + in_c];
-
-      grad_input += weight * grad_output;
-
-      atomicAdd(&weights_grad[out_c * in_channels + in_c],
-                input_val * grad_output);
-    }
-    input_grad[sample_idx * in_channels * num_points + in_c * num_points +
-               point_idx] = grad_input;
-  }
-}
-
 void conv_bp(int batchSize,int numPoints,int inChannels,int outChannels,
 float* input, float* weight, float * delta_from, float * delta_gen, float* weight_up, float* bias_up , float add_up=0.0f) {
-    // dim3 gridDim(batchSize, inChannels);
-    // dim3 blockDim(numPoints);
-    // backward_delta_weight_conv<<<gridDim, blockDim>>>(
-    //     input, weight, delta_from, delta_gen, weight_up, inChannels, outChannels, batchSize, numPoints);
-    // check_error(cudaPeekAtLastError());
-
     //delta gen
     int M = inChannels;
     int N = numPoints;
@@ -2561,9 +2055,6 @@ bn_layer& bn1_delta,bn_layer& bn2_delta,bn_layer& bn3_delta,float add_up=0.0f)
 __global__ void BP_UPDATE_Kernal_Momentum(float *N, float *delta, float *momentum, int width, float learning_rate, float momentum_factor) {
     int index = (blockIdx.x + blockIdx.y*gridDim.x) * blockDim.x + threadIdx.x;
     if (index < width) {
-        //printf("index: %d\n", index);
-        //printf("%f ", momentum[index]);
-        //momentum_factor = 0.0f;
         momentum[index] = momentum_factor * momentum[index] + (1-momentum_factor) * delta[index];
         N[index] = N[index] + learning_rate*momentum[index];
     }
@@ -2639,8 +2130,6 @@ __global__ void compute_frobenius_norm(
         delta[bf+i] = mulres / batch_size;
     }
 }
-
-// 封装的函数：配置和调用 kernel
 void launch_compute_frobenius_norm(
     const float* d_trans_mult_transT,  // 输入：GPU 上的 trans * trans^T 数据
     const float* d_transT,
@@ -2659,7 +2148,6 @@ void launch_compute_frobenius_norm(
         printf("CUDA Kernel launch error: %s\n", cudaGetErrorString(err));
     }
 }
-
 __global__ void mat_diff_loss_backward(
     const float* trans_feat, // (batch_size, num_features, num_features)
     float* grad_trans_feat,  // (batch_size, num_features, num_features)
@@ -2689,7 +2177,6 @@ __global__ void mat_diff_loss_backward(
         grad_trans_feat[idx] = 2 * diff * 0.001f * trans_feat[batch_idx * feature_size + row * num_features + col];;  // Scaled by 2
     }
 }
-
 void compute_mat_diff_grad(const float* trans_feat, float* grad, int numFeatures, int batchSize) {
     dim3 block(256);
     dim3 grid((batchSize * numFeatures * numFeatures + block.x - 1) / block.x);
@@ -3015,7 +2502,6 @@ void Train_GPU (int inChannels,int batchSize,int numPoints,
     LogSoftMax_GPU_train(label,net.softmax_input,
     net.softmax_output,delta.softmax_input,correct_table,10,batchSize);
 
-    //printVector_GPU(delta.softmax_input,10*batchSize);
 
 #ifdef BACKDEBUG
     std::cout << "BACKWARDING" << std::endl;
@@ -3047,7 +2533,6 @@ void Train_GPU (int inChannels,int batchSize,int numPoints,
         GPU_transpose(net.stnkd_out,net.stnkd_out_trans,batchSize,fstn_inChannel,fstn_inChannel);
         GPU_Bmm(net.stnkd_out,net.stnkd_out_trans,delta.stnkd_out_trans,64,64,64,64,batchSize);
         launch_compute_frobenius_norm(delta.stnkd_out_trans,net.stnkd_out_trans,delta.stnkd_out,batchSize,64);
-        //compute_mat_diff_grad(net.stnkd_out,delta.stnkd_out,fstn_inChannel,batchSize);
     }
     Bmm_bp(net.fstn_input_trans,net.stnkd_out,delta.fstn_input_trans,delta.stnkd_out,delta.fstn_bmm1_res,
     numPoints,fstn_inChannel,fstn_inChannel,fstn_inChannel,batchSize,true,mat_diff_addup);
@@ -3098,7 +2583,6 @@ void Train_GPU (int inChannels,int batchSize,int numPoints,
     net.bn2_stn_fbr2f,delta.bn2_stn_fbr2f
     );
     MaxPooling_bp(OC3, batchSize, maxnp, net.maxp_output_idx, delta.maxp_output, delta.CBR3_output);
-    //printVector_GPU(delta.CBR3_output,batchSize*OC3*numPoints);
     CBR3_bp(true,OC1,OC2,OC3, batchSize, numPoints,inChannels,
     dParams.stn3dp.cb3, upParams.stn3dp.cb3, net.input_trans, 
     net.CBR3_output,net.relu1_output_stn_cbr,net.relu2_output_stn_cbr,
@@ -3108,7 +2592,6 @@ void Train_GPU (int inChannels,int batchSize,int numPoints,
     net.bn1_stn_cbr,net.bn2_stn_cbr,net.bn3_stn_cbr,
     delta.bn1_stn_cbr,delta.bn2_stn_cbr,delta.bn3_stn_cbr
     );//这里的delta.input_trans, 没必要生成TODO:
-    //printVector_GPU(upParams.stn3dp.cb3.cb3.weight,OC3*OC2);
 
     FBR2F_update(512,256,10,encoderOC3,dParams.nonep,upParams.nonep,moParams.nonep);
     FB_update(encoderOC2,encoderOC3,dParams.featp.cb3, upParams.featp.cb3, moParams.featp.cb3);//CB
@@ -3118,325 +2601,6 @@ void Train_GPU (int inChannels,int batchSize,int numPoints,
     FB_update(encoderIC1,fstn_inChannel,dParams.featp.cb1, upParams.featp.cb1, moParams.featp.cb1);//CB
     FBR2F_update(FC_OC1,FC_OC2,FC_OC3,OC3,dParams.stn3dp.fb2f,upParams.stn3dp.fb2f,moParams.stn3dp.fb2f);
     CBR3_update(OC1,OC2,OC3,inChannels,dParams.stn3dp.cb3, upParams.stn3dp.cb3, moParams.stn3dp.cb3);
-}
-
-void Validate_GPU (int inChannels,int batchSize,int numPoints,
-            int* correct_table,int* label,float* input,
-            float* device_output,float* device_delta,
-            const std::vector<float>& C1={},
-            const std::vector<float>& C2={},
-            const std::vector<float>& C3={},
-            const std::vector<float>& C4={},
-            bool compare=false) {
-    // std::cout << "**********************START TRAINING************************" << std::endl;
-    int ch = 1024;
-    int ch_half = 512;
-    int ch_quarter = 256;
-
-    int bn = batchSize * numPoints;
-    int OC1 = 64;
-    int OC2 = 128;
-    int OC3 = ch;
-    int FC_OC1 = ch_half;
-    int FC_OC2 = ch_quarter;
-    int FC_OC3 = 9;
-    int encoderIC1 = inChannels;
-    int fstn_inChannel = 64;//encoderOC1
-    int fstn_OC1 = 64;
-    int fstn_OC2 = 128;
-    int fstn_OC3 = ch;
-    int fstn_FC_OC1 = ch_half;
-    int fstn_FC_OC2 = ch_quarter;
-    int fstn_FC_OC3 = fstn_inChannel * fstn_inChannel ;
-    int encoderOC2 = 128;
-    int encoderOC3 = ch;
-    int bnEOC3 = batchSize * numPoints * encoderOC3;
-    int transSize = batchSize * inChannels * inChannels;
-    int transFeatSize = batchSize * fstn_inChannel * fstn_inChannel;
-    //stn3d
-    int stn_1 = bn*inChannels;
-    int stn_2_conv = bn*OC1;
-    int stn_3_conv = bn*OC2;
-    int stn_4_conv = bn*OC3;
-    int stn_2 = bn*OC1;
-    int stn_3 = bn*OC2;
-    int stn_4 = bn*OC3;
-    if (USECONVMAX == 1) { stn_4 = stn_4 / 64 ;}
-    int stn_5 = batchSize*OC3;
-    int stn_5_idx = batchSize*OC3;
-    int stn_6_fc = batchSize*FC_OC1;
-    int stn_7_fc = batchSize*FC_OC2;
-    int stn_6 = batchSize*FC_OC1;
-    int stn_7 = batchSize*FC_OC2;
-    int stn_8 = transSize;
-    //part2
-    int part2_1= batchSize*numPoints*encoderIC1 ;
-    int part2_2= batchSize*encoderIC1*numPoints ;
-    int part2_3= batchSize*fstn_inChannel*numPoints ;
-    int part2_4= batchSize*fstn_inChannel*numPoints ;
-    //stnkd
-    int fstn_1_conv= bn * fstn_OC1 ;
-    int fstn_2_conv= bn * fstn_OC2 ;
-    int fstn_3_conv= bn * fstn_OC3 ;
-    int fstn_1= bn * fstn_OC1 ;
-    int fstn_2= bn * fstn_OC2 ;
-    int fstn_3= bn * fstn_OC3 ;
-    if (USECONVMAX == 1) { fstn_3 = fstn_3 / 64 ;}
-    int fstn_4= batchSize * fstn_OC3 ;
-    int fstn_4_idx= batchSize * fstn_OC3 ;
-    int fstn_5_fc= batchSize * fstn_FC_OC1 ;
-    int fstn_6_fc= batchSize * fstn_FC_OC2 ;
-    int fstn_5= batchSize * fstn_FC_OC1 ;
-    int fstn_6= batchSize * fstn_FC_OC2 ;
-    int fstn_7= transFeatSize ;
-    int fstn_8= transFeatSize ;
-    //part4
-    int part4_1= bn * fstn_inChannel ;
-    int part4_2= batchSize*numPoints*fstn_inChannel ;
-    int part4_3= batchSize*fstn_inChannel*numPoints ;
-    int part4_4= batchSize*encoderOC2*numPoints ;int part4_4_conv= batchSize*encoderOC2*numPoints ;
-    int part4_5= bnEOC3 ;int part4_5_conv= bnEOC3 ;
-    if (USECONVMAX == 1) { part4_5 = part4_5 / 64 ;}
-    int part4_6= batchSize * encoderOC3 ;
-    int part4_6_idx= batchSize * encoderOC3 ;
-    //classify
-    int cla_1= batchSize * ch_half ;int cla_1_fc= batchSize * ch_half ;
-    int cla_2= batchSize * ch_quarter ;int cla_2_fc= batchSize * ch_quarter ;
-    int cla_3= batchSize * 10;
-    int cla_4= batchSize * 10;
-
-    TNET net;
-    long long offset = 0;
-    //stn3d 
-    net.input_trans = device_output+offset;offset += stn_1;
-
-    net.conv1_output_stn_cbr = device_output+offset;offset += stn_2_conv;
-    offset = alloc_bn(net.bn1_stn_cbr,device_output,offset,OC1,bn);
-    net.relu1_output_stn_cbr = device_output+offset;offset += stn_2;
-
-    net.conv2_output_stn_cbr = device_output+offset;offset += stn_3_conv;
-    offset = alloc_bn(net.bn2_stn_cbr,device_output,offset,OC2,bn);
-    net.relu2_output_stn_cbr = device_output+offset;offset += stn_3;
-
-    net.conv3_output_stn_cbr = device_output+offset;offset += stn_4_conv;
-    offset = alloc_bn(net.bn3_stn_cbr,device_output,offset,OC3,bn);
-    net.CBR3_output = device_output+offset;offset += stn_4;
-    
-    net.maxp_output = device_output+offset;offset += stn_5;
-    net.maxp_output_idx = device_output+offset;offset += stn_5_idx;
-
-    net.fc1_output_stn_cbr = device_output+offset;offset += stn_6_fc;
-    offset = alloc_bn(net.bn1_stn_fbr2f,device_output,offset,FC_OC1,batchSize);
-    net.relu1_output_stn_fbr2f = device_output+offset;offset += stn_6;
-
-    net.fc2_output_stn_cbr = device_output+offset;offset += stn_7_fc;
-    offset = alloc_bn(net.bn2_stn_fbr2f,device_output,offset,FC_OC2,batchSize);
-    net.relu2_output_stn_fbr2f = device_output+offset;offset += stn_7;
-    net.stn3d_out = device_output+offset;offset += stn_8;
-
-    //part2
-    net.bmm1_res = device_output+offset;offset += part2_1;
-    net.bmm1_res_trans = device_output+offset;offset += part2_2;
-    net.fstn_input_conv = device_output+offset;offset += part2_3;
-    offset = alloc_bn(net.fstn_input_bn,device_output,offset,fstn_inChannel,bn);
-    net.fstn_input = device_output+offset;offset += part2_4;
-
-    //stnkd
-    net.conv1_output_fstn_cbr = device_output+offset;offset += fstn_1_conv;
-    offset = alloc_bn(net.bn1_fstn_cbr,device_output,offset,fstn_OC1,bn);
-    net.relu1_output_fstn_cbr = device_output+offset;offset += fstn_1;
-
-    net.conv2_output_fstn_cbr = device_output+offset;offset += fstn_2_conv;
-    offset = alloc_bn(net.bn2_fstn_cbr,device_output,offset,fstn_OC2,bn);
-    net.relu2_output_fstn_cbr = device_output+offset;offset += fstn_2;
-
-    net.conv3_output_fstn_cbr = device_output+offset;offset += fstn_3_conv;
-    offset = alloc_bn(net.bn3_fstn_cbr,device_output,offset,fstn_OC3,bn);
-    net.fstn_CBR3_output = device_output+offset;offset += fstn_3;
-
-    net.fstn_maxp_output = device_output+offset;offset += fstn_4;
-    net.fstn_maxp_output_idx = device_output+offset;offset += fstn_4_idx;
-
-    net.fc1_output_fstn_fbr2f = device_output+offset;offset += fstn_5_fc;
-    offset = alloc_bn(net.bn1_fstn_fbr2f,device_output,offset,fstn_FC_OC1,batchSize);
-    net.relu1_output_fstn_fbr2f = device_output+offset;offset += fstn_5;
-    
-    net.fc2_output_fstn_fbr2f = device_output+offset;offset += fstn_6_fc;
-    offset = alloc_bn(net.bn2_fstn_fbr2f,device_output,offset,fstn_FC_OC2,batchSize);
-    net.relu2_output_fstn_fbr2f = device_output+offset;offset += fstn_6;
-    net.stnkd_out = device_output+offset;offset += fstn_7;
-    net.stnkd_out_trans = device_output+offset;offset += fstn_8;
-
-    //part4
-    net.fstn_input_trans = device_output+offset;offset += part4_1;
-    net.fstn_bmm1_res = device_output+offset;offset += part4_2;
-    net.fstn_bmm1_res_trans = device_output+offset;offset += part4_3;
-
-    net.cbr2_output_conv = device_output+offset;offset += part4_4_conv;
-    offset = alloc_bn(net.cbr2_output_bn,device_output,offset,encoderOC2,bn);
-    net.cbr2_output = device_output+offset;offset += part4_4;
-
-    net.feat_bn3_conv = device_output+offset;offset += part4_5_conv;
-    offset = alloc_bn(net.feat_bn3_bn,device_output,offset,encoderOC3,bn);
-    net.feat_bn3 = device_output+offset;offset += part4_5;
-    
-    net.encoder_output = device_output+offset;offset += part4_6;
-    net.encoder_output_idx = device_output+offset;offset += part4_6_idx;
-    //classify
-    net.fc1_output_part5_fbr2f = device_output+offset;offset += cla_1_fc;
-    offset = alloc_bn(net.bn1_part5_fbr2f,device_output,offset,ch_half,batchSize);
-    net.relu1_output_part5_fbr2f = device_output+offset;offset += cla_1;
-    net.fc2_output_part5_fbr2f = device_output+offset;offset += cla_2_fc;
-    offset = alloc_bn(net.bn2_part5_fbr2f,device_output,offset,ch_quarter,batchSize);
-    net.relu2_output_part5_fbr2f = device_output+offset;offset += cla_2;
-    net.softmax_input = device_output+offset;offset += cla_3;
-    net.softmax_output = device_output+offset;offset+= cla_4;
-
-    TNET delta;
-    offset = 0;
-    //stn3d 
-    delta.input_trans = device_delta+offset;offset += stn_1;
-
-    delta.conv1_output_stn_cbr = device_delta+offset;offset += stn_2_conv;
-    offset = alloc_bn(delta.bn1_stn_cbr,device_delta,offset,OC1,bn);
-    delta.relu1_output_stn_cbr = device_delta+offset;offset += stn_2;
-
-    delta.conv2_output_stn_cbr = device_delta+offset;offset += stn_3_conv;
-    offset = alloc_bn(delta.bn2_stn_cbr,device_delta,offset,OC2,bn);
-    delta.relu2_output_stn_cbr = device_delta+offset;offset += stn_3;
-
-    delta.conv3_output_stn_cbr = device_delta+offset;offset += stn_4_conv;
-    offset = alloc_bn(delta.bn3_stn_cbr,device_delta,offset,OC3,bn);
-    delta.CBR3_output = device_delta+offset;offset += stn_4;
-    
-    delta.maxp_output = device_delta+offset;offset += stn_5;
-    delta.maxp_output_idx = device_delta+offset;offset += stn_5_idx;
-
-    delta.fc1_output_stn_cbr = device_delta+offset;offset += stn_6_fc;
-    offset = alloc_bn(delta.bn1_stn_fbr2f,device_delta,offset,FC_OC1,batchSize);
-    delta.relu1_output_stn_fbr2f = device_delta+offset;offset += stn_6;
-
-    delta.fc2_output_stn_cbr = device_delta+offset;offset += stn_7_fc;
-    offset = alloc_bn(delta.bn2_stn_fbr2f,device_delta,offset,FC_OC2,batchSize);
-    delta.relu2_output_stn_fbr2f = device_delta+offset;offset += stn_7;
-    delta.stn3d_out = device_delta+offset;offset += stn_8;
-
-    //part2
-    delta.bmm1_res = device_delta+offset;offset += part2_1;
-    delta.bmm1_res_trans = device_delta+offset;offset += part2_2;
-    delta.fstn_input_conv = device_delta+offset;offset += part2_3;
-    offset = alloc_bn(delta.fstn_input_bn,device_delta,offset,fstn_inChannel,bn);
-    delta.fstn_input = device_delta+offset;offset += part2_4;
-
-    //stnkd
-    delta.conv1_output_fstn_cbr = device_delta+offset;offset += fstn_1_conv;
-    offset = alloc_bn(delta.bn1_fstn_cbr,device_delta,offset,fstn_OC1,bn);
-    delta.relu1_output_fstn_cbr = device_delta+offset;offset += fstn_1;
-
-    delta.conv2_output_fstn_cbr = device_delta+offset;offset += fstn_2_conv;
-    offset = alloc_bn(delta.bn2_fstn_cbr,device_delta,offset,fstn_OC2,bn);
-    delta.relu2_output_fstn_cbr = device_delta+offset;offset += fstn_2;
-
-    delta.conv3_output_fstn_cbr = device_delta+offset;offset += fstn_3_conv;
-    offset = alloc_bn(delta.bn3_fstn_cbr,device_delta,offset,fstn_OC3,bn);
-    delta.fstn_CBR3_output = device_delta+offset;offset += fstn_3;
-
-    delta.fstn_maxp_output = device_delta+offset;offset += fstn_4;
-    delta.fstn_maxp_output_idx = device_delta+offset;offset += fstn_4_idx;
-
-    delta.fc1_output_fstn_fbr2f = device_delta+offset;offset += fstn_5_fc;
-    offset = alloc_bn(delta.bn1_fstn_fbr2f,device_delta,offset,fstn_FC_OC1,batchSize);
-    delta.relu1_output_fstn_fbr2f = device_delta+offset;offset += fstn_5;
-    
-    delta.fc2_output_fstn_fbr2f = device_delta+offset;offset += fstn_6_fc;
-    offset = alloc_bn(delta.bn2_fstn_fbr2f,device_delta,offset,fstn_FC_OC2,batchSize);
-    delta.relu2_output_fstn_fbr2f = device_delta+offset;offset += fstn_6;
-    delta.stnkd_out = device_delta+offset;offset += fstn_7;
-    delta.stnkd_out_trans = device_output+offset;offset += fstn_8;
-
-    //part4
-    delta.fstn_input_trans = device_delta+offset;offset += part4_1;
-    delta.fstn_bmm1_res = device_delta+offset;offset += part4_2;
-    delta.fstn_bmm1_res_trans = device_delta+offset;offset += part4_3;
-
-    delta.cbr2_output_conv = device_delta+offset;offset += part4_4_conv;
-    offset = alloc_bn(delta.cbr2_output_bn,device_delta,offset,encoderOC2,bn);
-    delta.cbr2_output = device_delta+offset;offset += part4_4;
-
-    delta.feat_bn3_conv = device_delta+offset;offset += part4_5_conv;
-    offset = alloc_bn(delta.feat_bn3_bn,device_delta,offset,encoderOC3,bn);
-    delta.feat_bn3 = device_delta+offset;offset += part4_5;
-    
-    delta.encoder_output = device_delta+offset;offset += part4_6;
-    delta.encoder_output_idx = device_delta+offset;offset += part4_6_idx;
-    //classify
-    delta.fc1_output_part5_fbr2f = device_delta+offset;offset += cla_1_fc;
-    offset = alloc_bn(delta.bn1_part5_fbr2f,device_delta,offset,ch_half,batchSize);
-    delta.relu1_output_part5_fbr2f = device_delta+offset;offset += cla_1;
-    delta.fc2_output_part5_fbr2f = device_delta+offset;offset += cla_2_fc;
-    offset = alloc_bn(delta.bn2_part5_fbr2f,device_delta,offset,ch_quarter,batchSize);
-    delta.relu2_output_part5_fbr2f = device_delta+offset;offset += cla_2;
-    delta.softmax_input = device_delta+offset;offset += cla_3;
-    delta.softmax_output = device_delta+offset;offset+= cla_4;
-
-#ifdef DEBUG
-    std::cout << "PART1:STN3d, forwaring" << std::endl;
-#endif
-    int maxnp = USECONVMAX? numPoints / 64 : numPoints;
-    GPU_transpose(input,net.input_trans,batchSize,numPoints,inChannels);
-    GPU_CBR_3_train(true,OC1,OC2,OC3, batchSize, numPoints,inChannels,dParams.stn3dp.cb3, net.input_trans, 
-    net.CBR3_output,net.relu1_output_stn_cbr,net.relu2_output_stn_cbr,
-    net.conv1_output_stn_cbr,net.conv2_output_stn_cbr,net.conv3_output_stn_cbr,
-    net.bn1_stn_cbr,net.bn2_stn_cbr,net.bn3_stn_cbr);   // conv-bn-relu * 3
-    GPU_MaxPooling_train(OC3, batchSize, maxnp,net.CBR3_output, net.maxp_output,net.maxp_output_idx); // Max pooling    
-    GPU_FBR_2_F_train(FC_OC1,FC_OC2,FC_OC3,batchSize,OC3,dParams.stn3dp.fb2f,net.maxp_output,
-    net.stn3d_out,net.relu1_output_stn_fbr2f,net.relu2_output_stn_fbr2f,
-    net.fc1_output_stn_cbr,net.fc2_output_stn_cbr,net.bn1_stn_fbr2f,net.bn2_stn_fbr2f);// fc-bn-relu * 2 + fc
-    matrix_add_I(net.stn3d_out,3,batchSize);
-
-#ifdef DEBUG
-    std::cout << "PART2:TRANS->BMM->TRANS->CBR, forwarding" << std::endl;
-#endif
-    GPU_Bmm(input,net.stn3d_out,net.bmm1_res,numPoints,inChannels,inChannels,encoderIC1,batchSize);
-    GPU_transpose(net.bmm1_res,net.bmm1_res_trans,batchSize,numPoints,encoderIC1);
-    GPU_CBR_train(true,batchSize,numPoints,encoderIC1,fstn_inChannel,dParams.featp.cb1,net.bmm1_res_trans,net.fstn_input,net.fstn_input_conv,net.fstn_input_bn);
-
-#ifdef DEBUG
-    std::cout << "PART3:STNkd, forwarding"<< std::endl;
-#endif
-    GPU_CBR_3_train(true,fstn_OC1,fstn_OC2,fstn_OC3, batchSize, numPoints,fstn_inChannel,dParams.stnkdp.cb3, net.fstn_input, 
-    net.fstn_CBR3_output,net.relu1_output_fstn_cbr,net.relu2_output_fstn_cbr,
-    net.conv1_output_fstn_cbr,net.conv2_output_fstn_cbr,net.conv3_output_fstn_cbr,
-    net.bn1_fstn_cbr,net.bn2_fstn_cbr,net.bn3_fstn_cbr);   // conv-bn-relu * 3
-    GPU_MaxPooling_train(fstn_OC3, batchSize, maxnp,net.fstn_CBR3_output, net.fstn_maxp_output,net.fstn_maxp_output_idx); // Max pooling
-    GPU_FBR_2_F_train(fstn_FC_OC1,fstn_FC_OC2,fstn_FC_OC3,batchSize,fstn_OC3,dParams.stnkdp.fb2f,net.fstn_maxp_output,
-    net.stnkd_out,net.relu1_output_fstn_fbr2f,net.relu2_output_fstn_fbr2f,
-    net.fc1_output_fstn_fbr2f,net.fc2_output_fstn_fbr2f,net.bn1_fstn_fbr2f,net.bn2_fstn_fbr2f);// fc-bn-relu * 2 + fc
-    matrix_add_I(net.stnkd_out,64,batchSize);
-
-#ifdef DEBUG
-    std::cout << "PART4:TRANS->BMM->TRANS->CBR->CBM, forwarding" << std::endl;
-#endif
-    GPU_transpose(net.fstn_input,net.fstn_input_trans,batchSize,fstn_inChannel,numPoints);
-    GPU_Bmm(net.fstn_input_trans,net.stnkd_out,net.fstn_bmm1_res,numPoints,fstn_inChannel,fstn_inChannel,fstn_inChannel,batchSize);
-    GPU_transpose(net.fstn_bmm1_res,net.fstn_bmm1_res_trans,batchSize,numPoints,fstn_inChannel);
-    GPU_CBR_train(true,batchSize,numPoints,fstn_inChannel,encoderOC2,
-    dParams.featp.cb2,net.fstn_bmm1_res_trans,net.cbr2_output,net.cbr2_output_conv,net.cbr2_output_bn);
-    GPU_CBR_train(false,batchSize,numPoints,encoderOC2,encoderOC3,
-    dParams.featp.cb3,net.cbr2_output, net.feat_bn3,net.feat_bn3_conv,net.feat_bn3_bn);
-    GPU_MaxPooling_train(encoderOC3, batchSize, maxnp,net.feat_bn3, net.encoder_output, net.encoder_output_idx); // Max pooling
-    
-#ifdef DEBUG
-    std::cout << "PART5:CLASSIFY, forwarding" << std::endl;
-#endif
-    float drop_rate = 0.0f;
-    if (DROPOUT == 1) drop_rate = 0.4f;
-    GPU_FBR_2_F_train(512,256,10,batchSize,encoderOC3,dParams.nonep,
-    net.encoder_output,net.softmax_input,
-    net.relu1_output_part5_fbr2f,net.relu2_output_part5_fbr2f,
-    net.fc1_output_part5_fbr2f,net.fc2_output_part5_fbr2f,net.bn1_part5_fbr2f,net.bn2_part5_fbr2f,0,drop_rate);// fc-bn-relu * 2 + fc
-    LogSoftMax_GPU_train(label,net.softmax_input,
-    net.softmax_output,delta.softmax_input,correct_table,10,batchSize);
 }
 
 int main(int argc, char *argv[]) {
@@ -3548,9 +2712,6 @@ int main(int argc, char *argv[]) {
         cpy_offset += bWidth;
         if (np > maxNp) {maxNp = np;}
     }
-
-    // 开始计时，使用chrono计时，不支持其它计时方式
-    // auto start = std::chrono::high_resolution_clock::now();
     
     // 分配输出内存：device端
     int* correct_table;
@@ -3564,12 +2725,12 @@ int main(int argc, char *argv[]) {
     cudaMalloc((void **)&device_delta, max_output_size * sizeof(float));
     cudaMemcpy(device_labels, list_of_labels.data(), all_num * sizeof(int), cudaMemcpyHostToDevice);
 
-    // 开始推理
-    //init_for_trans_mul(maxNp,ch,batchSize);
+    // 开始训练
+    auto start = std::chrono::high_resolution_clock::now();
     for (size_t e = 0; e < EPOCH; e++)
     {
-        printf("\nepoch%d: ", e);
-        auto start = std::chrono::high_resolution_clock::now();//STRAT
+        //printf("\nepoch%d: ", e);
+        //auto start = std::chrono::high_resolution_clock::now();//STRAT
         int correct_num =0;
         int inf_offset = 0;
         for (size_t i = 0; i < all_num; i+=batchSize) {
@@ -3585,7 +2746,6 @@ int main(int argc, char *argv[]) {
             //cudaMemset(device_delta, 0, cal_tnet_size(curB, np, ic) * sizeof(float));
             memsetDP(upParams);
         }
-        //memsetDP(moParams);
         // 计算准确率
         std::vector<int> result(all_num,0);
         cudaMemcpy(result.data(), correct_table, all_num * sizeof(int), cudaMemcpyDeviceToHost);
@@ -3594,50 +2754,12 @@ int main(int argc, char *argv[]) {
         }
 	    float correct_rate = (float)correct_num/all_num; 
         //END
-        cudaDeviceSynchronize();// 向主机端同步以等待所有异步调用的GPU kernel执行完毕，这句必须要有
-        auto end = std::chrono::high_resolution_clock::now();
-        std::chrono::duration<double> diff = end - start;
-        std::cout << std::fixed << std::setprecision(4) << diff.count() << ":" << std::setprecision(4) << correct_rate;
-    }
-    if(VALIDATE == 1)
-    {
-    for (size_t e = 0; e < 1; e++)
-    {
-        printf("\nepoch%d: ", e);
-        auto start = std::chrono::high_resolution_clock::now();//STRAT
-        int correct_num =0;
-        int inf_offset = 0;
-        for (size_t i = 0; i < all_num; i+=batchSize) {
-            size_t curB = std::min(batchSize, all_num - i);
-            size_t np = list_of_points[i].size() / ic;
-            for (int j = 0; j < curB; j++) {np = std::min(np, list_of_points[i + j].size() / ic);}
-            np = ALIGN_DOWN(np, GEMMBLKMAX);
-            if (use_sample == 1) np = npoint;
-            // Inference_GPU(ic, curB, np, device_all_points + inf_offset, device_labels + i , device_output);
-            Validate_GPU(ic, curB, np, correct_table + i, device_labels + i, 
-            device_all_points + inf_offset, device_output, device_delta);
-            inf_offset += curB * np * ic;
-            //cudaMemset(device_output, 0, cal_tnet_size(curB, np, ic) * sizeof(float));
-            //cudaMemset(device_delta, 0, cal_tnet_size(curB, np, ic) * sizeof(float));
-            //memsetDP(moParams);
-        }
-        //memsetDP(moParams);
-        // 计算准确率
-        std::vector<int> result(all_num,0);
-        cudaMemcpy(result.data(), correct_table, all_num * sizeof(int), cudaMemcpyDeviceToHost);
-        for (size_t i = 0; i < all_num; i++) {
-            correct_num += result[i];
-        }
-	    float correct_rate = (float)correct_num/all_num; 
-        //END
-        cudaDeviceSynchronize();// 向主机端同步以等待所有异步调用的GPU kernel执行完毕，这句必须要有
-        auto end = std::chrono::high_resolution_clock::now();
-        std::chrono::duration<double> diff = end - start;
-        std::cout << std::fixed << std::setprecision(4) << diff.count() << ":" << std::setprecision(4) << correct_rate;
-    }
+        // cudaDeviceSynchronize();// 向主机端同步以等待所有异步调用的GPU kernel执行完毕，这句必须要有
+        // auto end = std::chrono::high_resolution_clock::now();
+        // std::chrono::duration<double> diff = end - start;
+        // std::cout << std::fixed << std::setprecision(4) << diff.count() << ":" << std::setprecision(4) << correct_rate;
     }
 
-    //printVector_GPU(dParams.stn3dp.cb3.cb3.weight,8192);
     if(SAVE==1)
     {
         cudaP hParams;
@@ -3645,7 +2767,6 @@ int main(int argc, char *argv[]) {
         save_model_params_and_buffers_to_txt(params,dir);
         cudaDeviceSynchronize();
     }
-    //printVector(params["feat.stn.conv3.weight"]);
     // 释放内存
     freeDP(dParams);//权重
     freeDP(upParams, true);//更新权重
@@ -3655,12 +2776,11 @@ int main(int argc, char *argv[]) {
     cudaFree(device_output);//输出
     cudaFree(device_delta);//delta
     cudaFree(correct_table);//正确表
-    //cudaFree(for_trans_mul);
 
-	// cudaDeviceSynchronize();// 向主机端同步以等待所有异步调用的GPU kernel执行完毕，这句必须要有
-    // auto end = std::chrono::high_resolution_clock::now();
-    // std::chrono::duration<double> diff = end - start;
-    // std::cout << std::fixed << std::setprecision(4) << diff.count() << ":" << std::setprecision(4) << correct_rate;
+	cudaDeviceSynchronize();// 向主机端同步以等待所有异步调用的GPU kernel执行完毕，这句必须要有
+    auto end = std::chrono::high_resolution_clock::now();
+    std::chrono::duration<double> diff = end - start;
+    std::cout << std::fixed << std::setprecision(4) << diff.count() << std::endl;
     return 0;
 }
 

@@ -1509,42 +1509,24 @@ __global__ void BMM_Kernel_FT(float* input_A,float* input_B,float* output,int M_
 
 __global__ void conv_weightup_kernel(float* input_A,float* input_B,float* output,int M_A,int K_A,int K_B,int N_B,int BatchSize)
 {
-    //cudaError_t err = cudaGetLastError();
-    //printf("inside:\n");
     int tx = threadIdx.x;
     int ty = threadIdx.y;
     int bx = blockIdx.x;
     int by = blockIdx.y;
     //int bz = blockIdx.z;
-    //printf("by:%d\n",by);
+
     int col = tx + bx * blockDim.x;
     int row = ty + by * blockDim.y;
-    int batch = threadIdx.z;
-    //printf("batch:%d\n",batch);
-    extern __shared__ float local[];
+    int batch = blockIdx.z;
 
     if (row < M_A && col < N_B)
     {
         float tmp = 0.0f;
         for (int k =0;k<K_A;k++)
         {
-            //printf("tmp:%f\n",tmp);
             tmp += input_A[batch * M_A * K_A + row * K_A + k] * input_B[batch * K_B * N_B + col * K_B + k];
-            //printf("tmp:%f\n",tmp);
         }
-        local[batch*blockDim.x*blockDim.y+ty*blockDim.x+tx]=tmp;
-
-        __syncthreads();
-        if (batch == 0)
-        {
-        float res = 0.0f;
-        for (int i = 0;i<BatchSize;i++)
-        {
-            res+=local[i*blockDim.x*blockDim.y+ty*blockDim.x+tx];
-        }
-        // printf("res:%f\n",res);
-        output[row*N_B+col] = res;
-        }
+        atomicAdd(&output[row*N_B+col], tmp);
     }
 }
 
@@ -1584,7 +1566,7 @@ void new_gemm_gpu(int TA, int TB, int M, int N, int K, float ALPHA,
         float *A_gpu, int lda, 
         float *B_gpu, int ldb,
         float BETA,
-        float *C_gpu, int ldc , int BatchSize = 32, int mode = 0)
+        float *C_gpu, int ldc , int BatchSize, int mode = 0)
 {
     const int BLK_X = 32;
     const int BLK_Y = 32;
@@ -1596,13 +1578,10 @@ void new_gemm_gpu(int TA, int TB, int M, int N, int K, float ALPHA,
     }
     else if (mode == 2)
     {
-        dim3 bD2(8, 4, BatchSize);
-        dim3 gD2((N + 8 - 1) / 8, (M + 4 - 1) / 4);//X:宽度 Y：高度
-        int shared_mem_size = bD2.z * bD2.x * bD2.y * sizeof(float);
         // std::cout << "shared_mem_size: " << shared_mem_size << std::endl;
-        // std::cout << "M: " << M << " N: " << N << " K: " << K << " BatchSize: " << BatchSize << std::endl;
-        conv_weightup_kernel<<<gD2, bD2, shared_mem_size>>>(A_gpu, B_gpu, C_gpu, M, K, K, N, BatchSize);
-        // cudaError_t err = cudaGetLastError();
+        //std::cout << "M: " << M << " N: " << N << " K: " << K << " BatchSize: " << BatchSize << std::endl;
+        conv_weightup_kernel<<<gridDim, blockDim>>>(A_gpu, B_gpu, C_gpu, M, K, K, N, BatchSize);
+        cudaError_t err = cudaGetLastError();
         // if (err != cudaSuccess) {
         // printf("CUDA kernel launch error: %s\n", cudaGetErrorString(err));
         // }
@@ -1622,7 +1601,7 @@ void new_gemm_gpu(int TA, int TB, int M, int N, int K, float ALPHA,
 }
 
 
-void GPU_Bmm(float* input_A,float* input_B,float* output,int M_A,int K_A,int K_B,int N_B,int BatchSize = 1)
+void GPU_Bmm(float* input_A,float* input_B,float* output,int M_A,int K_A,int K_B,int N_B,int BatchSize)
 {
     //std::cout << "--------BMM" << std::endl;
     // if (M_A == 64 && K_A == 64 && K_B == 64 && N_B == 64)
@@ -1645,14 +1624,14 @@ void GPU_Bmm(float* input_A,float* input_B,float* output,int M_A,int K_A,int K_B
 
 
 void Bmm_bp(float* input_A,float* input_B,float* delta_a,float* delta_b,float* delta_from,
-int M_A,int K_A,int K_B,int N_B,int BatchSize = 1,bool genA = true,float add_b = 0.0f)
+int M_A,int K_A,int K_B,int N_B,int BatchSize,bool genA = true,float add_b = 0.0f)
 {
     //std::cout << "--------BMM" << std::endl;
     //printf("--------BMM_BP: add_b=%f\n",add_b);
-    new_gemm_gpu(true,false,K_A,N_B,M_A,1.0f, input_A,K_A,  delta_from, N_B, add_b, delta_b,N_B);
+    new_gemm_gpu(true,false,K_A,N_B,M_A,1.0f, input_A,K_A,  delta_from, N_B, add_b, delta_b,N_B,BatchSize);
     if(genA)
     {
-        new_gemm_gpu(false,true,M_A,K_A,N_B,1.0f,  delta_from, N_B,  input_B,N_B, 0.0f, delta_a,K_A);
+        new_gemm_gpu(false,true,M_A,K_A,N_B,1.0f,  delta_from, N_B,  input_B,N_B, 0.0f, delta_a,K_A,BatchSize);
     }
     check_error(cudaPeekAtLastError());
     
@@ -2490,7 +2469,7 @@ void MaxPooling_bp(int ics, int batchSize, int numPoints, float* idx, float* del
 }
 
 
-__global__ void conv1d_backward_kernel(const float *input, const float *weights,
+__global__ void backward_delta_weight_conv(const float *input, const float *weights,
                                        const float *output_grad,
                                        float *input_grad, float *weights_grad,
                                         int in_channels,
@@ -2514,7 +2493,6 @@ __global__ void conv1d_backward_kernel(const float *input, const float *weights,
 
       atomicAdd(&weights_grad[out_c * in_channels + in_c],
                 input_val * grad_output);
-    //   atomicAdd(&bias_grad[out_c], grad_output);
     }
     input_grad[sample_idx * in_channels * num_points + in_c * num_points +
                point_idx] = grad_input;
@@ -2523,39 +2501,23 @@ __global__ void conv1d_backward_kernel(const float *input, const float *weights,
 
 void conv_bp(int batchSize,int numPoints,int inChannels,int outChannels,
 float* input, float* weight, float * delta_from, float * delta_gen, float* weight_up, float* bias_up , float add_up=0.0f) {
-    dim3 grid(batchSize, inChannels);
-    dim3 block(1024);
-    conv1d_backward_kernel<<<grid, block>>>(
-        input, weight, delta_from, delta_gen, weight_up, inChannels, outChannels, batchSize, numPoints);
-    //printVector_GPU(weight_up,outChannels*inChannels);
-    check_error(cudaPeekAtLastError());
-    //CUDA_CHECK(cudaGetLastError());
-    //delta gen
-    // int M = inChannels;
-    // int N = numPoints;
-    // int K = outChannels;
-    // new_gemm_gpu(true, false, M, N, K, 1.0, weight, M, delta_from, N, add_up, delta_gen, N, 32, 1);
-    // // for (int i = 0; i < batchSize; i++)
-    // // {
-    // //     gemm_gpu(true, false, M, N, K, 1.0, weight, M, delta_from+i*K*N, N, add_up, delta_gen+i*M*N, N);
-    // // }
-    // //WEIGHT UP:
-    // M = outChannels;
-    // N = inChannels;
-    // K = numPoints;
-    // new_gemm_gpu(false, true, M, N, K, 1.0, delta_from,K, input,K, 0.0, weight_up,N,32,2);
+    // dim3 gridDim(batchSize, inChannels);
+    // dim3 blockDim(numPoints);
+    // backward_delta_weight_conv<<<gridDim, blockDim>>>(
+    //     input, weight, delta_from, delta_gen, weight_up, inChannels, outChannels, batchSize, numPoints);
     // check_error(cudaPeekAtLastError());
-    // for (int i = 0; i < batchSize; i++)
-    // {
-    //     if (i == 0)
-    //     {
-    //         gemm_gpu(false, true, M, N, K, 1.0, delta_from+i*K*M,K, input+i*K*N,K, 0.0, weight_up,N);
-    //     }
-    //     else
-    //     {
-    //         gemm_gpu(false, true, M, N, K, 1.0, delta_from+i*K*M,K, input+i*K*N,K, 1.0, weight_up,N);
-    //     }
-    // }
+
+    //delta gen
+    int M = inChannels;
+    int N = numPoints;
+    int K = outChannels;
+    new_gemm_gpu(true, false, M, N, K, 1.0, weight, M, delta_from, N, add_up, delta_gen, N, batchSize, 1);
+    //WEIGHT UP:
+    M = outChannels;
+    N = inChannels;
+    K = numPoints;
+    new_gemm_gpu(false, true, M, N, K, 1.0, delta_from,K, input,K, 0.0, weight_up,N,batchSize,2);
+    check_error(cudaPeekAtLastError());
     //BIAS UP: 
     backward_bias_gpu(bias_up,delta_from,batchSize,outChannels,numPoints);
 }
@@ -3481,7 +3443,7 @@ int main(int argc, char *argv[]) {
     
     // 定义模型参数
     int ic = 3;
-    size_t batchSize = 32;
+    size_t batchSize = 64;
     int use_sample = SAMPLE;
     int npoint = NPOINT;
 
@@ -3489,9 +3451,8 @@ int main(int argc, char *argv[]) {
     std::string dir = argv[1]; 
     if(PRETRAIN==1)
     {
-        read_params(dir);
+        read_params("");
     }
-    //read_params(dir);
 
     // 读输入：主机
     std::string file_path = "./data/train_point_clouds.h5";
@@ -3681,7 +3642,7 @@ int main(int argc, char *argv[]) {
     {
         cudaP hParams;
         copyDPtoHost(hParams,dParams,params);
-        save_model_params_and_buffers_to_txt(params,"./newparams/train/V60");
+        save_model_params_and_buffers_to_txt(params,dir);
         cudaDeviceSynchronize();
     }
     //printVector(params["feat.stn.conv3.weight"]);

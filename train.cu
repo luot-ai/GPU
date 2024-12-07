@@ -35,7 +35,7 @@
 #define CLASSNUM 10
 #define DARKNETBLK 512
 #define BLOCK 512
-#define EPOCH 30
+#define EPOCH 60
 #define PRETRAIN 0
 #define USEMATDIFF 0
 #define DROPOUT 0
@@ -43,6 +43,7 @@
 #define SAVE 1
 #define USELESSNUM 0
 #define LESSNUM 32
+#define RATE 0
 // #define DEBUG
 // #define BACKDEBUG
 // #define USECONVMAX (SAMPLE == 0 ? 1 : (NPOINT >= 128 ? 1 : 0))
@@ -2729,7 +2730,8 @@ int main(int argc, char *argv[]) {
     auto start = std::chrono::high_resolution_clock::now();
     for (size_t e = 0; e < EPOCH; e++)
     {
-        //printf("\nepoch%d: ", e);
+        if(RATE==1)
+            printf("\nepoch%d: ", e);
         //auto start = std::chrono::high_resolution_clock::now();//STRAT
         int correct_num =0;
         int inf_offset = 0;
@@ -2757,7 +2759,8 @@ int main(int argc, char *argv[]) {
         // cudaDeviceSynchronize();// 向主机端同步以等待所有异步调用的GPU kernel执行完毕，这句必须要有
         // auto end = std::chrono::high_resolution_clock::now();
         // std::chrono::duration<double> diff = end - start;
-        // std::cout << std::fixed << std::setprecision(4) << diff.count() << ":" << std::setprecision(4) << correct_rate;
+        if(RATE==1)
+            std::cout << std::fixed << std::setprecision(4) << correct_rate << std::endl;
     }
 
     if(SAVE==1)

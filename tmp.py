@@ -72,13 +72,9 @@ def grouped_matmul_kernel(
     # dim 0 is group_size, dim 1 is the values of <lda, ldb, ldc> of each gemm
     g_lds,
     # number of gemms
-    # gemms 数量
     group_size,
     # number of virtual SM
-    # 虚拟 SM 数量
     NUM_SM: tl.constexpr,
-    # tile sizes
-    # tile 大小
     BLOCK_SIZE_M: tl.constexpr,
     BLOCK_SIZE_N: tl.constexpr,
     BLOCK_SIZE_K: tl.constexpr,
@@ -87,7 +83,6 @@ def grouped_matmul_kernel(
     last_problem_end = 0
     for g in range(group_size):
         # get the gemm size of the current problem
-        # 得到当前问题的 gemm 大小
         gm = tl.load(group_gemm_sizes + g * 3)
         gn = tl.load(group_gemm_sizes + g * 3 + 1)
         gk = tl.load(group_gemm_sizes + g * 3 + 2)
@@ -95,10 +90,8 @@ def grouped_matmul_kernel(
         num_n_tiles = tl.cdiv(gn, BLOCK_SIZE_N)
         num_tiles = num_m_tiles * num_n_tiles
         # iterate through the tiles in the current gemm problem
-        # 迭代当前 GEMM 问题中的 tiles
         while (tile_idx >= last_problem_end and tile_idx < last_problem_end + num_tiles):
             # pick up a tile from the current gemm problem
-            # 从当前 GEMM 问题选择一个 title
             k = gk
             lda = tl.load(g_lds + g * 3)
             ldb = tl.load(g_lds + g * 3 + 1)
@@ -123,11 +116,9 @@ def grouped_matmul_kernel(
             accumulator = tl.zeros((BLOCK_SIZE_M, BLOCK_SIZE_N), dtype=tl.float32)
             for kk in range(0, tl.cdiv(k, BLOCK_SIZE_K)):
                 # hint to Triton compiler to do proper loop pipelining
-                # 提示 Triton 编译器进行适当的循环流水线处理
                 tl.multiple_of(a_ptrs, [16, 16])
                 tl.multiple_of(b_ptrs, [16, 16])
                 # assume full tile for now
-                # 现在假设完整的 tile
                 a = tl.load(a_ptrs)
                 b = tl.load(b_ptrs)
                 accumulator += tl.dot(a, b)
@@ -140,21 +131,21 @@ def grouped_matmul_kernel(
             offs_cn = tile_n_idx * BLOCK_SIZE_N + tl.arange(0, BLOCK_SIZE_N)
             c_ptrs = c_ptr + ldc * offs_cm[:, None] + offs_cn[None, :]
 
-
             # assumes full tile for now
-            # 现在假设完整的 tile
             tl.store(c_ptrs, c)
 
 
             # go to the next tile by advancing NUM_SM
             # 通过增加 NUM_SM 来进入下一个 tile
             tile_idx += NUM_SM
-
-
         # get ready to go to the next gemm problem
-        # 准备进入下一个 gemm 问题
         last_problem_end = last_problem_end + num_tiles
 
+
+
+def bmm(a, b, batch_size,M,K,N):
+    c = group_gemm_fn(a, b)
+    return c
 
 
 

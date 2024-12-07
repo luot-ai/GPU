@@ -36,13 +36,13 @@
 #define CLASSNUM 10
 #define DARKNETBLK 512
 #define BLOCK 512
-#define EPOCH 5
-#define PRETRAIN 1
+#define EPOCH 30
+#define PRETRAIN 0
 #define USEMATDIFF 0
 #define DROPOUT 0
 #define VALIDATE 0
-#define SAVE 0
-#define USELESSNUM 1
+#define SAVE 1
+#define USELESSNUM 0
 #define LESSNUM 32
 // #define DEBUG
 // #define BACKDEBUG
@@ -1461,6 +1461,29 @@ __global__ void BMM_Kernel_TF(float* input_A,float* input_B,float* output,int M_
     }
 }
 
+__global__ void conv_deltagen_kernel(float* input_A,float* input_B,float* output,int M_A,int K_A,int K_B,int N_B,int BatchSize,float beta)
+{
+    int tx = threadIdx.x;
+    int ty = threadIdx.y;
+    int bx = blockIdx.x;
+    int by = blockIdx.y;
+    //int bz = blockIdx.z;
+
+    int col = tx + bx * blockDim.x;
+    int row = ty + by * blockDim.y;
+    int batch = blockIdx.z;
+
+    if (row < M_A && col < N_B)
+    {
+        float tmp = 0.0f;
+        for (int k =0;k<K_A;k++)
+        {
+            tmp += input_A[k * M_A + row] * input_B[batch * K_B * N_B + k * N_B + col];
+        }
+        output[batch*M_A*N_B+row*N_B+col] = tmp + beta*output[batch*M_A*N_B+row*N_B+col];
+    }
+}
+
 __global__ void BMM_Kernel_FT(float* input_A,float* input_B,float* output,int M_A,int K_A,int K_B,int N_B,int BatchSize)
 {
     int tx = threadIdx.x;
@@ -1481,6 +1504,47 @@ __global__ void BMM_Kernel_FT(float* input_A,float* input_B,float* output,int M_
             tmp += input_A[batch * M_A * K_A + row * K_A + k] * input_B[batch * K_B * N_B + col * K_B + k];
         }
         output[batch*M_A*N_B+row*N_B+col] = tmp;
+    }
+}
+
+__global__ void conv_weightup_kernel(float* input_A,float* input_B,float* output,int M_A,int K_A,int K_B,int N_B,int BatchSize)
+{
+    //cudaError_t err = cudaGetLastError();
+    //printf("inside:\n");
+    int tx = threadIdx.x;
+    int ty = threadIdx.y;
+    int bx = blockIdx.x;
+    int by = blockIdx.y;
+    //int bz = blockIdx.z;
+    //printf("by:%d\n",by);
+    int col = tx + bx * blockDim.x;
+    int row = ty + by * blockDim.y;
+    int batch = threadIdx.z;
+    //printf("batch:%d\n",batch);
+    extern __shared__ float local[];
+
+    if (row < M_A && col < N_B)
+    {
+        float tmp = 0.0f;
+        for (int k =0;k<K_A;k++)
+        {
+            //printf("tmp:%f\n",tmp);
+            tmp += input_A[batch * M_A * K_A + row * K_A + k] * input_B[batch * K_B * N_B + col * K_B + k];
+            //printf("tmp:%f\n",tmp);
+        }
+        local[batch*blockDim.x*blockDim.y+ty*blockDim.x+tx]=tmp;
+
+        __syncthreads();
+        if (batch == 0)
+        {
+        float res = 0.0f;
+        for (int i = 0;i<BatchSize;i++)
+        {
+            res+=local[i*blockDim.x*blockDim.y+ty*blockDim.x+tx];
+        }
+        // printf("res:%f\n",res);
+        output[row*N_B+col] = res;
+        }
     }
 }
 
@@ -1520,21 +1584,38 @@ void new_gemm_gpu(int TA, int TB, int M, int N, int K, float ALPHA,
         float *A_gpu, int lda, 
         float *B_gpu, int ldb,
         float BETA,
-        float *C_gpu, int ldc , int BatchSize = 32)
+        float *C_gpu, int ldc , int BatchSize = 32, int mode = 0)
 {
     const int BLK_X = 32;
     const int BLK_Y = 32;
     dim3 blockDim(BLK_X, BLK_Y);
     dim3 gridDim((N + BLK_X - 1) / BLK_X, (M + BLK_Y - 1) / BLK_Y,BatchSize);//X:宽度 Y：高度
-    if (TA == false && TB == false && BETA == 0.0f)
+    if (mode == 1)
+    {
+        conv_deltagen_kernel<<<gridDim, blockDim>>>(A_gpu, B_gpu, C_gpu, M, K, K, N, BatchSize, BETA);
+    }
+    else if (mode == 2)
+    {
+        dim3 bD2(8, 4, BatchSize);
+        dim3 gD2((N + 8 - 1) / 8, (M + 4 - 1) / 4);//X:宽度 Y：高度
+        int shared_mem_size = bD2.z * bD2.x * bD2.y * sizeof(float);
+        // std::cout << "shared_mem_size: " << shared_mem_size << std::endl;
+        // std::cout << "M: " << M << " N: " << N << " K: " << K << " BatchSize: " << BatchSize << std::endl;
+        conv_weightup_kernel<<<gD2, bD2, shared_mem_size>>>(A_gpu, B_gpu, C_gpu, M, K, K, N, BatchSize);
+        // cudaError_t err = cudaGetLastError();
+        // if (err != cudaSuccess) {
+        // printf("CUDA kernel launch error: %s\n", cudaGetErrorString(err));
+        // }
+    }
+    else if (TA == false && TB == false && BETA == 0.0f)
     {
         BMM_Kernel_FF<<<gridDim, blockDim>>>(A_gpu, B_gpu, C_gpu, M, K, K, N, BatchSize);
     }
-    if (TA == true && TB == false && BETA == 0.0f)
+    else if (TA == true && TB == false && BETA == 0.0f)
     {
         BMM_Kernel_TF<<<gridDim, blockDim>>>(A_gpu, B_gpu, C_gpu, M, K, K, N, BatchSize);
     }
-    if (TA == false && TB == true && BETA == 0.0f)
+    else if (TA == false && TB == true && BETA == 0.0f)
     {
         BMM_Kernel_FT<<<gridDim, blockDim>>>(A_gpu, B_gpu, C_gpu, M, K, K, N, BatchSize);
     }
@@ -2408,31 +2489,73 @@ void MaxPooling_bp(int ics, int batchSize, int numPoints, float* idx, float* del
     Maxpooling_bp_Kernel<<<gridDim, blockDim>>>(delta_from, delta_gen, idx, numPoints);
 }
 
+
+__global__ void conv1d_backward_kernel(const float *input, const float *weights,
+                                       const float *output_grad,
+                                       float *input_grad, float *weights_grad,
+                                        int in_channels,
+                                       int out_channels, int batch_size,
+                                       int num_points) {
+  int sample_idx = blockIdx.x;
+  int point_idx = threadIdx.x;
+  int in_c = blockIdx.y;
+
+  if (sample_idx < batch_size && in_c < in_channels && point_idx < num_points) {
+    float input_val = input[sample_idx * in_channels * num_points +
+                            in_c * num_points + point_idx];
+    float grad_input = 0.0f;
+
+    for (int out_c = 0; out_c < out_channels; ++out_c) {
+      float grad_output = output_grad[sample_idx * out_channels * num_points +
+                                      out_c * num_points + point_idx];
+      float weight = weights[out_c * in_channels + in_c];
+
+      grad_input += weight * grad_output;
+
+      atomicAdd(&weights_grad[out_c * in_channels + in_c],
+                input_val * grad_output);
+    //   atomicAdd(&bias_grad[out_c], grad_output);
+    }
+    input_grad[sample_idx * in_channels * num_points + in_c * num_points +
+               point_idx] = grad_input;
+  }
+}
+
 void conv_bp(int batchSize,int numPoints,int inChannels,int outChannels,
 float* input, float* weight, float * delta_from, float * delta_gen, float* weight_up, float* bias_up , float add_up=0.0f) {
+    dim3 grid(batchSize, inChannels);
+    dim3 block(1024);
+    conv1d_backward_kernel<<<grid, block>>>(
+        input, weight, delta_from, delta_gen, weight_up, inChannels, outChannels, batchSize, numPoints);
+    //printVector_GPU(weight_up,outChannels*inChannels);
+    check_error(cudaPeekAtLastError());
+    //CUDA_CHECK(cudaGetLastError());
     //delta gen
-    int M = inChannels;
-    int N = numPoints;
-    int K = outChannels;
-    for (int i = 0; i < batchSize; i++)
-    {
-        gemm_gpu(true, false, M, N, K, 1.0, weight, M, delta_from+i*K*N, N, add_up, delta_gen+i*M*N, N);
-    }
-    //WEIGHT UP:
-    M = outChannels;
-    N = inChannels;
-    K = numPoints;
-    for (int i = 0; i < batchSize; i++)
-    {
-        if (i == 0)
-        {
-            gemm_gpu(false, true, M, N, K, 1.0, delta_from+i*K*M,K, input+i*K*N,K, 0.0, weight_up,N);
-        }
-        else
-        {
-            gemm_gpu(false, true, M, N, K, 1.0, delta_from+i*K*M,K, input+i*K*N,K, 1.0, weight_up,N);
-        }
-    }
+    // int M = inChannels;
+    // int N = numPoints;
+    // int K = outChannels;
+    // new_gemm_gpu(true, false, M, N, K, 1.0, weight, M, delta_from, N, add_up, delta_gen, N, 32, 1);
+    // // for (int i = 0; i < batchSize; i++)
+    // // {
+    // //     gemm_gpu(true, false, M, N, K, 1.0, weight, M, delta_from+i*K*N, N, add_up, delta_gen+i*M*N, N);
+    // // }
+    // //WEIGHT UP:
+    // M = outChannels;
+    // N = inChannels;
+    // K = numPoints;
+    // new_gemm_gpu(false, true, M, N, K, 1.0, delta_from,K, input,K, 0.0, weight_up,N,32,2);
+    // check_error(cudaPeekAtLastError());
+    // for (int i = 0; i < batchSize; i++)
+    // {
+    //     if (i == 0)
+    //     {
+    //         gemm_gpu(false, true, M, N, K, 1.0, delta_from+i*K*M,K, input+i*K*N,K, 0.0, weight_up,N);
+    //     }
+    //     else
+    //     {
+    //         gemm_gpu(false, true, M, N, K, 1.0, delta_from+i*K*M,K, input+i*K*N,K, 1.0, weight_up,N);
+    //     }
+    // }
     //BIAS UP: 
     backward_bias_gpu(bias_up,delta_from,batchSize,outChannels,numPoints);
 }
@@ -2990,7 +3113,7 @@ void Train_GPU (int inChannels,int batchSize,int numPoints,
     delta.bn1_fstn_cbr,delta.bn2_fstn_cbr,delta.bn3_fstn_cbr,1.0f
     );
 
-#ifdef DEBUG
+#ifdef BACKDEBUG
     std::cout << "PART2:backwarding" << std::endl;
 #endif
     CBR_bp(true,batchSize,numPoints,encoderIC1,fstn_inChannel,
@@ -3499,7 +3622,7 @@ int main(int argc, char *argv[]) {
             inf_offset += curB * np * ic;
             //cudaMemset(device_output, 0, cal_tnet_size(curB, np, ic) * sizeof(float));
             //cudaMemset(device_delta, 0, cal_tnet_size(curB, np, ic) * sizeof(float));
-            //memsetDP(moParams);
+            memsetDP(upParams);
         }
         //memsetDP(moParams);
         // 计算准确率
@@ -3558,7 +3681,7 @@ int main(int argc, char *argv[]) {
     {
         cudaP hParams;
         copyDPtoHost(hParams,dParams,params);
-        save_model_params_and_buffers_to_txt(params,"./newparams/train/V1");
+        save_model_params_and_buffers_to_txt(params,"./newparams/train/V60");
         cudaDeviceSynchronize();
     }
     //printVector(params["feat.stn.conv3.weight"]);

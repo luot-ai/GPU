@@ -2555,9 +2555,7 @@ int main(int argc, char *argv[]) {
     std::chrono::duration<double> diff = end - start;
 
     // 输出结果，请严格保持此输出格式，并把0.0001替换成实际的准确率，请不要输出除了此结果之外的任何内容！！！
-    //std::cout << std::fixed << std::setprecision(4) << diff.count();
-    std::cout << std::fixed << std::setprecision(4) << correct_rate;
-    //std::cout << std::fixed << std::setprecision(4) << diff.count() << ":" << std::setprecision(4) << correct_rate;
+    std::cout << std::fixed << std::setprecision(4) << diff.count() << ":" << std::setprecision(4) << correct_rate;
     return 0;
 }
 

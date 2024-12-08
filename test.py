@@ -129,7 +129,7 @@ def addI_kernel(x, I, res, channel:tl.constexpr):
     resM = xM + IM
     tl.store(res + bi_off, resM, mask= l_mask )
 @triton.jit
-def get_label_kernel(x, labels, batch_size: tl.constexpr, N: tl.constexpr):
+def get_label_kernel(x, labels, N: tl.constexpr):
     batch = tl.program_id(axis=0)
     offs =  tl.arange(0, 16)
     idx = x + batch * N + offs 
@@ -262,18 +262,18 @@ def maxPooling(x, batchsize, channel, N):
         BLOCK_SIZE=N,
     )
     return max
-def matrix_addI(x, batch_size, channel):
+def matrix_addI(x, batchsize, channel):
     res = torch.empty_like(x)
     I = torch.eye(channel, device='cuda', dtype=torch.float32)
-    grid = lambda META: (batch_size, )  
+    grid = lambda META: (batchsize, )  
     addI_kernel[grid](
         x, I, res, channel
     )
     return res
-def get_label(x, batch_size, N):
-    labels = torch.empty(batch_size, device='cuda', dtype=torch.float32)
-    grid = lambda META: (batch_size, )
-    get_label_kernel[grid](x, labels, batch_size, N)
+def get_label(x, batchsize, N):
+    labels = torch.empty(batchsize, device='cuda', dtype=torch.float32)
+    grid = lambda META: (batchsize, )
+    get_label_kernel[grid](x, labels, N)
     return labels.cpu()
 
 def CBR(x,prefix,idx,IC,OC,activation="relu"):

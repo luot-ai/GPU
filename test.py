@@ -74,55 +74,44 @@ def read_h5_file(dataPath):
             list_of_labels.append(hf[k].attrs["label"])
     return list_of_points, list_of_labels   
 
-@triton.autotune(
-    configs=[
-        triton.Config({
-            'BLOCK_SIZE_M': 128,
-            'BLOCK_SIZE_N': 128,
-            'BLOCK_SIZE_K': 32,
-            'GROUP_SIZE_M': 8,
-            'NUM_SM': 84,
-        }),
-        triton.Config({
-            'BLOCK_SIZE_M': 128,
-            'BLOCK_SIZE_N': 128,
-            'BLOCK_SIZE_K': 32,
-            'GROUP_SIZE_M': 8,
-            'NUM_SM': 128,
-        }),
-        triton.Config({
-            'BLOCK_SIZE_M': 64,
-            'BLOCK_SIZE_N': 64,
-            'BLOCK_SIZE_K': 32,
-            'GROUP_SIZE_M': 8,
-            'NUM_SM': 84,
-        }),
-        triton.Config({
-            'BLOCK_SIZE_M': 64,
-            'BLOCK_SIZE_N': 64,
-            'BLOCK_SIZE_K': 32,
-            'GROUP_SIZE_M': 8,
-            'NUM_SM': 128,
-        }),
-    ],
-    key=['group_size'],
-)
+
+def get_MM_params_settings():
+  return {
+    (128, 3, 64): (32, 32, 32, 8),
+    (128, 64, 128): (32, 32, 32, 8),
+    (128, 128, 1024): (64, 128, 32, 8),
+    (1, 1024, 512): (64, 128, 64, 8),
+    (1, 512, 256): (64, 64, 64, 8),
+    (1, 256, 9): (32, 32, 32, 4),
+    (1, 256, 10): (32, 32, 32, 4),
+    (1, 256, 4096): (128, 128, 64, 8),   
+    (128, 64, 64): (64, 32, 32, 8), 
+  } 
+  
+mm_autotune_dict = get_MM_params_settings()
+
+
+def get_BMM_params_settings():
+#  (BS_M, BS_N, BS_K, NUM_SM) = 
+# bmm_autotune_dict[(G1, M, K, N)]
+  return {
+    (1000, 128, 3, 3): (64, 64, 32, 300),  # 推测
+    (1000, 128, 64, 64): (64, 64, 32, 350),  # 推测
+  }
+
+bmm_autotune_dict = get_BMM_params_settings()  
+
+
+
+
 @triton.jit
 def grouped_matmul_kernel(
-    # device tensor of matrices pointers
-    # 设备张量矩阵指针
     group_a_ptrs,
     group_b_ptrs,
     group_c_ptrs,
-    # device tensor of gemm sizes. its shape is [group_size, 3]
-    # dim 0 is group_size, dim 1 is the values of <M, N, K> of each gemm
     group_gemm_sizes,
-    # device tensor of leading dimension sizes. its shape is [group_size, 3]
-    # dim 0 is group_size, dim 1 is the values of <lda, ldb, ldc> of each gemm
     g_lds,
-    # number of gemms
     group_size,
-    # number of virtual SM
     NUM_SM: tl.constexpr,
     BLOCK_SIZE_M: tl.constexpr,
     BLOCK_SIZE_N: tl.constexpr,
@@ -145,18 +134,15 @@ def grouped_matmul_kernel(
             lda = tl.load(g_lds + g * 3)
             ldb = tl.load(g_lds + g * 3 + 1)
             ldc = tl.load(g_lds + g * 3 + 2)
-            a_ptr = tl.load(group_a_ptrs + g).to(tl.pointer_type(tl.float16))
-            b_ptr = tl.load(group_b_ptrs + g).to(tl.pointer_type(tl.float16))
-            c_ptr = tl.load(group_c_ptrs + g).to(tl.pointer_type(tl.float16))
+            a_ptr = tl.load(group_a_ptrs + g).to(tl.pointer_type(tl.float32))
+            b_ptr = tl.load(group_b_ptrs + g).to(tl.pointer_type(tl.float32))
+            c_ptr = tl.load(group_c_ptrs + g).to(tl.pointer_type(tl.float32))
             # figure out tile coordinates
-            # 确定 title 坐标
             tile_idx_in_gemm = tile_idx - last_problem_end
             tile_m_idx = tile_idx_in_gemm // num_n_tiles
             tile_n_idx = tile_idx_in_gemm % num_n_tiles
 
-
             # do regular gemm here
-            # 此处进行常规 gemm
             offs_am = tile_m_idx * BLOCK_SIZE_M + tl.arange(0, BLOCK_SIZE_M)
             offs_bn = tile_n_idx * BLOCK_SIZE_N + tl.arange(0, BLOCK_SIZE_N)
             offs_k = tl.arange(0, BLOCK_SIZE_K)
@@ -173,21 +159,13 @@ def grouped_matmul_kernel(
                 accumulator += tl.dot(a, b)
                 a_ptrs += BLOCK_SIZE_K
                 b_ptrs += BLOCK_SIZE_K * ldb
-            c = accumulator.to(tl.float16)
-
-
+            c = accumulator#.to(tl.float16)
             offs_cm = tile_m_idx * BLOCK_SIZE_M + tl.arange(0, BLOCK_SIZE_M)
             offs_cn = tile_n_idx * BLOCK_SIZE_N + tl.arange(0, BLOCK_SIZE_N)
             c_ptrs = c_ptr + ldc * offs_cm[:, None] + offs_cn[None, :]
-
             # assumes full tile for now
             tl.store(c_ptrs, c)
-
-
-            # go to the next tile by advancing NUM_SM
-            # 通过增加 NUM_SM 来进入下一个 tile
             tile_idx += NUM_SM
-        # get ready to go to the next gemm problem
         last_problem_end = last_problem_end + num_tiles
 
 def group_gemm_fn(group_A, group_B):
@@ -195,27 +173,28 @@ def group_gemm_fn(group_A, group_B):
     assert len(group_A) == len(group_B)
     group_size = len(group_A)
 
-
     A_addrs = []
     B_addrs = []
     C_addrs = []
     g_sizes = []
     g_lds = []
-    group_C = []
+    M, N = group_A[0].shape[0], group_B[0].shape[1]
+    print(group_A[0].shape, group_B[0].shape)
+    group_C = torch.empty((group_size, M, N), device=device, dtype=group_A[0].dtype)
     for i in range(group_size):
         A = group_A[i]
         B = group_B[i]
         assert A.shape[1] == B.shape[0]
         M, K = A.shape
         K, N = B.shape
-        C = torch.empty((M, N), device=device, dtype=A.dtype)
-        group_C.append(C)
+        C = group_C[i]
+        #C = torch.empty((M, N), device=device, dtype=A.dtype)
+        #group_C.append(C)
         A_addrs.append(A.data_ptr())
         B_addrs.append(B.data_ptr())
         C_addrs.append(C.data_ptr())
         g_sizes += [M, N, K]
         g_lds += [A.stride(0), B.stride(0), C.stride(0)]
-
 
     # note these are device tensors
     # 注意这些是设备张量
@@ -225,8 +204,8 @@ def group_gemm_fn(group_A, group_B):
     d_g_sizes = torch.tensor(g_sizes, dtype=torch.int32, device=device)
     d_g_lds = torch.tensor(g_lds, dtype=torch.int32, device=device)
     # we use a fixed number of CTA, and it's auto-tunable
-    # 我们使用固定数量的 CTA（线程块），并且它是自动可调节的
     grid = lambda META: (META['NUM_SM'], )
+    (BS_M, BS_N, BS_K, NUM_SM) = bmm_autotune_dict[(group_size, M, K, N)]
     grouped_matmul_kernel[grid](
         d_a_ptrs,
         d_b_ptrs,
@@ -234,42 +213,80 @@ def group_gemm_fn(group_A, group_B):
         d_g_sizes,
         d_g_lds,
         group_size,
+    BLOCK_SIZE_M=BS_M,
+    BLOCK_SIZE_K=BS_K,
+    BLOCK_SIZE_N=BS_N,
+    NUM_SM=NUM_SM
     )
-
-
     return group_C
 
 
-def get_cuda_autotune_config():
-    return [
-        triton.Config({'BLOCK_SIZE_M': 128, 'BLOCK_SIZE_N': 256, 'BLOCK_SIZE_K': 64, 'GROUP_SIZE_M': 8}, num_stages=3,
-                      num_warps=8),
-        triton.Config({'BLOCK_SIZE_M': 64, 'BLOCK_SIZE_N': 256, 'BLOCK_SIZE_K': 32, 'GROUP_SIZE_M': 8}, num_stages=4,
-                      num_warps=4),
-        triton.Config({'BLOCK_SIZE_M': 128, 'BLOCK_SIZE_N': 128, 'BLOCK_SIZE_K': 32, 'GROUP_SIZE_M': 8}, num_stages=4,
-                      num_warps=4),
-        triton.Config({'BLOCK_SIZE_M': 128, 'BLOCK_SIZE_N': 64, 'BLOCK_SIZE_K': 32, 'GROUP_SIZE_M': 8}, num_stages=4,
-                      num_warps=4),
-        triton.Config({'BLOCK_SIZE_M': 64, 'BLOCK_SIZE_N': 128, 'BLOCK_SIZE_K': 32, 'GROUP_SIZE_M': 8}, num_stages=4,
-                      num_warps=4),
-        triton.Config({'BLOCK_SIZE_M': 128, 'BLOCK_SIZE_N': 32, 'BLOCK_SIZE_K': 32, 'GROUP_SIZE_M': 8}, num_stages=4,
-                      num_warps=4),
-        triton.Config({'BLOCK_SIZE_M': 64, 'BLOCK_SIZE_N': 32, 'BLOCK_SIZE_K': 32, 'GROUP_SIZE_M': 8}, num_stages=5,
-                      num_warps=2),
-        triton.Config({'BLOCK_SIZE_M': 32, 'BLOCK_SIZE_N': 64, 'BLOCK_SIZE_K': 32, 'GROUP_SIZE_M': 8}, num_stages=5,
-                      num_warps=2)
-    ]
-
+@triton.jit
+def batched_matrix_multiplication_kernel(
+  a_ptr, b_ptr, c_ptr, # a_ptr=[B, M, K] b_ptr=[B, K, N] c_ptr=[B, M, N]
+  G, M, K, N,
+  #META_DATA
+  NUM_SM: tl.constexpr,
+  BLOCK_SIZE_M: tl.constexpr,
+  BLOCK_SIZE_K: tl.constexpr,
+  BLOCK_SIZE_N: tl.constexpr
+):
+  tile_idx = tl.program_id(0)
+  last_problem_end = 0
+  num_m_tiles = tl.cdiv(M, BLOCK_SIZE_M)
+  num_n_tiles = tl.cdiv(N, BLOCK_SIZE_N)
+  num_tiles = num_m_tiles * num_n_tiles
+  for g in range(G):
+    a_ptr_now = a_ptr + g * M * K
+    b_ptr_now = b_ptr + g * K * N
+    c_ptr_now = c_ptr + g * M * N
+    while tile_idx >= last_problem_end and tile_idx < last_problem_end + num_tiles:
+      tile_idx_in_gemm = tile_idx - last_problem_end
+      tile_m_idx = tile_idx_in_gemm // num_n_tiles
+      tile_n_idx = tile_idx_in_gemm % num_n_tiles
+      offs_am = (tile_m_idx * BLOCK_SIZE_M + tl.arange(0, BLOCK_SIZE_M))%M
+      offs_bn = (tile_n_idx * BLOCK_SIZE_N + tl.arange(0, BLOCK_SIZE_N))%N
+      offs_k = tl.arange(0, BLOCK_SIZE_K)
+      a_ptrs_now = a_ptr_now + offs_am[:, None] * K + offs_k[None, :]
+      b_ptrs_now = b_ptr_now + offs_k[:, None] * N + offs_bn[None, :]
+      accumulator = tl.zeros((BLOCK_SIZE_M, BLOCK_SIZE_N), dtype=tl.float32)
+      for kk in range(0, tl.cdiv(K, BLOCK_SIZE_K)):
+        a=tl.load(a_ptrs_now, mask=(offs_k[None, :]<K-kk*BLOCK_SIZE_K), other=0.0)
+        b=tl.load(b_ptrs_now, mask=(offs_k[:, None]<K-kk*BLOCK_SIZE_K), other=0.0)
+        accumulator += tl.dot(a,b)
+        a_ptrs_now += BLOCK_SIZE_K
+        b_ptrs_now += BLOCK_SIZE_K * N
+      c=accumulator#.to(tl.float16)
+      offs_cm = tile_m_idx * BLOCK_SIZE_M + tl.arange(0, BLOCK_SIZE_M)
+      offs_cn = tile_n_idx * BLOCK_SIZE_N + tl.arange(0, BLOCK_SIZE_N)
+      c_ptrs_now = c_ptr_now + offs_cm[:, None] * N + offs_cn[None, :]
+      tl.store(c_ptrs_now, c, mask=(offs_cm[:, None] < M and offs_cn[None, :] < N))
+      tile_idx += NUM_SM
+    last_problem_end += num_tiles
+    
+def TritonBMM(a, b):
+  G1, M, K = a.shape
+  G2, K1, N = b.shape
+  print(a.shape, b.shape)
+  assert G1 == G2 and K == K1
+  grid=lambda META: (META['NUM_SM'],)
+  c=torch.empty((G1, M, N), device=a.device, dtype=torch.float32)
+  (BS_M, BS_N, BS_K, NUM_SM) = bmm_autotune_dict[(G1, M, K, N)]
+  batched_matrix_multiplication_kernel[grid](
+    a, b, c,
+    G1, M, K, N, 
+    BLOCK_SIZE_M=BS_M,
+    BLOCK_SIZE_K=BS_K,
+    BLOCK_SIZE_N=BS_N,
+    NUM_SM=NUM_SM
+  )
+  return c
 
 # ReLU 激活函数实现
 @triton.jit
 def relu(x):
     return tl.where(x >= 0, x, 0)
 
-@triton.autotune(
-    configs=get_cuda_autotune_config(),
-    key=['M', 'N', 'K'],
-)
 @triton.jit
 def gemm_br_kernel(
         a_ptr, b_ptr, c_ptr,
@@ -369,6 +386,7 @@ def gbr(a, b, batch_size, M, K, N,
         RELU: tl.constexpr):
     c = torch.empty((batch_size, M, N), device=a.device, dtype=a.dtype)
 
+    (BS_M, BS_N, BS_K, GS_M) = mm_autotune_dict[(M, K, N)]
     grid = lambda META: (triton.cdiv(M, META['BLOCK_SIZE_M']) * triton.cdiv(N, META['BLOCK_SIZE_N']), batch_size,)
     gemm_br_kernel[grid](
         a, b, c,
@@ -377,6 +395,10 @@ def gbr(a, b, batch_size, M, K, N,
         1,  K,
         N,  1,
         cvb, bnw, bnb, bnrm, bnrv, isCF=True, BN=BN, RELU=RELU, 
+        BLOCK_SIZE_M=BS_M,
+        BLOCK_SIZE_N=BS_N,
+        BLOCK_SIZE_K=BS_K,
+        GROUP_SIZE_M=GS_M,
     )
     return c
 
@@ -447,21 +469,14 @@ def get_label(x, batch_size, N):
     get_label_kernel[grid](x, labels, batch_size, N)
     return labels.cpu()
 
-# def bmm(a, b, batch_size,M,K,N):
-#     c = torch.empty((batch_size, M, N), device=a.device, dtype=a.dtype)
-#     grid = lambda META: (triton.cdiv(M, META['BLOCK_SIZE_M']) * triton.cdiv(N, META['BLOCK_SIZE_N']), batch_size,)
-#     gemm_br_kernel[grid](
-#         a, b, c,
-#         M, N, K,
-#         K,  1,
-#         N,  1,
-#         N,  1,
-#         c,None,None,None,None,isCF=False, BN=False,RELU=False,
-#     )
-#     return c
+
 def bmm(a, b, batch_size,M,K,N):
-    c = group_gemm_fn(a, b)
-    return c
+    print("Shape of a:", a.shape)
+    print("Shape of b:", b.shape)
+    b = b.reshape(batch_size, K, N) 
+    c = group_gemm_fn(a,b)
+    #c = TritonBMM(a,b)
+    return c 
 
 
 def CBR(x,prefix,idx,IC,OC,activation="relu"):
@@ -474,7 +489,7 @@ def CBR(x,prefix,idx,IC,OC,activation="relu"):
     relu = False
     if(activation == "relu"):
         relu = True
-    res = gbr(x,params[cvw],1000,numPoints,IC,OC,params[cvb], params[bnw], params[bnb], params[bnrm], params[bnrv],True,relu)
+    res = gbr(x,params[cvw],batchSize,numPoints,IC,OC,params[cvb], params[bnw], params[bnb], params[bnrm], params[bnrv],True,relu)
     return res
 
 def CBR3(x,prefix,IC,OC1,OC2,OC3):
@@ -491,7 +506,7 @@ def FBR(x,prefix,idx,IC,OC,off):
     bnb = f"{prefix}bn{bnidx}.bias"
     bnrm = f"{prefix}bn{bnidx}.running_mean"
     bnrv = f"{prefix}bn{bnidx}.running_var"
-    res = gbr(x,params[fcw],1000,1,IC,OC,params[fcb],params[bnw], params[bnb], params[bnrm], params[bnrv],True,True)
+    res = gbr(x,params[fcw],batchSize,1,IC,OC,params[fcb],params[bnw], params[bnb], params[bnrm], params[bnrv],True,True)
     return res
 
 def FBR_2_F(x,prefix,IC,OC1,OC2,OC3,off):
@@ -499,14 +514,14 @@ def FBR_2_F(x,prefix,IC,OC1,OC2,OC3,off):
     res2 = FBR(res1,prefix,2,OC1,OC2,off)
     fcw = f"{prefix}fc3.weight"
     fcb = f"{prefix}fc3.bias"
-    res3 = gbr(res2, params[fcw], 1000, 1, OC2, OC3, params[fcb], None,None,None,None,False,False)
+    res3 = gbr(res2, params[fcw], batchSize, 1, OC2, OC3, params[fcb], None,None,None,None,False,False)
     return res3
 
 def stnd(x,prefix,IC,OC1,OC2,OC3,f1,f2,f3):
     CBR3_out = CBR3(x,prefix,IC,OC1,OC2,OC3)
-    max_pool_out = maxPooling(CBR3_out, 1000, OC3, numPoints)
+    max_pool_out = maxPooling(CBR3_out, batchSize, OC3, numPoints)
     fbr2f_out = FBR_2_F(max_pool_out,prefix,OC3,f1,f2,f3,off=3)
-    feat = matrix_addI(fbr2f_out, 1000, IC)
+    feat = matrix_addI(fbr2f_out, batchSize, IC)
     return feat
 
 
@@ -535,14 +550,14 @@ def do_inference(list_of_points,list_of_labels): #请在本函数下使用triton
     return accuracy_rate
 
 if __name__ == '__main__':
-    # dir = "./newparams/uniform/chfull/np128/30epoch-1000batch"
-    # # 读取模型参数
-    # params = read_params(dir, device='cuda')
-
-    dir = os.path.dirname(__file__) # 保存模型参数文件(.txt)的文件夹路径
-
+    dir = "./newparams/uniform/chfull/np128/30epoch-1000batch"
     # 读取模型参数
-    params = read_params(dir,device='cuda')
+    params = read_params(dir, device='cuda')
+
+    # dir = os.path.dirname(__file__) # 保存模型参数文件(.txt)的文件夹路径
+
+    # # 读取模型参数
+    # params = read_params(dir,device='cuda')
 
     # 读取训练集数据
     dataPath = "./data/test_point_clouds.h5"

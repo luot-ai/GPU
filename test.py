@@ -111,6 +111,9 @@ def grouped_gemm_kernel(
     lda,ldb,ldc,
     str_ak,str_bn,str_cn,
     bias,isCF,
+    bnrm,bnrv,bnw,bnb,
+    BN: tl.constexpr,
+    RELU: tl.constexpr,
     NUM_SM: tl.constexpr,
     BLOCK_SIZE_M: tl.constexpr,
     BLOCK_SIZE_N: tl.constexpr,
@@ -136,6 +139,8 @@ def grouped_gemm_kernel(
             # do regular gemm here
             offs_am = tile_m_idx * BLOCK_SIZE_M + tl.arange(0, BLOCK_SIZE_M)
             offs_bn = tile_n_idx * BLOCK_SIZE_N + tl.arange(0, BLOCK_SIZE_N)
+            offs_bn_2D = offs_bn[None, :]
+            mask_bn = offs_bn_2D < N
             offs_k = tl.arange(0, BLOCK_SIZE_K)
             A_ptrs = A_ptr + offs_am[:, None] * lda + offs_k[None, :] * str_ak
             B_ptrs = B_ptr + offs_k[:, None] * ldb + offs_bn[None, :] * str_bn
@@ -147,9 +152,25 @@ def grouped_gemm_kernel(
                 A_ptrs += BLOCK_SIZE_K
                 B_ptrs += BLOCK_SIZE_K * ldb
             if isCF == True:
-                bias_vec = tl.load(bias + offs_bn[None, :], mask=offs_bn[None, :] < N)
+                bias_vec = tl.load(bias + offs_bn_2D, mask=mask_bn)
                 bias_matrix = tl.broadcast_to(bias_vec, (BLOCK_SIZE_M, BLOCK_SIZE_N))
                 accumulator += bias_matrix
+            if BN == True:
+                bnrm_line = tl.load(bnrm + offs_bn_2D, mask= mask_bn)
+                bnrm_matrix = tl.broadcast_to(bnrm_line, (BLOCK_SIZE_M, BLOCK_SIZE_N))
+                accumulator -= bnrm_matrix
+
+                bnrv_line = tl.load(bnrv + offs_bn_2D, mask=mask_bn)
+                bnw_line = tl.load(bnw + offs_bn_2D, mask=mask_bn)
+                gamma_line = bnw_line / tl.sqrt(bnrv_line + 1e-5)
+                gamma = tl.broadcast_to(gamma_line, (BLOCK_SIZE_M, BLOCK_SIZE_N))
+                accumulator *= gamma 
+
+                bnb_line = tl.load(bnb + offs_bn_2D, mask=mask_bn)
+                bnb_matrix = tl.broadcast_to(bnb_line, (BLOCK_SIZE_M, BLOCK_SIZE_N))
+                accumulator += bnb_matrix
+            if RELU == True:
+                accumulator = relu(accumulator)
             c = accumulator
             offs_cm = tile_m_idx * BLOCK_SIZE_M + tl.arange(0, BLOCK_SIZE_M)
             offs_cn = tile_n_idx * BLOCK_SIZE_N + tl.arange(0, BLOCK_SIZE_N)
@@ -171,6 +192,8 @@ def bmm(A, B, batchSize, M, N, K):
         A,B,C,M,N,K,batchSize,
         K,N,N,1,1,1,
         C,False,
+        C,C,C,C,
+        BN=False,RELU=False,
         BLOCK_SIZE_M = blk_m,
         BLOCK_SIZE_K = blk_k,
         BLOCK_SIZE_N = blk_n,
@@ -253,114 +276,6 @@ def br_kernel(
     c_mask = (offs_cm[:, None] < M) & (offs_cn[None, :] < N)
     tl.store(c_ptrs, accumulator, mask=c_mask)
 
-@triton.jit
-def gemm_br_kernel(
-        a_ptr, b_ptr, c_ptr,
-        M, N, K,
-        stride_am, stride_ak,
-        stride_bk, stride_bn,
-        stride_cm, stride_cn,
-        cvb,
-        bnw, 
-        bnb, 
-        bnrm, 
-        bnrv, 
-        isCF,
-        BLOCK_SIZE_M: tl.constexpr, BLOCK_SIZE_N: tl.constexpr, BLOCK_SIZE_K: tl.constexpr,
-        GROUP_SIZE_M: tl.constexpr,
-        BN: tl.constexpr,
-        RELU: tl.constexpr,
-):
-    pid = tl.program_id(axis=0)
-    batch = tl.program_id(axis=1)
-    num_pid_m = tl.cdiv(M, BLOCK_SIZE_M)
-    num_pid_n = tl.cdiv(N, BLOCK_SIZE_N)
-    num_pid_in_group = GROUP_SIZE_M * num_pid_n
-    group_id = pid // num_pid_in_group
-    first_pid_m = group_id * GROUP_SIZE_M
-    group_size_m = min(num_pid_m - first_pid_m, GROUP_SIZE_M)
-    pid_m = first_pid_m + (pid % group_size_m)
-    pid_n = (pid % num_pid_in_group) // group_size_m
-
-    blk_row = pid_m * BLOCK_SIZE_M
-    blk_col = pid_n * BLOCK_SIZE_N
-    arange_M = tl.arange(0, BLOCK_SIZE_M)
-    arange_N = tl.arange(0, BLOCK_SIZE_N)
-
-    offs_am = (blk_row + arange_M) % M
-    offs_bn = (blk_col + arange_N) % N
-    offs_bn_2D = offs_bn[None, :]
-    mask_bn = offs_bn_2D < N
-
-    offs_k = tl.arange(0, BLOCK_SIZE_K)
-    batch_off_b = tl.where(isCF,0,batch * K *N)  
-    a_ptrs = a_ptr + (offs_am[:, None] * stride_am + offs_k[None, :] * stride_ak) + batch * M * K
-    b_ptrs = b_ptr + (offs_k[:, None] * stride_bk + offs_bn_2D * stride_bn) + batch_off_b
-
-    accumulator = tl.zeros((BLOCK_SIZE_M, BLOCK_SIZE_N), dtype=tl.float32)
-    # 初始化 accumulator
-    if isCF == True :
-        cvb_ptrs = cvb + offs_bn_2D
-        cvb_line = tl.load(cvb_ptrs, mask=mask_bn)
-        cvb_matrix = tl.broadcast_to(cvb_line, (BLOCK_SIZE_M, BLOCK_SIZE_N))
-        accumulator += cvb_matrix
-
-    # 迭代计算C矩阵的一个块。
-    for k in range(0, tl.cdiv(K, BLOCK_SIZE_K)):
-        a = tl.load(a_ptrs, mask=offs_k[None, :] < K - k * BLOCK_SIZE_K, other=0.0)
-        b = tl.load(b_ptrs, mask=offs_k[:, None] < K - k * BLOCK_SIZE_K, other=0.0)
-        accumulator += tl.dot(a, b)
-        a_ptrs += BLOCK_SIZE_K * stride_ak
-        b_ptrs += BLOCK_SIZE_K * stride_bk
-
-    if BN == True:
-        bnrm_ptrs = bnrm + offs_bn_2D
-        bnrm_line = tl.load(bnrm_ptrs, mask= mask_bn)
-        bnrm_matrix = tl.broadcast_to(bnrm_line, (BLOCK_SIZE_M, BLOCK_SIZE_N))
-        accumulator -= bnrm_matrix
-
-        bnrv_ptrs = bnrv + offs_bn_2D
-        bnrv_line = tl.load(bnrv_ptrs, mask=mask_bn)
-        bnw_ptrs = bnw + offs_bn_2D
-        bnw_line = tl.load(bnw_ptrs, mask=mask_bn)
-        gamma_line = bnw_line / tl.sqrt(bnrv_line + 1e-5)
-        gamma = tl.broadcast_to(gamma_line, (BLOCK_SIZE_M, BLOCK_SIZE_N))
-        accumulator *= gamma 
-
-        bnb_ptrs = bnb + offs_bn_2D
-        bnb_line = tl.load(bnb_ptrs, mask=mask_bn)
-        bnb_matrix = tl.broadcast_to(bnb_line, (BLOCK_SIZE_M, BLOCK_SIZE_N))
-        accumulator += bnb_matrix
-
-    if RELU == True:
-        accumulator = relu(accumulator)
-
-    offs_cm = blk_row + arange_M
-    offs_cn = blk_col + arange_N
-    c_ptrs = c_ptr + stride_cm * offs_cm[:, None] + stride_cn * offs_cn[None, :] + batch * M * N
-    c_mask = (offs_cm[:, None] < M) & (offs_cn[None, :] < N)
-    tl.store(c_ptrs, accumulator, mask=c_mask)
-
-
-# def gbr(a, b, batch_size, M, K, N, 
-#         cvb, bnw, bnb, bnrm, bnrv, 
-#         BN: tl.constexpr, RELU: tl.constexpr):
-#     c = torch.empty((batch_size, M, N), device=a.device, dtype=a.dtype)
-#     (blk_m, blk_n, blk_k, grp_size) = get_cf_params()[(M,K,N)]
-#     grid = lambda META: (triton.cdiv(M, META['BLOCK_SIZE_M']) * triton.cdiv(N, META['BLOCK_SIZE_N']), batch_size,)
-#     gemm_br_kernel[grid](
-#         a, b, c,
-#         M, N, K,
-#         K,  1,
-#         1,  K,
-#         N,  1,
-#         cvb, bnw, bnb, bnrm, bnrv, isCF=True, BN=BN, RELU=RELU, 
-#         BLOCK_SIZE_M = blk_m,
-#         BLOCK_SIZE_N = blk_n,
-#         BLOCK_SIZE_K = blk_k,
-#         GROUP_SIZE_M = grp_size,
-#     )
-#     return c
 
 def gbr(a, b, batch_size, M, K, N, 
         cvb, bnw, bnb, bnrm, bnrv, 
@@ -378,25 +293,26 @@ def gbr(a, b, batch_size, M, K, N,
         a,b,g_res,M,N,K,batchSize,
         K,1,N,1,K,1,
         cvb,True,
+        bnrm,bnrv,bnw,bnb,
+        BN=BN,RELU=RELU,
         BLOCK_SIZE_M = blk_m,
         BLOCK_SIZE_K = blk_k,
         BLOCK_SIZE_N = blk_n,
         NUM_SM=NUM_SM
     )
 
-
-    (blk_m, blk_n, blk_k, grp_size) = get_cf_params()[(M,K,N)]
-    grid = lambda META: (triton.cdiv(M, META['BLOCK_SIZE_M']) * triton.cdiv(N, META['BLOCK_SIZE_N']), batch_size,)
-    br_kernel[grid](
-        g_res,
-        M, N, K,
-        N, 1,
-        bnw, bnb, bnrm, bnrv, isCF=True, BN=BN, RELU=RELU, 
-        BLOCK_SIZE_M = blk_m,
-        BLOCK_SIZE_N = blk_n,
-        BLOCK_SIZE_K = blk_k,
-        GROUP_SIZE_M = grp_size,
-    )
+    # (blk_m, blk_n, blk_k, grp_size) = get_cf_params()[(M,K,N)]
+    # grid = lambda META: (triton.cdiv(M, META['BLOCK_SIZE_M']) * triton.cdiv(N, META['BLOCK_SIZE_N']), batch_size,)
+    # br_kernel[grid](
+    #     g_res,
+    #     M, N, K,
+    #     N, 1,
+    #     bnw, bnb, bnrm, bnrv, isCF=True, BN=BN, RELU=RELU, 
+    #     BLOCK_SIZE_M = blk_m,
+    #     BLOCK_SIZE_N = blk_n,
+    #     BLOCK_SIZE_K = blk_k,
+    #     GROUP_SIZE_M = grp_size,
+    # )
     return g_res
 
 @triton.jit

@@ -94,13 +94,23 @@ def get_cf_params():
 def get_bmm_params():
     return {
         (1000, 128, 3, 3): (64, 64, 32, 300),  # 推测
-        (1000, 128, 64, 64): (64, 64, 32, 350), }
+        (1000, 128, 64, 64): (64, 64, 32, 350),
+        (1000, 128, 3, 64): (64, 64, 32, 350),
+        (1000, 128, 64, 128): (32, 32, 32, 350),
+        (1000, 128, 128, 1024): (64, 128, 32, 350),
+        (1000, 1, 1024, 512): (64, 128, 64, 350),
+        (1000, 1, 512, 256): (64, 64, 64, 350),
+        (1000, 1, 256, 9): (32, 32, 32, 350),
+        (1000, 1, 256, 10): (32, 32, 32, 350),
+        (1000, 1, 256, 4096): (128, 128, 64, 350),   
+        (1000, 128, 64, 64): (64, 32, 32, 350),}
 
 @triton.jit
 def grouped_gemm_kernel(
     A,B,C,M,N,K,batchSize,
     lda,ldb,ldc,
     str_ak,str_bn,str_cn,
+    bias,isCF,
     NUM_SM: tl.constexpr,
     BLOCK_SIZE_M: tl.constexpr,
     BLOCK_SIZE_N: tl.constexpr,
@@ -115,7 +125,9 @@ def grouped_gemm_kernel(
         # iterate through the tiles in the current gemm problem
         while (tile_idx >= last_problem_end and tile_idx < last_problem_end + num_tiles):
             A_ptr = A + batch * M * K
-            B_ptr = B + batch * K * N
+            B_ptr = B
+            if isCF == False:
+                B_ptr += batch * K * N
             C_ptr = C + batch * M * N
             # figure out tile coordinates
             tile_idx_in_gemm = tile_idx - last_problem_end
@@ -134,6 +146,10 @@ def grouped_gemm_kernel(
                 accumulator += tl.dot(a,b)
                 A_ptrs += BLOCK_SIZE_K
                 B_ptrs += BLOCK_SIZE_K * ldb
+            if isCF == True:
+                bias_vec = tl.load(bias + offs_bn[None, :], mask=offs_bn[None, :] < N)
+                bias_matrix = tl.broadcast_to(bias_vec, (BLOCK_SIZE_M, BLOCK_SIZE_N))
+                accumulator += bias_matrix
             c = accumulator
             offs_cm = tile_m_idx * BLOCK_SIZE_M + tl.arange(0, BLOCK_SIZE_M)
             offs_cn = tile_n_idx * BLOCK_SIZE_N + tl.arange(0, BLOCK_SIZE_N)
@@ -142,11 +158,11 @@ def grouped_gemm_kernel(
             tile_idx += NUM_SM
         last_problem_end += num_tiles
 
+
 def bmm(A, B, batchSize, M, N, K):
     device = torch.device('cuda')
     B = B.reshape(batchSize, K, N) 
     assert A[0].shape[1] == B[0].shape[0]
-
     C = torch.empty((batchSize, M, N), device=device, dtype=torch.float32)
     grid = lambda META: (META['NUM_SM'], )
     (blk_m, blk_n, blk_k, NUM_SM) = get_bmm_params()[(batchSize, M, K, N)]
@@ -154,6 +170,7 @@ def bmm(A, B, batchSize, M, N, K):
     grouped_gemm_kernel[grid](
         A,B,C,M,N,K,batchSize,
         K,N,N,1,1,1,
+        C,False,
         BLOCK_SIZE_M = blk_m,
         BLOCK_SIZE_K = blk_k,
         BLOCK_SIZE_N = blk_n,
@@ -165,6 +182,76 @@ def bmm(A, B, batchSize, M, N, K):
 @triton.jit
 def relu(x):
     return tl.where(x >= 0, x, 0)
+
+@triton.jit
+def br_kernel(
+        c_ptr,
+        M, N, K,
+        stride_cm, stride_cn,
+        bnw, 
+        bnb, 
+        bnrm, 
+        bnrv, 
+        isCF,
+        BLOCK_SIZE_M: tl.constexpr, BLOCK_SIZE_N: tl.constexpr, BLOCK_SIZE_K: tl.constexpr,
+        GROUP_SIZE_M: tl.constexpr,
+        BN: tl.constexpr,
+        RELU: tl.constexpr,
+):
+    pid = tl.program_id(axis=0)
+    batch = tl.program_id(axis=1)
+    num_pid_m = tl.cdiv(M, BLOCK_SIZE_M)
+    num_pid_n = tl.cdiv(N, BLOCK_SIZE_N)
+    num_pid_in_group = GROUP_SIZE_M * num_pid_n
+    group_id = pid // num_pid_in_group
+    first_pid_m = group_id * GROUP_SIZE_M
+    group_size_m = min(num_pid_m - first_pid_m, GROUP_SIZE_M)
+    pid_m = first_pid_m + (pid % group_size_m)
+    pid_n = (pid % num_pid_in_group) // group_size_m
+
+    blk_row = pid_m * BLOCK_SIZE_M
+    blk_col = pid_n * BLOCK_SIZE_N
+    arange_M = tl.arange(0, BLOCK_SIZE_M)
+    arange_N = tl.arange(0, BLOCK_SIZE_N)
+
+    offs_bn = (blk_col + arange_N) % N
+    offs_bn_2D = offs_bn[None, :]
+    mask_bn = offs_bn_2D < N
+
+    offs_cm = blk_row + arange_M
+    offs_cn = blk_col + arange_N
+    c_ptrs = c_ptr + stride_cm * offs_cm[:, None] + stride_cn * offs_cn[None, :] + batch * M * N
+    c_mask = (offs_cm[:, None] < M) & (offs_cn[None, :] < N)
+
+    accumulator = tl.load(c_ptrs,c_mask)#tl.zeros((BLOCK_SIZE_M, BLOCK_SIZE_N), dtype=tl.float32)
+
+    if BN == True:
+        bnrm_ptrs = bnrm + offs_bn_2D
+        bnrm_line = tl.load(bnrm_ptrs, mask= mask_bn)
+        bnrm_matrix = tl.broadcast_to(bnrm_line, (BLOCK_SIZE_M, BLOCK_SIZE_N))
+        accumulator -= bnrm_matrix
+
+        bnrv_ptrs = bnrv + offs_bn_2D
+        bnrv_line = tl.load(bnrv_ptrs, mask=mask_bn)
+        bnw_ptrs = bnw + offs_bn_2D
+        bnw_line = tl.load(bnw_ptrs, mask=mask_bn)
+        gamma_line = bnw_line / tl.sqrt(bnrv_line + 1e-5)
+        gamma = tl.broadcast_to(gamma_line, (BLOCK_SIZE_M, BLOCK_SIZE_N))
+        accumulator *= gamma 
+
+        bnb_ptrs = bnb + offs_bn_2D
+        bnb_line = tl.load(bnb_ptrs, mask=mask_bn)
+        bnb_matrix = tl.broadcast_to(bnb_line, (BLOCK_SIZE_M, BLOCK_SIZE_N))
+        accumulator += bnb_matrix
+
+    if RELU == True:
+        accumulator = relu(accumulator)
+
+    offs_cm = blk_row + arange_M
+    offs_cn = blk_col + arange_N
+    c_ptrs = c_ptr + stride_cm * offs_cm[:, None] + stride_cn * offs_cn[None, :] + batch * M * N
+    c_mask = (offs_cm[:, None] < M) & (offs_cn[None, :] < N)
+    tl.store(c_ptrs, accumulator, mask=c_mask)
 
 @triton.jit
 def gemm_br_kernel(
@@ -253,25 +340,64 @@ def gemm_br_kernel(
     c_ptrs = c_ptr + stride_cm * offs_cm[:, None] + stride_cn * offs_cn[None, :] + batch * M * N
     c_mask = (offs_cm[:, None] < M) & (offs_cn[None, :] < N)
     tl.store(c_ptrs, accumulator, mask=c_mask)
+
+
+# def gbr(a, b, batch_size, M, K, N, 
+#         cvb, bnw, bnb, bnrm, bnrv, 
+#         BN: tl.constexpr, RELU: tl.constexpr):
+#     c = torch.empty((batch_size, M, N), device=a.device, dtype=a.dtype)
+#     (blk_m, blk_n, blk_k, grp_size) = get_cf_params()[(M,K,N)]
+#     grid = lambda META: (triton.cdiv(M, META['BLOCK_SIZE_M']) * triton.cdiv(N, META['BLOCK_SIZE_N']), batch_size,)
+#     gemm_br_kernel[grid](
+#         a, b, c,
+#         M, N, K,
+#         K,  1,
+#         1,  K,
+#         N,  1,
+#         cvb, bnw, bnb, bnrm, bnrv, isCF=True, BN=BN, RELU=RELU, 
+#         BLOCK_SIZE_M = blk_m,
+#         BLOCK_SIZE_N = blk_n,
+#         BLOCK_SIZE_K = blk_k,
+#         GROUP_SIZE_M = grp_size,
+#     )
+#     return c
+
 def gbr(a, b, batch_size, M, K, N, 
         cvb, bnw, bnb, bnrm, bnrv, 
         BN: tl.constexpr, RELU: tl.constexpr):
-    c = torch.empty((batch_size, M, N), device=a.device, dtype=a.dtype)
+    device = torch.device('cuda')
+    b = b.reshape(K, N) 
+    if a.dim() == 2:
+        a = a.unsqueeze(1)
+    print(a.shape,b.shape)
+    assert a[0].shape[1] == b.shape[0]
+    g_res = torch.empty((batchSize, M, N), device=device, dtype=torch.float32)
+    grid = lambda META: (META['NUM_SM'], )
+    (blk_m, blk_n, blk_k, NUM_SM) = get_bmm_params()[(batchSize, M, K, N)]    
+    grouped_gemm_kernel[grid](
+        a,b,g_res,M,N,K,batchSize,
+        K,1,N,1,K,1,
+        cvb,True,
+        BLOCK_SIZE_M = blk_m,
+        BLOCK_SIZE_K = blk_k,
+        BLOCK_SIZE_N = blk_n,
+        NUM_SM=NUM_SM
+    )
+
+
     (blk_m, blk_n, blk_k, grp_size) = get_cf_params()[(M,K,N)]
     grid = lambda META: (triton.cdiv(M, META['BLOCK_SIZE_M']) * triton.cdiv(N, META['BLOCK_SIZE_N']), batch_size,)
-    gemm_br_kernel[grid](
-        a, b, c,
+    br_kernel[grid](
+        g_res,
         M, N, K,
-        K,  1,
-        1,  K,
-        N,  1,
-        cvb, bnw, bnb, bnrm, bnrv, isCF=True, BN=BN, RELU=RELU, 
+        N, 1,
+        bnw, bnb, bnrm, bnrv, isCF=True, BN=BN, RELU=RELU, 
         BLOCK_SIZE_M = blk_m,
         BLOCK_SIZE_N = blk_n,
         BLOCK_SIZE_K = blk_k,
         GROUP_SIZE_M = grp_size,
     )
-    return c
+    return g_res
 
 @triton.jit
 def maxPooling_kernel(

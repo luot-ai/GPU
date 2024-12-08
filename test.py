@@ -342,14 +342,8 @@ def do_inference(list_of_points,list_of_labels): #请在本函数下使用triton
     return accuracy_rate
 
 if __name__ == '__main__':
-    dir = "./newparams/uniform/chfull/np128/30epoch-1000batch"
-    # 读取模型参数
-    params = read_params(dir, device='cuda')
-
-    # dir = os.path.dirname(__file__) # 保存模型参数文件(.txt)的文件夹路径
-
-    # # 读取模型参数
-    # params = read_params(dir,device='cuda')
+    dir = os.path.dirname(__file__) # 保存模型参数文件(.txt)的文件夹路径
+    params = read_params(dir,device='cuda')
 
     # 读取训练集数据
     dataPath = "./data/test_point_clouds.h5"
